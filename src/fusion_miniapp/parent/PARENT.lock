@@ -1,0 +1,13 @@
+{
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb",
+  "note": "Copied unmodified. Never edit these files; configure them through module attributes and the injected context.",
+  "sha256": {
+    "evolutionary_loop.py": "50c44f6f5c4ae56583cfe0fcf57a2d62f94c24129dc894612607654510af7928",
+    "evo_agents.py": "85ddf79721247b9ff89f78c69dd4c9990f49d086492c6e3955bbf4bdd55b0f8f",
+    "config/config.yaml": "7edd2e936bf86ee5882d15e7427848cab41b8a00d316a534e7e7e3aaa2af0750",
+    "steps/final_inner_loop.py": "669ff671e4aba9ab03594be834dbead294d7028545ec91d468ac782dbbec33ea",
+    "steps/step0/profile_generator.py": "68e8f6d86e89ed47a419bce2145e6487a8ce10ef5238d8cdd0f051935fdcdeee"
+  }
+}

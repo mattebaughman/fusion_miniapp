@@ -1,0 +1,54 @@
+{
+ "args": [
+  "--agents",
+  "10000",
+  "--knobs",
+  "results/laptop_2026-11-19_final/fixture_hundredk.yaml",
+  "--sim",
+  "fixture"
+ ],
+ "exit": 0,
+ "outer_wall_s": 77.6,
+ "tree_rss_peak_mb_sampled_1s": 873.8,
+ "summary": {
+  "run_record": "results/laptop_2026-11-19_final/b_fixture_10k_langgraph/run_record.json",
+  "agent_layer": "langgraph",
+  "agents": 10000,
+  "agents_requested": 10000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 20000,
+  "llm_calls": 30000,
+  "tool_calls": 20000,
+  "proposals": {
+   "llm": 20000,
+   "mutation": 0
+  },
+  "suspensions": 20000,
+  "sim_tasks": 20000,
+  "memory_writes": 20000,
+  "reports": 10000,
+  "feasible_agents": 40,
+  "expected_per_agent": {
+   "llm_calls": 3,
+   "sims": 2
+  },
+  "touch_check": {
+   "evaluations": 20000,
+   "fixture": 20000,
+   "pass": 0,
+   "fail": {}
+  },
+  "devices": {
+   "none": 20000
+  },
+  "wall_seconds": 74.879,
+  "peak_rss_mb": {
+   "main_process": 873.6,
+   "agent_process_max": 806.0,
+   "agent_processes_sum": 806.0,
+   "sim_worker_max": null
+  }
+ }
+}

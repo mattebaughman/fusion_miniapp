@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fusion_miniapp"
+version = "0.1.0"
+description = "The IGNOS fusion inner loop, turned down, as a workflow mini-app with LangGraph/FlowGentic and Academy agent layers."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11,<3.14"
+dependencies = ["numpy", "scipy", "pyyaml", "netCDF4", "torch>=2.6"]
+
+[project.optional-dependencies]
+# The PDF's stack. FlowGentic 0.5.0 is not on PyPI yet; pinned to the main commit that carries it.
+# cloudpickle: RHAPSODY's process-pool backend needs it to run evaluate in worker processes.
+stack = [
+    "langgraph",
+    "langchain-openai",
+    "rhapsody-py>=0.7,<0.8",
+    "cloudpickle",
+    "flowgentic[langgraph,rhapsody,mcp] @ git+https://github.com/stride-research/flowgentic@f475907cd1cb324e04c0a7e33018f38e96204b74",
+]
+# Both agent layers submit simulations to RHAPSODY and may call an OpenAI-compatible endpoint.
+academy = ["academy-py>=1.0,<2", "rhapsody-py>=0.7,<0.8", "cloudpickle", "openai"]
+dev = ["pytest"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fusion_miniapp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# the knob presets, so that a non-editable install finds them (knobs.PRESETS_DIR)
+"knobs" = "fusion_miniapp/knobs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

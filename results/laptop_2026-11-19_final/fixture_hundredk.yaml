@@ -1,0 +1,22 @@
+# Ladder rungs (b) and (c): the hundredk preset (knobs/hundredk.yaml) with one change for this laptop:
+# 10,000 agents per agent process instead of 1,000. The preset's 100 processes at 100k agents
+# would need roughly 22 GB here (about 220 MB each, measured earlier), more than is free.
+# With --sim fixture the sim section only shapes the fixture's keys; nothing is simulated.
+
+sim:
+  nodes_per_plane: 2000
+  planes: 4
+  rollout_steps: 2
+  puffs: 3
+  fixed_point_cap: 15
+  model_width: 32
+  checkpoint_mb: 1
+
+agents:
+  count: 100000
+  per_process: 10000
+  sims_per_agent: 2
+  thinking_budget: 256
+
+workers:
+  sim_workers: 8

@@ -1,0 +1,67 @@
+# =============================================================================
+# Core-Edge Optimization Configuration
+# =============================================================================
+# Physical and operational constraints for the core-edge consistency algorithm.
+# See docs/README.md for the optimization flowchart.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ELM (Edge Localized Mode) Configuration
+# -----------------------------------------------------------------------------
+# elmcase: 'free' when there are no ELMs in BES and filterscopes (Dalpha).
+# -----------------------------------------------------------------------------
+elmcase: "free"
+# Spike detection: dalpha >= elm_dalpha_spike_threshold defines an ELM
+elm_dalpha_spike_threshold: 0.1
+# Discard case if sum(dalpha*dt) > elm_dalpha_dt_limit for any ELM
+elm_dalpha_dt_limit: 100.0
+# Time step (s) per sample for dalpha integral (1 timestep = 1 microsecond)
+elm_dt_per_sample: 1.0e-6
+# elm_energy_limit_fraction: 0.05   # for elmcase != 'free' (WMHD-based, not implemented)
+
+# -----------------------------------------------------------------------------
+# Wall Temperature Constraint (Step 6: MATEY SOLPS predictions)
+# -----------------------------------------------------------------------------
+# Maximum allowed Te and Ti at the simulation domain wall (eV).
+# Constraint: Te_wall <= limit, Ti_wall <= limit
+# -----------------------------------------------------------------------------
+max_temperature_at_walls_eV: 100
+# Optional: separate limits for Te and Ti (default: use max_temperature_at_walls_eV for both)
+# max_Te_at_walls_eV: 500
+# max_Ti_at_walls_eV: 500
+
+# -----------------------------------------------------------------------------
+# Optional: Paths (override via script args or environment)
+# -----------------------------------------------------------------------------
+# helios_ckpt_path: /path/to/HELIOS/checkpoints
+# matey_model_dir: /path/to/MATEY/model
+# matey_submit_script: /path/to/MATEY/examples/submit_Fusion_Seed_inference_perlmutter.sh
+target_core_temperature_keV: 3
+
+# -----------------------------------------------------------------------------
+# Optional: Step-0 Te profile shaping targets (parametric profile generator)
+# -----------------------------------------------------------------------------
+# Anchor Te at separatrix (psi_N ~= 1.0). 100 eV = 0.1 keV.
+target_separatrix_temperature_eV: 100
+# Optional pedestal cap in step 0 profile (disabled when omitted/commented).
+max_pedestal_temperature_eV: 700
+# Lower bound of pedestal region for cap (applied on psi in [pedestal_region_psi_min, 1.0]).
+pedestal_region_psi_min: 0.91
+# Smooth transition width (psi units) for pedestal cap onset.
+pedestal_cap_transition_psi: 0.05
+# Smooth correction width near separatrix used to enforce target_separatrix_temperature_eV.
+separatrix_anchor_width_psi: 0.015
+
+# Optional direct overrides to profile_generator `three_region` parameters.
+# These are merged on top of sampled defaults and can be used to force a red-like
+# core roll-off instead of a flat core.
+profile_params:
+  # Core-shape controls (most important for matching the experimental-like red curve)
+  core_linear_frac_Te: 0.40   # 0=power core, 1=linear core; higher gives earlier core fall-off
+  a3: 0.70
+  a4: 1.15
+  # Pedestal/edge shaping
+  Delta: 0.09
+  bcore_Te: 0.30
+  a1_Te: 0.35
+  a2_Te: 1.60

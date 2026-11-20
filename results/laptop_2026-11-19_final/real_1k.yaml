@@ -1,0 +1,4 @@
+# Ladder rung (a): the smoke preset with one simulation per agent. Merged over knobs/smoke.yaml,
+# so the simulation knobs are smoke's (device auto = cpu on this laptop; 2 simulation workers).
+agents:
+  sims_per_agent: 1

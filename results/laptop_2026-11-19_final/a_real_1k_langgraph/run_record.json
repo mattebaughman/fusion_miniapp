@@ -1,0 +1,200 @@
+{
+ "agent_layer": "langgraph",
+ "sim": "real",
+ "llm": "stub",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 200,
+   "planes": 2,
+   "rollout_steps": 2,
+   "puffs": 2,
+   "fixed_point_cap": 3,
+   "model_width": 8,
+   "checkpoint_mb": 0,
+   "device": "auto",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": null
+  },
+  "agents": {
+   "count": 1000,
+   "per_process": 1000,
+   "sims_per_agent": 1,
+   "cost_scale": 1.0,
+   "thinking_budget": 64,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "stub",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "stub"
+  },
+  "workers": {
+   "sim_workers": 2
+  }
+ },
+ "counts": {
+  "agents": 1000,
+  "agents_requested": 1000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 1000,
+  "llm_calls": 2000,
+  "tool_calls": 2000,
+  "proposals": {
+   "llm": 1000,
+   "mutation": 0
+  },
+  "suspensions": 1000,
+  "sim_tasks": 1000,
+  "memory_writes": 1000,
+  "reports": 1000,
+  "feasible_agents": 0,
+  "expected_per_agent": {
+   "llm_calls": 2,
+   "sims": 1
+  }
+ },
+ "llm_service": {
+  "calls": 2000,
+  "budgets": {
+   "64": 2000
+  }
+ },
+ "lookups": {
+  "constraints": 1000,
+  "abstract": 1000
+ },
+ "touch_check": {
+  "evaluations": 1000,
+  "fixture": 0,
+  "pass": 1000,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 11000,
+  "checkpoint_load": 2002,
+  "context_build": 2,
+  "device_to_host": 13000,
+  "geometry_read": 4,
+  "graph_forward": 3000,
+  "handoff_file_read": 2000,
+  "handoff_file_rewrite": 1000,
+  "handoff_file_write": 1000,
+  "handoff_memory": 3000,
+  "host_to_device": 22000,
+  "library_import": 8,
+  "mesh_read": 4002,
+  "model_to_device": 2002,
+  "result_return": 1000,
+  "small_forward": 6000
+ },
+ "devices": {
+  "cpu": 1000
+ },
+ "wall_seconds": 24.005,
+ "results_sha256": "4f54da682680f4df45d354e495cf673647805e3546b19a63c34af5aac99e4da6",
+ "peak_rss_mb": {
+  "main_process": 238.4,
+  "agent_process_max": 233.6,
+  "agent_processes_sum": 233.6,
+  "sim_worker_max": 312.6
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.3",
+  "torch": "2.15.0",
+  "langgraph": "1.2.22",
+  "langchain-core": "1.8.3",
+  "flowgentic": "0.5.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.55.1",
+  "dragonhpc": null,
+  "flowgentic_commit": "f475907cd1cb324e04c0a7e33018f38e96204b74"
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.2-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "2.15.0",
+  "cuda_available": false,
+  "cuda_version": null,
+  "hip_version": null,
+  "mps_available": true,
+  "gpus": [],
+  "visible_devices": {
+   "CUDA_VISIBLE_DEVICES": null,
+   "ROCR_VISIBLE_DEVICES": null,
+   "HIP_VISIBLE_DEVICES": null
+  }
+ },
+ "frameworks_imported": {
+  "academy": false,
+  "langgraph": true,
+  "flowgentic": true,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "process",
+ "sim_workers_per_process": 2,
+ "sim_workers_total": 2,
+ "layer_stats": [
+  {
+   "layer": "langgraph",
+   "suspensions": 1000,
+   "outcomes": {
+    "done": 1000
+   },
+   "host_wall_s": 22.41,
+   "share_by_category": {
+    "working": 0.1019,
+    "waiting": 0.8887,
+    "model_request": 0.0094
+   },
+   "loop_lag": {
+    "samples": 210,
+    "max_ms": 601.9,
+    "time_weighted_p99_ms": 378.5,
+    "share_over_100ms": 0.0287
+   },
+   "tasks": {
+    "submitted": 1000,
+    "repeats": 1000,
+    "failed": 0,
+    "refused": 0,
+    "retained": 1000
+   },
+   "checkpoints": {
+    "checkpoints_put": 2000,
+    "writes_put": 1000,
+    "checkpoints_read": 1000,
+    "checkpoint_bytes_mean": 2616
+   },
+   "fleet": {
+    "replicas": 1,
+    "calls": 2000,
+    "in_flight_max": 512,
+    "errors": {}
+   }
+  }
+ ]
+}

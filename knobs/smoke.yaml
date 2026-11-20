@@ -1,0 +1,39 @@
+# smoke: the complete base preset. Every other knob file is merged over this one.
+# One evaluate is a fraction of a second on a laptop CPU once the worker is warm.
+# All physics output is synthetic (random-weight stand-in models); no value here is calibrated.
+
+sim:                          # the turn-down; "real" = the IGNOS loop at FusionFM/Demo 9768bcb
+  nodes_per_plane: 200        # real 90445
+  planes: 2                   # real 16
+  rollout_steps: 2            # real 2 (graph forwards per evaluation = 1 + rollout_steps)
+  puffs: 2                    # real 6 (independent fixed points)
+  fixed_point_cap: 3          # real 300; every fixed point runs to the cap: puffs x cap small forwards
+  model_width: 8              # hidden width of both stand-in models (even)
+  checkpoint_mb: 0            # padding added to the graph checkpoint, loaded twice per evaluation
+  device: auto                # auto = cuda if torch.cuda.is_available() else cpu; or cpu, cuda, mps
+  cold_start_fraction: 0.0    # share of evaluations run in a fresh worker process (a new one every round(1/f))
+  keep_artifacts: false       # keep each evaluation's work directory (11 files at rollout_steps 2)
+  work_root: null             # parent of work directories; null = system temp; $VARS are expanded
+
+agents:
+  count: 4
+  per_process: 1000           # agents per agent process; each process also starts its own simulation workers
+  sims_per_agent: 2           # S
+  cost_scale: 1.0             # multiplier on nodes_per_plane and fixed_point_cap; a list such as [0.5, 1, 4]
+                              # gives agent i entry i % len (keep the list short: one context per value)
+  thinking_budget: 64         # thinking tokens per LLM call
+  budget_scales_with_cost: false   # true: each agent's budget = thinking_budget x its cost_scale
+
+tools:
+  constraints_lookup: true
+  abstract_lookup: true
+  latency_ms: 0
+
+llm:
+  mode: stub                  # stub | openai (an endpoint that accepts vLLM's thinking_token_budget)
+  base_url_env: OPENAI_BASE_URL   # names of environment variables, never their values
+  api_key_env: OPENAI_API_KEY
+  model: stub                 # set to the served model's name for mode openai
+
+workers:
+  sim_workers: 2              # simulation worker processes in all; each agent process gets sim_workers // processes

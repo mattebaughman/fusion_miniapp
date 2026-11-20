@@ -1,0 +1,160 @@
+{
+ "agent_layer": "academy",
+ "sim": "fixture",
+ "llm": "stub",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 2000,
+   "planes": 4,
+   "rollout_steps": 2,
+   "puffs": 3,
+   "fixed_point_cap": 15,
+   "model_width": 32,
+   "checkpoint_mb": 1,
+   "device": "auto",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": null
+  },
+  "agents": {
+   "count": 10000,
+   "per_process": 10000,
+   "sims_per_agent": 2,
+   "cost_scale": 1.0,
+   "thinking_budget": 256,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "stub",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "stub"
+  },
+  "workers": {
+   "sim_workers": 8
+  }
+ },
+ "counts": {
+  "agents": 10000,
+  "agents_requested": 10000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 20000,
+  "llm_calls": 30000,
+  "tool_calls": 20000,
+  "proposals": {
+   "llm": 20000,
+   "mutation": 0
+  },
+  "suspensions": null,
+  "sim_tasks": 20000,
+  "memory_writes": 20000,
+  "reports": 10000,
+  "feasible_agents": 40,
+  "expected_per_agent": {
+   "llm_calls": 3,
+   "sims": 2
+  }
+ },
+ "llm_service": {
+  "calls": 30000,
+  "budgets": {
+   "256": 30000
+  }
+ },
+ "lookups": {
+  "constraints": 10000,
+  "abstract": 10000
+ },
+ "touch_check": {
+  "evaluations": 20000,
+  "fixture": 20000,
+  "pass": 0,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 0,
+  "checkpoint_load": 0,
+  "context_build": 0,
+  "device_to_host": 0,
+  "geometry_read": 0,
+  "graph_forward": 0,
+  "handoff_file_read": 0,
+  "handoff_file_rewrite": 0,
+  "handoff_file_write": 0,
+  "handoff_memory": 0,
+  "host_to_device": 0,
+  "library_import": 0,
+  "mesh_read": 0,
+  "model_to_device": 0,
+  "result_return": 0,
+  "small_forward": 0
+ },
+ "devices": {
+  "none": 20000
+ },
+ "wall_seconds": 29.784,
+ "results_sha256": "d1df035876e7e2c2cdc23d4ca1cf1556ea37be6d3625d74e9ebd19bb346e3784",
+ "peak_rss_mb": {
+  "main_process": 930.5,
+  "agent_process_max": 836.5,
+  "agent_processes_sum": 836.5,
+  "sim_worker_max": null
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.3",
+  "torch": "2.15.0",
+  "langgraph": "1.2.22",
+  "langchain-core": "1.8.3",
+  "flowgentic": "0.5.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.55.1",
+  "dragonhpc": null,
+  "flowgentic_commit": "f475907cd1cb324e04c0a7e33018f38e96204b74"
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.2-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "not imported in this process"
+ },
+ "frameworks_imported": {
+  "academy": true,
+  "langgraph": false,
+  "flowgentic": false,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "thread",
+ "sim_workers_per_process": 8,
+ "sim_workers_total": 8,
+ "layer_stats": [
+  {
+   "layer": "academy",
+   "academy_agents": 10001,
+   "exchange": "local",
+   "executor": null,
+   "suspensions": null,
+   "llm_requests_cap": 512
+  }
+ ]
+}

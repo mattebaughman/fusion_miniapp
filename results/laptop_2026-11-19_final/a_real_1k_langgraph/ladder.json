@@ -1,0 +1,54 @@
+{
+ "args": [
+  "--agents",
+  "1000",
+  "--knobs",
+  "results/laptop_2026-11-19_final/real_1k.yaml",
+  "--sim",
+  "real"
+ ],
+ "exit": 0,
+ "outer_wall_s": 25.3,
+ "tree_rss_peak_mb_sampled_1s": 854.7,
+ "summary": {
+  "run_record": "results/laptop_2026-11-19_final/a_real_1k_langgraph/run_record.json",
+  "agent_layer": "langgraph",
+  "agents": 1000,
+  "agents_requested": 1000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 1000,
+  "llm_calls": 2000,
+  "tool_calls": 2000,
+  "proposals": {
+   "llm": 1000,
+   "mutation": 0
+  },
+  "suspensions": 1000,
+  "sim_tasks": 1000,
+  "memory_writes": 1000,
+  "reports": 1000,
+  "feasible_agents": 0,
+  "expected_per_agent": {
+   "llm_calls": 2,
+   "sims": 1
+  },
+  "touch_check": {
+   "evaluations": 1000,
+   "fixture": 0,
+   "pass": 1000,
+   "fail": {}
+  },
+  "devices": {
+   "cpu": 1000
+  },
+  "wall_seconds": 24.005,
+  "peak_rss_mb": {
+   "main_process": 238.4,
+   "agent_process_max": 233.6,
+   "agent_processes_sum": 233.6,
+   "sim_worker_max": 312.6
+  }
+ }
+}

@@ -1,0 +1,164 @@
+"""Knob files: load, validate, presets.
+
+A knob file is YAML with five sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
+root is the complete base: any file or dict is merged over it, so a file only needs the keys
+it changes. Unknown sections or keys, wrong types and out-of-range values raise KnobError
+with the dotted name of the offending knob. This module imports no torch.
+"""
+from __future__ import annotations
+
+import copy
+import functools
+import re
+from pathlib import Path
+
+import yaml
+
+_HERE = Path(__file__).resolve().parent
+# knobs/ at the project root (source tree, editable install), or packaged inside the wheel (pyproject)
+PRESETS_DIR = next((d for d in (_HERE / "knobs", _HERE.parents[1] / "knobs") if d.is_dir()), _HERE / "knobs")
+PRESETS = ("smoke", "hundredk", "ignos_shape")
+
+# (kind, *args): ("int", lo, hi) ("num", lo, hi) ("nums", lo, hi) ("bool",) ("choice", options) ("str",) ("env",)
+# ("optstr",)
+SCHEMA = {
+    "sim": {
+        "nodes_per_plane": ("int", 16, None),
+        "planes": ("int", 1, None),
+        "rollout_steps": ("int", 1, None),
+        "puffs": ("int", 1, None),
+        "fixed_point_cap": ("int", 1, None),
+        "model_width": ("int", 2, None),
+        "checkpoint_mb": ("num", 0, None),
+        "device": ("choice", ("auto", "cpu", "cuda", "mps")),
+        "cold_start_fraction": ("num", 0, 1),
+        "keep_artifacts": ("bool",),
+        "work_root": ("optstr",),
+    },
+    "agents": {
+        "count": ("int", 1, None),
+        "per_process": ("int", 1, None),
+        "sims_per_agent": ("int", 1, None),
+        "cost_scale": ("nums", 0, None),      # a number, or a list: agent i uses entry i % len
+        "thinking_budget": ("int", 0, None),
+        "budget_scales_with_cost": ("bool",),
+    },
+    "tools": {
+        "constraints_lookup": ("bool",),
+        "abstract_lookup": ("bool",),
+        "latency_ms": ("num", 0, None),
+    },
+    "llm": {
+        "mode": ("choice", ("stub", "openai")),
+        "base_url_env": ("env",),
+        "api_key_env": ("env",),
+        "model": ("str",),
+    },
+    "workers": {
+        "sim_workers": ("int", 1, None),
+    },
+}
+
+
+class KnobError(ValueError):
+    """A knob file or dict is malformed; the message names the knob."""
+
+
+def _check(name: str, value, rule: tuple) -> None:
+    kind = rule[0]
+    if kind == "nums":
+        for v in (value if isinstance(value, list) and value else [value]):
+            _check(name, v, ("num", *rule[1:]))
+    elif kind in ("int", "num"):
+        types = (int,) if kind == "int" else (int, float)
+        if isinstance(value, bool) or not isinstance(value, types):
+            raise KnobError(f"{name} must be {'an integer' if kind == 'int' else 'a number'}, got {value!r}")
+        lo, hi = rule[1], rule[2]
+        if (lo is not None and value < lo) or (hi is not None and value > hi):
+            raise KnobError(f"{name} must be in [{lo}, {'inf' if hi is None else hi}], got {value!r}")
+    elif kind == "bool" and not isinstance(value, bool):
+        raise KnobError(f"{name} must be true or false, got {value!r}")
+    elif kind == "choice" and value not in rule[1]:
+        raise KnobError(f"{name} must be one of {list(rule[1])}, got {value!r}")
+    elif kind == "str" and not (isinstance(value, str) and value):
+        raise KnobError(f"{name} must be a non-empty string, got {value!r}")
+    elif kind == "optstr" and not (value is None or (isinstance(value, str) and value)):
+        raise KnobError(f"{name} must be a path string or null, got {value!r}")
+    elif kind == "env" and not (isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)):
+        raise KnobError(f"{name} must be the NAME of an environment variable (not its value), got {value!r}")
+    if name == "sim.model_width" and value % 2:
+        raise KnobError(f"sim.model_width must be even (the grid stand-in uses 2 attention heads), got {value}")
+
+
+def _merge_checked(base: dict, overlay: dict, where: str) -> dict:
+    """Return base updated with overlay, checking every overlay section, key and value."""
+    if not isinstance(overlay, dict):
+        raise KnobError(f"{where}: expected a mapping of sections, got {type(overlay).__name__}")
+    out = copy.deepcopy(base)
+    for section, values in overlay.items():
+        if section not in SCHEMA:
+            raise KnobError(f"{where}: unknown section {section!r}; allowed: {list(SCHEMA)}")
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise KnobError(f"{where}: section {section!r} must be a mapping, got {values!r}")
+        for key, value in values.items():
+            if key not in SCHEMA[section]:
+                raise KnobError(f"{where}: unknown knob {section}.{key}; allowed: {list(SCHEMA[section])}")
+            _check(f"{section}.{key}", value, SCHEMA[section][key])
+            out[section][key] = value
+    return out
+
+
+def _read_yaml(path: Path) -> dict:
+    try:
+        data = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise KnobError(f"knob file not found: {path}") from None
+    except yaml.YAMLError as exc:
+        raise KnobError(f"{path}: not valid YAML: {exc}") from None
+    return data or {}
+
+
+@functools.lru_cache(maxsize=1)
+def _base_cached() -> dict:
+    path = PRESETS_DIR / "smoke.yaml"
+    empty = {section: {} for section in SCHEMA}
+    base = _merge_checked(empty, _read_yaml(path), str(path))
+    missing = [f"{s}.{k}" for s in SCHEMA for k in SCHEMA[s] if k not in base[s]]
+    if missing:
+        raise KnobError(f"{path} must set every knob; missing: {missing}")
+    return base
+
+
+def base() -> dict:
+    """The smoke preset, complete; a fresh copy each call."""
+    return copy.deepcopy(_base_cached())
+
+
+def validate(knobs: dict | None, where: str = "knobs") -> dict:
+    """Check a (possibly partial) knob dict and return it merged over the smoke preset."""
+    return _merge_checked(base(), knobs or {}, where)
+
+
+def load(path: str | Path | None = None, preset: str | None = None) -> dict:
+    """Load a knob file or a named preset (not both); with neither, the smoke preset."""
+    if path is not None and preset is not None:
+        raise KnobError("give a knob file or a preset name, not both")
+    if preset is not None:
+        if preset not in PRESETS:
+            raise KnobError(f"unknown preset {preset!r}; available: {list(PRESETS)}")
+        path = PRESETS_DIR / f"{preset}.yaml"
+    if path is None:
+        return base()
+    path = Path(path)
+    return validate(_read_yaml(path), str(path))
+
+
+def sim_section(sim: dict | None) -> dict:
+    """The `sim` section that evaluate() takes, merged over the smoke preset and checked."""
+    if sim is None:
+        return base()["sim"]
+    if not isinstance(sim, dict):
+        raise KnobError(f"evaluate knobs must be the 'sim' section as a dict, got {type(sim).__name__}")
+    return validate({"sim": sim}, "sim knobs")["sim"]

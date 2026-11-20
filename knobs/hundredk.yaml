@@ -1,0 +1,37 @@
+# hundredk: the shape of the existing 100,000-agent run (many agents, S of 1 to 3), heavily turned down.
+# These are choices for a demo shape, not calibrated values. All physics output is synthetic.
+
+sim:
+  nodes_per_plane: 2000
+  planes: 4
+  rollout_steps: 2
+  puffs: 3
+  fixed_point_cap: 15
+  model_width: 32
+  checkpoint_mb: 1
+  device: auto
+  cold_start_fraction: 0.0
+  keep_artifacts: false
+  work_root: null             # set to node-local storage on the machines, e.g. $TMPDIR
+
+agents:
+  count: 100000
+  per_process: 10000          # 10 agent processes at 100,000 agents (a choice; the laptop ladder used this)
+  sims_per_agent: 2           # S of 1 to 3; S = 1 is the one-wait shape of the existing run
+  cost_scale: 1.0
+  thinking_budget: 256
+  budget_scales_with_cost: false
+
+tools:
+  constraints_lookup: true
+  abstract_lookup: true
+  latency_ms: 0
+
+llm:
+  mode: stub
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  model: stub
+
+workers:
+  sim_workers: 10             # at least one per agent process; with --sim real each worker is a torch process

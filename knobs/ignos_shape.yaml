@@ -1,0 +1,37 @@
+# ignos_shape: the IGNOS campaign shape (few agents, population 16 x 20 generations each, longer
+# simulations), still turned down from the real sizes. Not calibrated. All physics output is synthetic.
+
+sim:
+  nodes_per_plane: 20000      # real 90445
+  planes: 8                   # real 16
+  rollout_steps: 2            # real 2
+  puffs: 6                    # real 6
+  fixed_point_cap: 60         # real 300
+  model_width: 64
+  checkpoint_mb: 16
+  device: auto
+  cold_start_fraction: 0.0
+  keep_artifacts: false
+  work_root: null
+
+agents:
+  count: 4
+  per_process: 1
+  sims_per_agent: 320         # population 16 x 20 generations
+  cost_scale: 1.0
+  thinking_budget: 1024
+  budget_scales_with_cost: false
+
+tools:
+  constraints_lookup: true
+  abstract_lookup: true
+  latency_ms: 0
+
+llm:
+  mode: stub
+  base_url_env: OPENAI_BASE_URL
+  api_key_env: OPENAI_API_KEY
+  model: stub
+
+workers:
+  sim_workers: 4
