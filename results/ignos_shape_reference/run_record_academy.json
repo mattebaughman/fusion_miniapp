@@ -1,0 +1,413 @@
+{
+ "status": "pass",
+ "agent_layer": "academy",
+ "sim": "real",
+ "llm": "stub",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 20000,
+   "planes": 8,
+   "rollout_steps": 2,
+   "puffs": 6,
+   "fixed_point_cap": 60,
+   "model_width": 64,
+   "checkpoint_mb": 16,
+   "device": "cpu",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": null,
+   "threads_per_worker": "auto"
+  },
+  "agents": {
+   "count": 4,
+   "per_process": 1,
+   "max_live": null,
+   "cost_scale": 1.0,
+   "thinking_budget": 1024,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "stub",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "stub",
+   "send_thinking_budget": true,
+   "timeout_s": 120,
+   "max_retries": 2,
+   "min_model_share": 0.5,
+   "max_empty_share": 0.1
+  },
+  "workers": {
+   "sim_workers": 4
+  },
+  "outer": {
+   "population": 16,
+   "generations": 20,
+   "generator": "llm",
+   "rng": "shared",
+   "logs": "per_agent",
+   "wall_weight": 0.7,
+   "noise": 0.1,
+   "parent_stdout": "keep"
+  }
+ },
+ "run": {
+  "timestamp": "2026-11-21T08:53:24+00:00",
+  "host": "laptop",
+  "slurm_job_id": null,
+  "miniapp_git": {
+   "commit": "2c8d2cf606a72775b2b65641fe7247c0c0ba051c",
+   "dirty": true
+  },
+  "backends": [
+   "ConcurrentExecutionBackend"
+  ]
+ },
+ "counts": {
+  "agents": 4,
+  "agents_requested": 4,
+  "agents_failed": 0,
+  "agent_processes": 4,
+  "failed_agent_processes": [],
+  "sims": 1280,
+  "llm_calls": 80,
+  "tool_calls": 8,
+  "generations": 80,
+  "candidates_by_source": {
+   "start": 64,
+   "survivor": 599,
+   "mutation": 0,
+   "model": 617,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 617,
+   "filled_by_model": 617
+  },
+  "suspensions": null,
+  "sim_tasks": 1280,
+  "memory_writes": 80,
+  "reports": 4,
+  "feasible_agents": 0,
+  "expected_per_agent": {
+   "sims": 320,
+   "llm_calls": 20
+  }
+ },
+ "llm_service": {
+  "calls": 80,
+  "budgets": {
+   "1024": 80
+  },
+  "empty": 0,
+  "errors": 0,
+  "retries": 0,
+  "finish_reasons": {
+   "stop": 80
+  },
+  "tokens": {
+   "prompt": 0,
+   "completion": 0,
+   "reasoning": 0
+  }
+ },
+ "llm_check": {
+  "model_share": 1.0,
+  "empty_share": 0.0,
+  "refill_slots": {
+   "asked": 617,
+   "filled": 617
+  },
+  "replies": {
+   "calls": 80,
+   "empty": 0
+  },
+  "min_model_share": 0.5,
+  "max_empty_share": 0.1,
+  "fail": []
+ },
+ "lookups": {
+  "constraints": 4,
+  "abstract": 4
+ },
+ "touch_check": {
+  "evaluations": 1280,
+  "fixture": 0,
+  "pass": 1280,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 14080,
+  "checkpoint_load": 2564,
+  "context_build": 4,
+  "device_to_host": 469760,
+  "geometry_read": 8,
+  "graph_forward": 3840,
+  "handoff_file_read": 2560,
+  "handoff_file_rewrite": 1280,
+  "handoff_file_write": 1280,
+  "handoff_memory": 3840,
+  "host_to_device": 481280,
+  "library_import": 16,
+  "mesh_read": 5124,
+  "model_to_device": 2564,
+  "result_return": 1280,
+  "small_forward": 460800
+ },
+ "devices": {
+  "cpu": 1280
+ },
+ "wall_seconds": 570.026,
+ "results_sha256": "2a9e4fb71c35ad570de049356c28ae46590f05967ce097de7955647b9ce0d6b3",
+ "speed": {
+  "coverage": {
+   "campaigns_timed": 4,
+   "campaigns_requested": 4,
+   "complete": true
+  },
+  "campaigns_live": {
+   "max": 4,
+   "mean": 3.99,
+   "requested": 4,
+   "time_ge_95pct_s": 566.06,
+   "ramp_up_s": 0.0
+  },
+  "agent_phase_s": 567.844,
+  "startup_s": 1.13,
+  "shutdown_s": 1.037,
+  "rates_per_s": {
+   "evaluations": 2.254,
+   "model_calls": 0.141,
+   "generations": 0.141,
+   "campaigns": 0.007
+  },
+  "sims_in_flight": {
+   "max": 64,
+   "mean": 33.97
+  },
+  "sims_executing": {
+   "max": 4,
+   "mean": 3.99
+  },
+  "sim_s": {
+   "n": 1280,
+   "mean": 1.7698,
+   "p50": 1.7662,
+   "p95": 1.7955,
+   "max": 2.5509
+  },
+  "queue_wait_s": {
+   "n": 1280,
+   "mean": 13.3011,
+   "p50": 13.7972,
+   "p95": 26.464,
+   "max": 27.882
+  },
+  "generation_s": {
+   "n": 80,
+   "mean": 28.3222,
+   "p50": 28.2752,
+   "p95": 28.5467,
+   "max": 29.673
+  },
+  "model_latency_s": {
+   "n": 80,
+   "mean": 0.0014,
+   "p50": 0.0014,
+   "p95": 0.0014,
+   "max": 0.0015
+  },
+  "loop_lag": [
+   {
+    "samples": 5574,
+    "p50_ms": 2.1,
+    "p95_ms": 2.1,
+    "max_ms": 393.6,
+    "share_over_100ms": 0.0002
+   },
+   {
+    "samples": 5569,
+    "p50_ms": 2.1,
+    "p95_ms": 2.1,
+    "max_ms": 386.7,
+    "share_over_100ms": 0.0002
+   },
+   {
+    "samples": 5557,
+    "p50_ms": 2.1,
+    "p95_ms": 2.1,
+    "max_ms": 380.4,
+    "share_over_100ms": 0.0002
+   },
+   {
+    "samples": 5564,
+    "p50_ms": 2.1,
+    "p95_ms": 2.1,
+    "max_ms": 379.0,
+    "share_over_100ms": 0.0002
+   }
+  ],
+  "sim_workers": 4,
+  "sim_bound_ratio": 0.9974
+ },
+ "peak_rss_mb": {
+  "main_process": 40.3,
+  "agent_process_max": 144.4,
+  "agent_processes_sum": 573.0,
+  "sim_worker_max": 683.4
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.3",
+  "torch": "2.15.0",
+  "langgraph": "1.2.22",
+  "langchain-core": "1.8.3",
+  "flowgentic": "0.5.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.55.1",
+  "dragonhpc": null,
+  "flowgentic_commit": "f475907cd1cb324e04c0a7e33018f38e96204b74",
+  "rhapsody_commit": null
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.3-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "2.15.0",
+  "cuda_available": false,
+  "cuda_version": null,
+  "hip_version": null,
+  "mps_available": true,
+  "gpus": [],
+  "visible_devices": {
+   "CUDA_VISIBLE_DEVICES": null,
+   "ROCR_VISIBLE_DEVICES": null,
+   "HIP_VISIBLE_DEVICES": null
+  }
+ },
+ "frameworks_imported": {
+  "academy": true,
+  "langgraph": false,
+  "flowgentic": false,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "process",
+ "sim_workers_per_process": 1,
+ "sim_workers_total": 4,
+ "threads": {
+  "per_worker": 3,
+  "cpus": 12,
+  "knob": "auto"
+ },
+ "pools": [
+  {
+   "rebuilds": 0,
+   "resubmitted": 0,
+   "killed_at_shutdown": 0
+  },
+  {
+   "rebuilds": 0,
+   "resubmitted": 0,
+   "killed_at_shutdown": 0
+  },
+  {
+   "rebuilds": 0,
+   "resubmitted": 0,
+   "killed_at_shutdown": 0
+  },
+  {
+   "rebuilds": 0,
+   "resubmitted": 0,
+   "killed_at_shutdown": 0
+  }
+ ],
+ "pruned_tasks": 1276,
+ "layer_stats": [
+  {
+   "layer": "academy",
+   "campaigns": 1,
+   "suspensions": null,
+   "complete": true,
+   "academy_agents": 3,
+   "max_live_agents": 1,
+   "live_campaigns_max": 1,
+   "roles_per_campaign": [
+    "coordinator",
+    "generator",
+    "evaluator"
+   ],
+   "exchange": "local",
+   "executor": null,
+   "llm_requests_cap": 128
+  },
+  {
+   "layer": "academy",
+   "campaigns": 1,
+   "suspensions": null,
+   "complete": true,
+   "academy_agents": 3,
+   "max_live_agents": 1,
+   "live_campaigns_max": 1,
+   "roles_per_campaign": [
+    "coordinator",
+    "generator",
+    "evaluator"
+   ],
+   "exchange": "local",
+   "executor": null,
+   "llm_requests_cap": 128
+  },
+  {
+   "layer": "academy",
+   "campaigns": 1,
+   "suspensions": null,
+   "complete": true,
+   "academy_agents": 3,
+   "max_live_agents": 1,
+   "live_campaigns_max": 1,
+   "roles_per_campaign": [
+    "coordinator",
+    "generator",
+    "evaluator"
+   ],
+   "exchange": "local",
+   "executor": null,
+   "llm_requests_cap": 128
+  },
+  {
+   "layer": "academy",
+   "campaigns": 1,
+   "suspensions": null,
+   "complete": true,
+   "academy_agents": 3,
+   "max_live_agents": 1,
+   "live_campaigns_max": 1,
+   "roles_per_campaign": [
+    "coordinator",
+    "generator",
+    "evaluator"
+   ],
+   "exchange": "local",
+   "executor": null,
+   "llm_requests_cap": 128
+  }
+ ]
+}

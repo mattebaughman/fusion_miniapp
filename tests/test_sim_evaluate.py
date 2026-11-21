@@ -22,7 +22,8 @@ PARENT_KEYS = {
     "te_wall_eV", "ti_wall_eV", "wall_ok", "pedestal_ok", "elm_ok", "is_good", "te_ped_eV", "ne_ped_m3",
     "p_ped_Pa", "q_peak_proxy", "te_wall_div_eV", "ti_wall_div_eV", "puff_best", "summary_path", "inner_loop",
 }
-CONTRACT_KEYS = PARENT_KEYS | {"emulated", "device", "elapsed_seconds", "touches", "touch_check"}
+CONTRACT_KEYS = PARENT_KEYS | {"emulated", "device", "elapsed_seconds", "t_start", "worker_peak_rss_mb", "touches",
+                                "touch_check"}
 
 
 def _available(device):
@@ -127,8 +128,8 @@ def test_evaluate_fixture_same_keys_and_deterministic():
     assert set(fix) == set(real) | {"fixture"}
     assert fix["fixture"] is True and fix["emulated"] is True and fix["touch_check"].startswith("fail: fixture")
     again = evaluate_fixture({"a2_Te": 0.6}, seed=3)
-    assert {k: v for k, v in fix.items() if k != "elapsed_seconds"} == {
-        k: v for k, v in again.items() if k != "elapsed_seconds"}
+    timing = ("elapsed_seconds", "t_start")
+    assert {k: v for k, v in fix.items() if k not in timing} == {k: v for k, v in again.items() if k not in timing}
     json.dumps(fix, allow_nan=False)
 
 

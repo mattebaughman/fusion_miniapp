@@ -1,0 +1,338 @@
+{
+ "status": "pass",
+ "agent_layer": "langgraph",
+ "sim": "fixture",
+ "llm": "stub",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 2000,
+   "planes": 4,
+   "rollout_steps": 2,
+   "puffs": 3,
+   "fixed_point_cap": 15,
+   "model_width": 32,
+   "checkpoint_mb": 1,
+   "device": "auto",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": null,
+   "threads_per_worker": "auto"
+  },
+  "agents": {
+   "count": 10000,
+   "per_process": 10000,
+   "max_live": null,
+   "cost_scale": 1.0,
+   "thinking_budget": 256,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "stub",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "stub",
+   "send_thinking_budget": true,
+   "timeout_s": 120,
+   "max_retries": 2,
+   "min_model_share": 0.5,
+   "max_empty_share": 0.1
+  },
+  "workers": {
+   "sim_workers": 10
+  },
+  "outer": {
+   "population": 16,
+   "generations": 2,
+   "generator": "llm",
+   "rng": "shared",
+   "logs": "none",
+   "wall_weight": 0.7,
+   "noise": 0.1,
+   "parent_stdout": "drop"
+  }
+ },
+ "run": {
+  "timestamp": "2026-11-21T07:57:16+00:00",
+  "host": "laptop",
+  "slurm_job_id": null,
+  "miniapp_git": {
+   "commit": "b5a76d86bda5738963d2c7cf495c971a6e7f36ba",
+   "dirty": true
+  },
+  "backends": [
+   "ConcurrentExecutionBackend"
+  ]
+ },
+ "counts": {
+  "agents": 10000,
+  "agents_requested": 10000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 320000,
+  "llm_calls": 20000,
+  "tool_calls": 20000,
+  "generations": 20000,
+  "candidates_by_source": {
+   "start": 160000,
+   "survivor": 77764,
+   "mutation": 0,
+   "model": 82236,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 82236,
+   "filled_by_model": 82236
+  },
+  "suspensions": 20000,
+  "sim_tasks": 320000,
+  "memory_writes": 20000,
+  "reports": 10000,
+  "feasible_agents": 500,
+  "expected_per_agent": {
+   "sims": 32,
+   "llm_calls": 2
+  }
+ },
+ "llm_service": {
+  "calls": 20000,
+  "budgets": {
+   "256": 20000
+  },
+  "empty": 0,
+  "errors": 0,
+  "retries": 0,
+  "finish_reasons": {
+   "stop": 20000
+  },
+  "tokens": {
+   "prompt": 0,
+   "completion": 0,
+   "reasoning": 0
+  }
+ },
+ "llm_check": {
+  "model_share": 1.0,
+  "empty_share": 0.0,
+  "refill_slots": {
+   "asked": 82236,
+   "filled": 82236
+  },
+  "replies": {
+   "calls": 20000,
+   "empty": 0
+  },
+  "min_model_share": 0.5,
+  "max_empty_share": 0.1,
+  "fail": []
+ },
+ "lookups": {
+  "constraints": 10000,
+  "abstract": 10000
+ },
+ "touch_check": {
+  "evaluations": 320000,
+  "fixture": 320000,
+  "pass": 0,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 0,
+  "checkpoint_load": 0,
+  "context_build": 0,
+  "device_to_host": 0,
+  "geometry_read": 0,
+  "graph_forward": 0,
+  "handoff_file_read": 0,
+  "handoff_file_rewrite": 0,
+  "handoff_file_write": 0,
+  "handoff_memory": 0,
+  "host_to_device": 0,
+  "library_import": 0,
+  "mesh_read": 0,
+  "model_to_device": 0,
+  "result_return": 0,
+  "small_forward": 0
+ },
+ "devices": {
+  "none": 320000
+ },
+ "wall_seconds": 462.156,
+ "results_sha256": "0bff3dbd17514f76dcc51c0e214260697f3d410120c8a98be86be1d9f032cd3a",
+ "speed": {
+  "coverage": {
+   "campaigns_timed": 10000,
+   "campaigns_requested": 10000,
+   "complete": true
+  },
+  "campaigns_live": {
+   "max": 10000,
+   "mean": 8467.36,
+   "requested": 10000,
+   "time_ge_95pct_s": 324.645,
+   "ramp_up_s": 12.822
+  },
+  "agent_phase_s": 461.334,
+  "startup_s": 0.508,
+  "shutdown_s": 0.707,
+  "rates_per_s": {
+   "evaluations": 693.641,
+   "model_calls": 43.353,
+   "generations": 43.353,
+   "campaigns": 21.676
+  },
+  "sims_in_flight": {
+   "max": 159988,
+   "mean": 123785.9
+  },
+  "sims_executing": {
+   "max": 11,
+   "mean": 9.49
+  },
+  "sim_s": {
+   "n": 320000,
+   "mean": 0.0137,
+   "p50": 0.0101,
+   "p95": 0.0161,
+   "max": 13.88
+  },
+  "queue_wait_s": {
+   "n": 320000,
+   "mean": 178.4446,
+   "p50": 179.1165,
+   "p95": 236.8653,
+   "max": 253.6883
+  },
+  "generation_s": {
+   "n": 20000,
+   "mean": 178.5011,
+   "p50": 179.1384,
+   "p95": 236.8864,
+   "max": 253.7064
+  },
+  "model_latency_s": {
+   "n": 20000,
+   "mean": 0.0013,
+   "p50": 0.0012,
+   "p95": 0.0015,
+   "max": 0.2322
+  },
+  "loop_lag": [
+   {
+    "samples": 3409,
+    "p50_ms": 0.6,
+    "p95_ms": 19.5,
+    "max_ms": 13911.0,
+    "share_over_100ms": 0.0211
+   }
+  ],
+  "sim_workers": 10,
+  "sim_bound_ratio": 0.9488
+ },
+ "peak_rss_mb": {
+  "main_process": 6141.5,
+  "agent_process_max": 6141.5,
+  "agent_processes_sum": 6141.5,
+  "sim_worker_max": null
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.3",
+  "torch": "2.15.0",
+  "langgraph": "1.2.22",
+  "langchain-core": "1.8.3",
+  "flowgentic": "0.5.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.55.1",
+  "dragonhpc": null,
+  "flowgentic_commit": "f475907cd1cb324e04c0a7e33018f38e96204b74",
+  "rhapsody_commit": null
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.3-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "not imported in this process"
+ },
+ "frameworks_imported": {
+  "academy": false,
+  "langgraph": true,
+  "flowgentic": true,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "thread",
+ "sim_workers_per_process": 10,
+ "sim_workers_total": 10,
+ "threads": null,
+ "pools": [
+  null
+ ],
+ "pruned_tasks": 319078,
+ "layer_stats": [
+  {
+   "layer": "langgraph",
+   "campaigns": 10000,
+   "hosted_runs": 10000,
+   "roles_per_campaign": [
+    "coordinator",
+    "generator",
+    "evaluator"
+   ],
+   "max_live_agents": 10000,
+   "suspensions": 20000,
+   "complete": true,
+   "tasks": {
+    "submitted": 320000,
+    "repeats": 320000,
+    "failed": 0,
+    "refused": 0,
+    "retained": 160000
+   },
+   "checkpoints": {
+    "checkpoints_put": 50000,
+    "writes_put": 340000,
+    "checkpoints_read": 40000,
+    "checkpoint_bytes_mean": 12589
+   },
+   "fleet": {
+    "replicas": 1,
+    "calls": 20000,
+    "in_flight_max": 11,
+    "errors": {}
+   },
+   "outcomes": {
+    "done": 10000
+   },
+   "host_wall_s": 461.539,
+   "share_by_category": {
+    "working": 0.216,
+    "waiting": 0.7839,
+    "model_request": 0.0
+   },
+   "loop_lag": {
+    "samples": 3409,
+    "max_ms": 13911.0,
+    "time_weighted_p99_ms": 10224.1,
+    "share_over_100ms": 0.2296
+   }
+  }
+ ]
+}

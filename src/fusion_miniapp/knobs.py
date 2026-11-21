@@ -1,14 +1,15 @@
 """Knob files: load, validate, presets.
 
-A knob file is YAML with five sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
-root is the complete base: any file or dict is merged over it, so a file only needs the keys
-it changes. Unknown sections or keys, wrong types and out-of-range values raise KnobError
+A knob file is YAML with six sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
+root is the complete base: a preset, then any knob files in order, are merged over it, so a file
+only needs the keys it changes (a machine file under knobs/machines/ sets only the machine's keys). Unknown sections or keys, wrong types and out-of-range values raise KnobError
 with the dotted name of the offending knob. This module imports no torch.
 """
 from __future__ import annotations
 
 import copy
 import functools
+import math
 import re
 from pathlib import Path
 
@@ -20,7 +21,7 @@ PRESETS_DIR = next((d for d in (_HERE / "knobs", _HERE.parents[1] / "knobs") if 
 PRESETS = ("smoke", "hundredk", "ignos_shape")
 
 # (kind, *args): ("int", lo, hi) ("num", lo, hi) ("nums", lo, hi) ("bool",) ("choice", options) ("str",) ("env",)
-# ("optstr",)
+# ("optstr",) ("optint", lo) (null or an integer) ("autoint", lo) ("auto" or an integer)
 SCHEMA = {
     "sim": {
         "nodes_per_plane": ("int", 16, None),
@@ -34,12 +35,13 @@ SCHEMA = {
         "cold_start_fraction": ("num", 0, 1),
         "keep_artifacts": ("bool",),
         "work_root": ("optstr",),
+        "threads_per_worker": ("autoint", 1),   # CPU threads per simulation worker; auto = CPUs / workers
     },
     "agents": {
         "count": ("int", 1, None),
         "per_process": ("int", 1, None),
-        "sims_per_agent": ("int", 1, None),
-        "cost_scale": ("nums", 0, None),      # a number, or a list: agent i uses entry i % len
+        "max_live": ("optint", 1),            # campaigns live at once per agent process; null = all of them
+        "cost_scale": ("nums", 0, None),      # a number, or a list: agent i uses entry i % len (each > 0)
         "thinking_budget": ("int", 0, None),
         "budget_scales_with_cost": ("bool",),
     },
@@ -53,9 +55,24 @@ SCHEMA = {
         "base_url_env": ("env",),
         "api_key_env": ("env",),
         "model": ("str",),
+        "send_thinking_budget": ("bool",),    # false for servers that reject vLLM's thinking_token_budget
+        "timeout_s": ("num", 0.001, None),
+        "max_retries": ("int", 0, None),
+        "min_model_share": ("num", 0, 1),     # openai mode: fail the run if fewer refill slots came from the model
+        "max_empty_share": ("num", 0, 1),     # openai mode: fail the run if more replies were empty
     },
     "workers": {
         "sim_workers": ("int", 1, None),
+    },
+    "outer": {                                # each campaign's IGNOS outer loop (parent run_evolutionary_loop)
+        "population": ("int", 1, None),       # P
+        "generations": ("int", 1, None),      # G
+        "generator": ("choice", ("llm", "mutation")),   # llm: the model replaces mutants; mutation: the parent's loop
+        "rng": ("choice", ("shared", "per_agent")),     # shared: run_evolutionary_loop; per_agent: evo_agents.py
+        "logs": ("choice", ("per_agent", "none")),      # the parent's evolution_log.csv/.jsonl, config.json, best_result.json
+        "wall_weight": ("num", 0, 1),
+        "noise": ("num", 0, None),
+        "parent_stdout": ("choice", ("keep", "drop")),  # the parent's per-generation prints
     },
 }
 
@@ -69,10 +86,20 @@ def _check(name: str, value, rule: tuple) -> None:
     if kind == "nums":
         for v in (value if isinstance(value, list) and value else [value]):
             _check(name, v, ("num", *rule[1:]))
+    elif kind == "optint":
+        if value is not None:
+            _check(name, value, ("int", rule[1], None))
+    elif kind == "autoint":
+        if value != "auto":
+            if isinstance(value, str):
+                raise KnobError(f"{name} must be auto or an integer, got {value!r}")
+            _check(name, value, ("int", rule[1], None))
     elif kind in ("int", "num"):
         types = (int,) if kind == "int" else (int, float)
         if isinstance(value, bool) or not isinstance(value, types):
             raise KnobError(f"{name} must be {'an integer' if kind == 'int' else 'a number'}, got {value!r}")
+        if not math.isfinite(value):
+            raise KnobError(f"{name} must be finite, got {value!r}")
         lo, hi = rule[1], rule[2]
         if (lo is not None and value < lo) or (hi is not None and value > hi):
             raise KnobError(f"{name} must be in [{lo}, {'inf' if hi is None else hi}], got {value!r}")
@@ -86,6 +113,8 @@ def _check(name: str, value, rule: tuple) -> None:
         raise KnobError(f"{name} must be a path string or null, got {value!r}")
     elif kind == "env" and not (isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)):
         raise KnobError(f"{name} must be the NAME of an environment variable (not its value), got {value!r}")
+    if name == "agents.cost_scale" and kind == "num" and value <= 0:
+        raise KnobError(f"agents.cost_scale must be > 0, got {value!r}")
     if name == "sim.model_width" and value % 2:
         raise KnobError(f"sim.model_width must be even (the grid stand-in uses 2 attention heads), got {value}")
 
@@ -141,18 +170,20 @@ def validate(knobs: dict | None, where: str = "knobs") -> dict:
     return _merge_checked(base(), knobs or {}, where)
 
 
-def load(path: str | Path | None = None, preset: str | None = None) -> dict:
-    """Load a knob file or a named preset (not both); with neither, the smoke preset."""
-    if path is not None and preset is not None:
-        raise KnobError("give a knob file or a preset name, not both")
+def load(path: str | Path | None = None, preset: str | None = None, paths=()) -> dict:
+    """The smoke preset, then the named preset, then each knob file in order (`path`, then `paths`),
+    each merged over the result so far."""
+    files = ([path] if path is not None else []) + list(paths)
+    out = base()
     if preset is not None:
         if preset not in PRESETS:
             raise KnobError(f"unknown preset {preset!r}; available: {list(PRESETS)}")
-        path = PRESETS_DIR / f"{preset}.yaml"
-    if path is None:
-        return base()
-    path = Path(path)
-    return validate(_read_yaml(path), str(path))
+        p = PRESETS_DIR / f"{preset}.yaml"
+        out = _merge_checked(out, _read_yaml(p), str(p))
+    for f in files:
+        f = Path(f)
+        out = _merge_checked(out, _read_yaml(f), str(f))
+    return out
 
 
 def sim_section(sim: dict | None) -> dict:

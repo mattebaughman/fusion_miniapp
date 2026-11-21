@@ -1,0 +1,3 @@
+# rung (a): 1,000 campaigns x P4 x G2 = 8,000 real evaluations, smoke sims, CPU, 1 agent process + 4 workers
+python -m fusion_miniapp.run --preset smoke --agents 1000 --sim real --knobs rung_a.yaml --out langgraph
+python -m fusion_miniapp.run --preset smoke --agents 1000 --sim real --knobs rung_a.yaml --out academy --use-academy

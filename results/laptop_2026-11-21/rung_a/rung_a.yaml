@@ -1,0 +1,2 @@
+sim: {device: cpu}
+workers: {sim_workers: 4}

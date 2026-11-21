@@ -14,11 +14,12 @@ sim:                          # the turn-down; "real" = the IGNOS loop at Fusion
   cold_start_fraction: 0.0    # share of evaluations run in a fresh worker process (a new one every round(1/f))
   keep_artifacts: false       # keep each evaluation's work directory (11 files at rollout_steps 2)
   work_root: null             # parent of work directories; null = system temp; $VARS are expanded
+  threads_per_worker: auto    # CPU threads per simulation worker (OMP, OpenBLAS, MKL, torch); auto = CPUs / workers
 
 agents:
-  count: 4
+  count: 100                  # campaigns
   per_process: 1000           # agents per agent process; each process also starts its own simulation workers
-  sims_per_agent: 2           # S
+  max_live: null              # campaigns live at once in each agent process; null = all of them
   cost_scale: 1.0             # multiplier on nodes_per_plane and fixed_point_cap; a list such as [0.5, 1, 4]
                               # gives agent i entry i % len (keep the list short: one context per value)
   thinking_budget: 64         # thinking tokens per LLM call
@@ -34,6 +35,21 @@ llm:
   base_url_env: OPENAI_BASE_URL   # names of environment variables, never their values
   api_key_env: OPENAI_API_KEY
   model: stub                 # set to the served model's name for mode openai
+  send_thinking_budget: true  # false for a server that rejects the thinking_token_budget field
+  timeout_s: 120              # per model call
+  max_retries: 2              # per model call, on connection errors and 5xx
+  min_model_share: 0.5        # openai mode: the run fails if the model filled fewer refill slots than this share
+  max_empty_share: 0.1        # openai mode: the run fails if more replies than this share were empty
 
 workers:
   sim_workers: 2              # simulation worker processes in all; each agent process gets sim_workers // processes
+
+outer:                        # each campaign's IGNOS outer loop: the parent's run_evolutionary_loop (smoke: 8 evaluations per campaign)
+  population: 4               # P, candidates per generation, all evaluated at once
+  generations: 2              # G; evaluations per campaign = P x G, model calls = G
+  generator: llm              # llm: one model call per refill replaces mutants; mutation: the parent's loop exactly
+  rng: shared                 # shared: one generator, as run_evolutionary_loop; per_agent: two streams, as evo_agents.py
+  logs: per_agent             # per_agent: the parent's evolution_log.csv/.jsonl, config.json, best_result.json per campaign
+  wall_weight: 0.7            # the parent's DEFAULT_WALL_WEIGHT
+  noise: 0.1                  # the parent's mutation amplitude
+  parent_stdout: keep         # keep: the parent's per-generation prints; drop: discard them

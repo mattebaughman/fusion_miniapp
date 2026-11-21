@@ -10,11 +10,14 @@ import os
 import platform
 import resource
 import sys
+import time
 from collections import Counter
 from importlib import metadata
 from pathlib import Path
 
-from fusion_miniapp import PARENT_DIR
+import numpy as np
+
+from fusion_miniapp import PARENT_DIR, decide
 
 LIVE_INTERVAL_S = 1.0
 DISTS = ("fusion_miniapp", "numpy", "scipy", "netCDF4", "PyYAML", "torch", "langgraph", "langchain-core",
@@ -60,9 +63,25 @@ async def ticker(read, emit=None, interval: float = LIVE_INTERVAL_S) -> None:
         emit(read())
 
 
+# timings, memory, touch counts and device names: what depends on the machine or the scheduling
+MACHINE_KEYS = ("sim_s", "wait_s", "t_start", "t_end", "worker_peak_rss_mb", "touches", "devices", "llm_call_details")
+
+
+def comparable(result: dict) -> dict:
+    """A campaign's result without what depends on the machine or the scheduling: per-evaluation and
+    per-generation times, touch counts (which evaluations met a cold worker), device names."""
+    out = {k: v for k, v in result.items() if k not in MACHINE_KEYS}
+    if "generations" in out:
+        out["generations"] = [{k: v for k, v in g.items() if k not in ("elapsed_s", "t0", "fastest", "slowest")}
+                              for g in out["generations"]]
+    return out
+
+
 def digest(lines) -> str:
-    """SHA-256 of the per-agent results, independent of the order agents finished in."""
-    rows = sorted(r if isinstance(r, str) else json.dumps(r, sort_keys=True, default=str) for r in lines)
+    """SHA-256 over the sorted SHA-256s of the per-campaign results (their comparable parts): independent of
+    the order they finished in, the same on any machine and in either agent layer (results_sha256)."""
+    rows = sorted(hashlib.sha256(json.dumps(comparable(json.loads(r) if isinstance(r, str) else r),
+                                            sort_keys=True, default=str).encode()).hexdigest() for r in lines)
     return hashlib.sha256("\n".join(rows).encode()).hexdigest()
 
 
@@ -94,11 +113,12 @@ def versions() -> dict:
             out[d] = metadata.version(d)
         except metadata.PackageNotFoundError:
             out[d] = None
-    try:  # FlowGentic 0.5.0 is installed from a git commit; record only the commit id
-        out["flowgentic_commit"] = json.loads(metadata.distribution("flowgentic").read_text("direct_url.json")
-                                              or "{}").get("vcs_info", {}).get("commit_id")
-    except metadata.PackageNotFoundError:
-        pass
+    for dist, key in (("flowgentic", "flowgentic_commit"), ("rhapsody-py", "rhapsody_commit")):
+        try:  # installed from a git commit: record only the commit id
+            out[key] = json.loads(metadata.distribution(dist).read_text("direct_url.json")
+                                  or "{}").get("vcs_info", {}).get("commit_id")
+        except metadata.PackageNotFoundError:
+            pass
     return out
 
 
@@ -109,73 +129,270 @@ def peak_rss_mb(children: bool = False) -> float:
     return round(resource.getrusage(who).ru_maxrss / scale, 1)
 
 
-def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wall_s: float,
-          failed: list[int] = ()) -> dict:
-    """Merge the agent lines of this run's agent processes (`parts`, the ones that ended cleanly) into
-    agents.jsonl and write run_record.json. `failed`: agent processes that did not end cleanly; their
-    agents are missing from the record. Other files in `out` are never read.
+def _pct(values) -> dict:
+    a = np.asarray(values, dtype=float)
+    if not a.size:
+        return {"n": 0}
+    q = np.percentile(a, [50, 95])
+    return {"n": int(a.size), "mean": round(float(a.mean()), 4), "p50": round(float(q[0]), 4),
+            "p95": round(float(q[1]), 4), "max": round(float(a.max()), 4)}
 
-    Fixture evaluations make no touches by design; they are counted apart from the touch check."""
-    lines = []
-    for part in parts:
-        p = Path(part["agents_file"])
-        lines += p.read_text().splitlines()
-        p.unlink()
-    lines.sort()
-    (out / "agents.jsonl").write_text("".join(line + "\n" for line in lines))
+
+def occupancy(starts, ends, t_lo: float, t_hi: float, n_ref: int | None = None) -> dict:
+    """How many intervals [start, end) are open at once in the window [t_lo, t_hi]: the maximum, the
+    time-weighted mean, and (with n_ref) the seconds with at least 95% of n_ref open. At equal times an
+    end counts before a start."""
+    starts, ends = np.asarray(starts, dtype=float), np.asarray(ends, dtype=float)
+    if not starts.size or t_hi <= t_lo:
+        return {"max": 0, "mean": 0.0, **({"time_ge_95pct_s": 0.0} if n_ref else {})}
+    t = np.concatenate([starts, ends])
+    d = np.concatenate([np.ones(starts.size), -np.ones(ends.size)])
+    order = np.lexsort((d, t))
+    t, level = t[order], np.cumsum(d[order])
+    dur = np.diff(np.clip(t, t_lo, t_hi))
+    out = {"max": int(level.max()), "mean": round(float((level[:-1] * dur).sum() / (t_hi - t_lo)), 2)}
+    if n_ref:
+        out["time_ge_95pct_s"] = round(float(dur[level[:-1] >= 0.95 * n_ref].sum()), 3)
+    return out
+
+
+class LoopLag:
+    """How late this process's event loop wakes a 100 ms timer (FlowGentic's probe, in the stdlib, so both
+    layers report the same measure): start() inside the loop, then summary()."""
+
+    INTERVAL = 0.1
+
+    def __init__(self) -> None:
+        self.samples: list[float] = []
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        async def tick():
+            loop = asyncio.get_running_loop()
+            while True:
+                t = loop.time()
+                await asyncio.sleep(self.INTERVAL)
+                self.samples.append(max(0.0, loop.time() - t - self.INTERVAL))
+        self._task = asyncio.get_running_loop().create_task(tick())
+
+    async def stop(self) -> dict:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+        a = np.asarray(self.samples)
+        if not a.size:
+            return {"samples": 0}
+        return {"samples": int(a.size), "p50_ms": round(1e3 * float(np.percentile(a, 50)), 1),
+                "p95_ms": round(1e3 * float(np.percentile(a, 95)), 1), "max_ms": round(1e3 * float(a.max()), 1),
+                "share_over_100ms": round(float((a > 0.1).mean()), 4)}
+
+
+def git_state() -> dict:
+    """The mini-app's own commit and whether tracked files differ (None outside a git checkout)."""
+    import subprocess
+    root = Path(__file__).resolve().parents[2]
+    try:
+        # only a checkout that is this source: git -C would otherwise find any repository above an install
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, timeout=10, check=True).stdout.strip()
+        tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch",
+                                  "src/fusion_miniapp/record.py"], capture_output=True, timeout=10)
+        if Path(top).resolve() != root or tracked.returncode:
+            return {"commit": None, "dirty": None}
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=10, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        return {"commit": head, "dirty": bool(dirty)}
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "dirty": None}
+
+
+def llm_check(knobs: dict, refill: dict, service: dict) -> dict:
+    """llm.mode openai: the model must fill at least llm.min_model_share of the refill slots it was asked
+    for, and at most llm.max_empty_share of its replies may be empty. No slots asked: no share verdict."""
+    k = knobs["llm"]
+    model = refill["filled"] / refill["asked"] if refill["asked"] else None     # raw ratios: compared unrounded
+    empty = service["empty"] / service["calls"] if service["calls"] else None
+    out = {"model_share": model, "empty_share": empty, "refill_slots": {"asked": refill["asked"],
+           "filled": refill["filled"]}, "replies": {"calls": service["calls"], "empty": service["empty"]},
+           "min_model_share": k["min_model_share"], "max_empty_share": k["max_empty_share"], "fail": []}
+    if k["mode"] == "openai":
+        if model is not None and model < k["min_model_share"]:
+            out["fail"].append(f"the model filled {refill['filled']} of the {refill['asked']} refill slots it was "
+                               f"asked for ({model:.4%}), below llm.min_model_share {k['min_model_share']}; the "
+                               "rest are the parent's random mutants")
+        if empty is not None and empty > k["max_empty_share"]:
+            out["fail"].append(f"{service['empty']} of the model's {service['calls']} replies were empty "
+                               f"({empty:.4%}), above llm.max_empty_share {k['max_empty_share']}")
+    return out
+
+
+def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wall_s: float,
+          failed: list[int] = (), interrupted: bool = False, t_run: float | None = None) -> dict:
+    """Merge the campaign lines of this run's agent processes (`parts`, those that wrote their counts) into
+    agents.jsonl and write run_record.json. `failed`: agent processes that wrote none; their campaigns are
+    missing. `t_run`: when the run started (epoch). Other files in `out` are never read.
+
+    The merge streams: each line is copied to agents.jsonl.tmp and counted as it passes, the file is
+    renamed into place, and only then are the per-process files removed. Fixture evaluations make no
+    touches by design; they are counted apart from the touch check."""
+    from array import array
+    from datetime import datetime, timezone
     c = Counter()
-    verdicts, devices, touches, errors, budgets, tool_calls, sources = (Counter() for _ in range(7))
-    for line in lines:   # one agent at a time: 100,000 parsed results need not be held at once
-        r = json.loads(line)
-        if "error" in r:
-            errors[r["error"].split(":", 1)[0]] += 1
-            continue
-        c.update(sims=r["n_sims"], llm_calls=r["n_llm_calls"], tool_calls=r["n_tool_calls"],
-                 feasible_agents=bool(r["best"]["is_good"]))
-        touches.update(r["touches"])
-        for h in r["history"]:
-            devices[str(h.get("device"))] += 1
-            sources[h["source"]] += 1
-            if h.get("fixture"):
-                c["fixture"] += 1
-            else:
-                verdicts[str(h.get("touch_check"))] += 1
-    for p in parts:
-        budgets.update(p["llm_service"]["budgets"])
+    verdicts, devices, touches, errors, budgets, tool_calls, sources, refill = (Counter() for _ in range(8))
+    rows, n_lines = [], 0                            # each campaign's comparable hash, for the digest
+    c_start, c_end, e_sub, e_start, e_end = (array("d") for _ in range(5))
+    sim_s, wait_s, gen_s, worker_rss = array("d"), array("d"), array("d"), []
+    tmp = out / "agents.jsonl.tmp"
+    with tmp.open("w") as merged:
+        for part in parts:
+            with open(part["agents_file"]) as src:
+                for line in src:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    merged.write(line + "\n")
+                    n_lines += 1
+                    r = json.loads(line)
+                    rows.append(hashlib.sha256(json.dumps(comparable(r), sort_keys=True, default=str)
+                                               .encode()).hexdigest())
+                    if "error" in r:
+                        errors[r["error"].split(":", 1)[0]] += 1
+                        continue
+                    c.update(sims=r["n_sims"], llm_calls=r["n_llm_calls"], tool_calls=r["n_tool_calls"],
+                             feasible_agents=int(bool(r["best"]["is_good"])), fixture=r["fixture"],
+                             generations=len(r["generations"]))
+                    touches.update(r["touches"])
+                    devices.update(r["devices"])
+                    verdicts.update(r["touch_checks"])
+                    sources.update(r["sources"])
+                    refill.update(r["refill"])
+                    c_start.append(r["t_start"])
+                    c_end.append(r["t_end"])
+                    i = 0
+                    for g in r["generations"]:
+                        gen_s.append(g["elapsed_s"])
+                        for _ in range(g["n_evaluated"]):
+                            w, d = r["wait_s"][i], r["sim_s"][i]
+                            e_sub.append(g["t0"])
+                            e_start.append(g["t0"] + w)
+                            e_end.append(g["t0"] + w + d)
+                            wait_s.append(w)
+                            sim_s.append(d)
+                            i += 1
+                    if r.get("worker_peak_rss_mb") is not None:
+                        worker_rss.append(r["worker_peak_rss_mb"])
+    os.replace(tmp, out / "agents.jsonl")
+    services = [p["llm_service"] for p in parts]
+    for p, sv in zip(parts, services):
+        budgets.update(sv["budgets"])
         tool_calls.update(p["tool_calls"])
+    service = {"calls": sum(sv["calls"] for sv in services), "budgets": dict(budgets),
+               **{k: sum(sv.get(k, 0) for sv in services) for k in ("empty", "errors", "retries")},
+               "finish_reasons": dict(sum((Counter(sv.get("finish_reasons", {})) for sv in services), Counter())),
+               "tokens": {k: sum(sv.get("tokens", {}).get(k, 0) for sv in services)
+                          for k in ("prompt", "completion", "reasoning")}}
+    latencies = [x for sv in services for x in sv.get("latency_s", [])]
     a = knobs["agents"]
     lock = json.loads((PARENT_DIR / "PARENT.lock").read_text())
-    peaks = [p["peak_rss_mb"] for p in parts]
-    sim_peaks = [p["sim_worker_peak_rss_mb"] for p in parts if p["sim_worker_peak_rss_mb"] is not None]
+    peaks = [p["peak_rss_mb"] for p in parts] or [None]
+    first = parts[0] if parts else {}
+    t_end_run = time.time()
+    lo, hi = (min(c_start), max(c_end)) if c_start else (t_end_run, t_end_run)
+    phase = hi - lo
+    workers = sum(p["sim_workers"] or 0 for p in parts)
+    rate = (lambda n: round(n / phase, 3)) if phase > 0 else (lambda n: None)
+    camp = occupancy(c_start, c_end, lo, hi, n_ref=a["count"])
+    timed = len(c_start)
+    if not timed:   # nothing finished (an early interruption): unknown, not zero
+        camp = {"max": None, "mean": None, "time_ge_95pct_s": None}
+    speed = {
+        # the speed numbers come from the campaigns that finished; an interrupted run's are partial
+        "coverage": {"campaigns_timed": timed, "campaigns_requested": a["count"],
+                     "complete": timed == a["count"] and not interrupted},
+        "campaigns_live": {"max": camp["max"], "mean": camp["mean"], "requested": a["count"],
+                           "time_ge_95pct_s": camp["time_ge_95pct_s"],
+                           "ramp_up_s": round(max(c_start) - lo, 3) if c_start else None},
+        "agent_phase_s": round(phase, 3) if timed else None,
+        "startup_s": round(max(0.0, lo - t_run), 3) if t_run and timed else None,
+        "shutdown_s": round(max(0.0, t_end_run - hi), 3) if timed else None,
+        "rates_per_s": {"evaluations": rate(len(sim_s)), "model_calls": rate(c["llm_calls"]),
+                        "generations": rate(c["generations"]), "campaigns": rate(len(c_start))},
+        "sims_in_flight": occupancy(e_sub, e_end, lo, hi) if timed else None,     # submitted, not yet returned
+        "sims_executing": occupancy(e_start, e_end, lo, hi) if timed else None,   # on a simulation worker
+        "sim_s": _pct(sim_s), "queue_wait_s": _pct(wait_s), "generation_s": _pct(gen_s),
+        "model_latency_s": _pct(latencies),
+        "loop_lag": [p.get("loop_lag") for p in parts],
+        "sim_workers": workers,
+        # the simulations' own time spread over the workers, against the time the agents ran: 1 means
+        # the run took no longer than its simulations had to
+        "sim_bound_ratio": round(sum(sim_s) / workers / phase, 4) if workers and phase > 0 else None,
+    }
     rec = {
-        "agent_layer": layer, "sim": sim, "llm": knobs["llm"]["mode"],
+        "status": None, "agent_layer": layer, "sim": sim, "llm": knobs["llm"]["mode"],
         "emulated": True, "method": "miniapp_standin",
         "note": "all physics output is synthetic (random-weight stand-in models)", "knobs": knobs,
+        "run": {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"), "host": platform.node(),
+                "slurm_job_id": os.environ.get("SLURM_JOB_ID"), "miniapp_git": git_state(),
+                "backends": sorted({p.get("backend") for p in parts if p.get("backend")})},
         "counts": {
-            "agents": len(lines), "agents_requested": a["count"], "agents_failed": sum(errors.values()),
+            "agents": n_lines, "agents_requested": a["count"], "agents_failed": sum(errors.values()),
             "agent_processes": len(parts) + len(failed), "failed_agent_processes": list(failed),
             **{k: c[k] for k in ("sims", "llm_calls", "tool_calls")},
-            "proposals": {"llm": sources["llm"], "mutation": sources["mutation"]},
-            "suspensions": sum(p["layer"]["suspensions"] for p in parts) if layer == "langgraph" else None,
+            "generations": c["generations"],
+            "candidates_by_source": {k: sources[k] for k in decide.SOURCES},
+            "refill_slots": {"asked": refill["asked"], "filled_by_model": refill["filled"]},
+            "suspensions": sum(p["layer"].get("suspensions") or 0 for p in parts) if layer == "langgraph" else None,
             "sim_tasks": sum(p["sim_tasks"] for p in parts), "memory_writes": sum(p["memory_writes"] for p in parts),
             "reports": sum(p["reports"] for p in parts), "feasible_agents": c["feasible_agents"],
-            "expected_per_agent": {"llm_calls": a["sims_per_agent"] + 1, "sims": a["sims_per_agent"]}},
-        "llm_service": {"calls": sum(p["llm_service"]["calls"] for p in parts), "budgets": dict(budgets)},
+            "expected_per_agent": decide.expected(knobs)},
+        "llm_service": service,
+        "llm_check": llm_check(knobs, refill, service),
         "lookups": dict(tool_calls),
         "touch_check": {"evaluations": sum(devices.values()), "fixture": c["fixture"],
                         "pass": verdicts.pop("pass", 0), "fail": dict(verdicts)},
         "touches": dict(touches), "devices": dict(devices),
-        "wall_seconds": round(wall_s, 3), "results_sha256": digest(lines),
-        "peak_rss_mb": {"main_process": peak_rss_mb(), "agent_process_max": max(peaks),
-                        "agent_processes_sum": round(sum(peaks), 1),
-                        "sim_worker_max": max(sim_peaks) if sim_peaks else None},
+        "wall_seconds": round(wall_s, 3), "results_sha256": hashlib.sha256("\n".join(sorted(rows)).encode()).hexdigest(),
+        "speed": speed,
+        "peak_rss_mb": {"main_process": peak_rss_mb(), "agent_process_max": max(peaks, key=lambda x: x or 0),
+                        "agent_processes_sum": round(sum(x or 0 for x in peaks), 1),
+                        "sim_worker_max": max(worker_rss) if worker_rss else None},
         "versions": versions(), "parent": {k: lock[k] for k in ("source", "branch", "commit")},
-        "device_probe": parts[0]["device"], "frameworks_imported": parts[0]["frameworks"],
-        "sim_pool": parts[0]["sim_pool"], "sim_workers_per_process": parts[0]["sim_workers"],
-        "sim_workers_total": sum(p["sim_workers"] or 0 for p in parts),
+        "device_probe": first.get("device"), "frameworks_imported": first.get("frameworks"),
+        "sim_pool": first.get("sim_pool"), "sim_workers_per_process": first.get("sim_workers"),
+        "sim_workers_total": workers,
+        "threads": first.get("threads"),
+        "pools": [p.get("pool") for p in parts], "pruned_tasks": sum(p.get("pruned_tasks", 0) for p in parts),
         "layer_stats": [p["layer"] for p in parts],
     }
     if errors:
         rec["errors"] = dict(errors)
-    (out / "run_record.json").write_text(json.dumps(rec, indent=1, default=str))
+    c = rec["counts"]
+    # pass: every campaign requested finished, in every agent process, every real evaluation passed its
+    # touch check, and the model check passed; interrupted: SIGTERM or Ctrl-C; otherwise fail
+    rec["status"] = "interrupted" if interrupted else "pass" if not failed and c["agents"] == a["count"] \
+        and not c["agents_failed"] and not rec["touch_check"]["fail"] and not rec["llm_check"]["fail"] else "fail"
+    tmp = out / "run_record.json.tmp"              # written whole, then renamed into place
+    tmp.write_text(json.dumps(rec, indent=1, default=str))
+    os.replace(tmp, out / "run_record.json")
+    for part in parts:                             # only now: both files are in place
+        Path(part["agents_file"]).unlink(missing_ok=True)
     return rec
+
+
+def speed_line(rec: dict) -> str:
+    """The run's main speed numbers on one parsable line (stdout)."""
+    s = rec["speed"]
+    s = {**s, **{k: s[k] or {} for k in ("sims_in_flight", "sims_executing")}}
+    lag = [x.get("p95_ms") for x in s["loop_lag"] if x and x.get("samples")]
+    f = {"status": rec["status"], "layer": rec["agent_layer"], "campaigns": rec["counts"]["agents"],
+         "live_max": s["campaigns_live"]["max"], "live_mean": s["campaigns_live"]["mean"],
+         "time_ge95_s": s["campaigns_live"]["time_ge_95pct_s"], "ramp_s": s["campaigns_live"]["ramp_up_s"],
+         "phase_s": s["agent_phase_s"], "evals_per_s": s["rates_per_s"]["evaluations"],
+         "llm_per_s": s["rates_per_s"]["model_calls"], "in_flight_max": s["sims_in_flight"].get("max"),
+         "executing_max": s["sims_executing"].get("max"), "sim_p50_s": s["sim_s"].get("p50"),
+         "wait_p95_s": s["queue_wait_s"].get("p95"), "gen_p95_s": s["generation_s"].get("p95"),
+         "llm_p95_s": s["model_latency_s"].get("p95"), "lag_p95_ms": max(lag) if lag else None,
+         "sim_bound": s["sim_bound_ratio"]}
+    return "speed: " + " ".join(f"{k}={v}" for k, v in f.items())

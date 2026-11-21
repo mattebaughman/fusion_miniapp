@@ -1,32 +1,26 @@
 #!/bin/bash
-# NOT RUN ON THIS MACHINE YET.
-# Lux (OLCF): one whole node, 8 x AMD Instinct MI355X, 128 cores, 3 TB. ROCm torch answers through torch.cuda.
-# Submit (no defaults; sbatch reads SBATCH_ACCOUNT and SBATCH_PARTITION itself):
-#   export SBATCH_ACCOUNT=... SBATCH_PARTITION=... FUSION_ENV=... FUSION_MINIAPP_DIR=...
-#   sbatch launch/lux.sbatch --agents 100 --preset smoke [--use-academy]
-# torch for this machine (untested here, and on MI355X at all): torch==2.15.0 from
-# https://download.pytorch.org/whl/rocm7.14, to match the rocm/7.14.0 module below.
+# Lux (OLCF), one MI355X on an exclusive node. The simulations require a GPU and fail without one.
+# Export SBATCH_ACCOUNT (lowercase project short name), SBATCH_PARTITION, FUSION_ENV and absolute FUSION_MINIAPP_DIR.
+#   sbatch --output="$MEMBERWORK/$SBATCH_ACCOUNT/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/lux.sbatch" --preset smoke
+# ROCm PyTorch uses the torch.cuda interface. Its wheel supplies ROCm runtime libraries.
+# Planned torch build (untested here): torch 2.15.0, https://download.pytorch.org/whl/rocm7.14
 #SBATCH --job-name=fusion-miniapp
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-# One GPU: every simulation worker uses it (how to split GPUs with model servers is open; README).
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=128
 #SBATCH --exclusive
 #SBATCH --time=00:30:00
-#SBATCH --output=%x-%j.out
+#SBATCH --signal=TERM@120
 
+set -euo pipefail
 module load miniforge3/26.3.2-3
 module load rocm/7.14.0
-
-# ---- identical in all three batch files from here ----
-set -euo pipefail
-: "${FUSION_ENV:?}" "${FUSION_MINIAPP_DIR:?set FUSION_MINIAPP_DIR to the fusion_miniapp folder}"
-cd "$FUSION_MINIAPP_DIR"
-export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"   # srun does not inherit --cpus-per-task
-OUT="results/$SLURM_JOB_NAME-$SLURM_JOB_ID"
-mkdir -p "$OUT"
-# One step on one node with the job's GPU and cores; every simulation worker uses that GPU.
-srun --nodes=1 --ntasks=1 launch/run.sh probe > "$OUT/probe.json"
-grep -q '"cuda_available": true' "$OUT/probe.json" || { echo "torch sees no GPU in this step; see $OUT/probe.json" >&2; exit 1; }
-srun --nodes=1 --ntasks=1 launch/run.sh --out "$OUT/run" "$@"
+# Lux allocates a per-job NVMe slice when a GPU is requested.
+export TMPDIR="${SLURM_TMPDIR:-/mnt/bb/${SLURM_JOB_ID:?}}"
+cache="$TMPDIR/miopen"
+export MIOPEN_USER_DB_PATH="$cache/db"
+export MIOPEN_CUSTOM_CACHE_DIR="$cache/kernels"
+mkdir -p "$MIOPEN_USER_DB_PATH" "$MIOPEN_CUSTOM_CACHE_DIR"
+project=$(tr '[:upper:]' '[:lower:]' <<< "${SLURM_JOB_ACCOUNT:?}")
+exec bash "${FUSION_MINIAPP_DIR:?}/launch/batch.sh" lux "${MEMBERWORK:?}/$project" --gpus-per-task=1 "$@"

@@ -48,8 +48,9 @@ def test_validation_errors_name_the_knob(bad, message):
 def test_load_errors(tmp_path):
     with pytest.raises(KnobError, match="unknown preset"):
         knobs.load(preset="huge")
-    with pytest.raises(KnobError, match="not both"):
-        knobs.load(tmp_path / "x.yaml", preset="smoke")
+    (tmp_path / "m.yaml").write_text("sim: {device: cuda}\n")
+    layered = knobs.load(preset="hundredk", paths=[tmp_path / "m.yaml"])   # preset, then files in order
+    assert layered["agents"]["count"] == 100000 and layered["sim"]["device"] == "cuda"
     with pytest.raises(KnobError, match="not found"):
         knobs.load(tmp_path / "missing.yaml")
     with pytest.raises(KnobError, match="'sim' section as a dict"):

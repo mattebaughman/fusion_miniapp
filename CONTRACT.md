@@ -4,53 +4,58 @@ Package: `fusion_miniapp`, src layout under `src/fusion_miniapp/`. Python 3.12 p
 
 ## Files and owners
 - SIM SIDE: `parent/` (five files, byte-identical), `standins.py`, `sim.py`, `touches.py`, `knobs.py`, `tests/test_sim_*.py`, `knobs/*.yaml`.
-- AGENT SIDE: `decide.py`, `llm.py`, `tools.py`, `layer_langgraph.py`, `layer_academy.py`, `record.py`, `run.py`, `tests/test_agent_*.py`.
-- INTEGRATION: `launch/` (three sbatch files, `run.sh`, `probe.py`), `README.md`, `tests/test_end_to_end.py`, `results/`.
+- AGENT SIDE: `decide.py`, `llm.py`, `tools.py`, `layer_langgraph.py`, `layer_academy.py`, `record.py`, `run.py`, `pool.py`, `compare_records.py`, `tests/test_agent_*.py`, `tests/test_parent_oracle.py` (+ `tests/parent_oracle.py`), `tests/test_run_record.py`, `tests/test_pool.py`, `tests/test_lifecycle.py`, `tests/test_llm_client.py`.
+- INTEGRATION: `launch/` (three sbatch files, `batch.sh`, `run.sh`, `probe.py`), `knobs/machines/*.yaml`, `README.md`, `tests/test_end_to_end.py`, `tests/test_launch.py`, `results/`.
 
 ## The simulation task
 ```python
 # fusion_miniapp/sim.py  -- top-level, importable by name, picklable arguments and result
-def evaluate(candidate: dict, knobs: dict | None = None, agent_id: str = "", seed: int = 0) -> dict: ...
+def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id: str = "", seed: int = 0, *,
+             params: dict | None = None, candidate_idx: int = 0, generation: int = 0) -> dict: ...
 ```
-- `candidate`: any subset of the seven mutable profile parameters `a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te`; the rest are filled deterministically from `seed` with the parent's own sampler.
+- `params`: a full parameter dict from the parent's outer loop (`initialize_population` / `repopulate`, 15 keys with the strings `model` and `kind`), passed to the parent's worker unchanged as `(params, None, candidate_idx, kw)` with `kw["generation"] = generation`. Or `candidate`: any subset of the seven mutable profile parameters `a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te`, the rest filled deterministically from `seed` with the parent's own sampler (not both).
 - `knobs`: the `sim` section of the knob file as a dict (None means the smoke preset).
-- Returns a JSON-serialisable dict: the parent worker's scalar result record, plus `emulated: true`, `device`, `elapsed_seconds`, `touches` (a dict of touch-kind to count) and `touch_check` (`"pass"` or `"fail: <which>"`).
-- It runs the parent's real `_evaluate_single_candidate` / `evaluate_final_innerloop` over stand-ins injected through the adapter's `context` (keys `core_edge_optimization`, `run_matey_inference`, `puff_optimizer`). The context is built once per worker process and set of context knobs, and cached. `evaluate` does not read `cold_start_fraction`; run.py makes cold starts real by retiring each worker process after round(1 / fraction) tasks.
-- A fixture twin `evaluate_fixture(candidate, knobs=None, agent_id="", seed=0) -> dict` returns the same keys instantly with `emulated: true, fixture: true` and no torch import, for large agent-count tests.
+- Returns a JSON-serialisable dict: the parent worker's scalar result record (NaN as None), plus `emulated: true`, `device`, `t_start` (epoch, when the worker started it), `elapsed_seconds`, `worker_peak_rss_mb`, `touches` (a dict of touch-kind to count) and `touch_check` (`"pass"` or `"fail: <which>"`); a cold start adds `cold_start: true`.
+- It runs the parent's real `_evaluate_single_candidate` / `evaluate_final_innerloop` over stand-ins injected through the adapter's `context` (keys `core_edge_optimization`, `run_matey_inference`, `puff_optimizer`). The context is built once per process and set of context knobs, and cached. With `sim.cold_start_fraction` f, an evaluation whose hash of (agent_id, generation, candidate_idx) falls below f runs in a fresh single-use `python -m fusion_miniapp.sim` process started inside the task, tied to its worker by a pipe.
+- A fixture twin `evaluate_fixture(...)` with the same signature returns the same keys instantly with `emulated: true, fixture: true` and no torch import, for large agent-count tests.
 
-## Knob file (YAML; `knobs.py` loads, validates, applies presets `smoke`, `hundredk`, `ignos_shape`)
+## Knob file (YAML; `knobs.py` loads, validates, applies presets `smoke`, `hundredk`, `ignos_shape`, then knob files in order)
 ```yaml
-sim:      {nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap, model_width, checkpoint_mb, device, cold_start_fraction, keep_artifacts, work_root}
-agents:   {count, per_process, sims_per_agent, cost_scale (number or list), thinking_budget, budget_scales_with_cost}
+sim:      {nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap, model_width, checkpoint_mb, device, cold_start_fraction, keep_artifacts, work_root, threads_per_worker}
+agents:   {count, per_process, max_live, cost_scale (number or list), thinking_budget, budget_scales_with_cost}
 tools:    {constraints_lookup, abstract_lookup, latency_ms}
-llm:      {mode: stub|openai, base_url_env, api_key_env, model}
+llm:      {mode: stub|openai, base_url_env, api_key_env, model, send_thinking_budget, timeout_s, max_retries, min_model_share, max_empty_share}
 workers:  {sim_workers}
+outer:    {population, generations, generator: llm|mutation, rng: shared|per_agent, logs: per_agent|none, wall_weight, noise, parent_stdout: keep|drop}
 ```
 
 ## The decision logic (no agent-framework import in this file)
 ```python
 # fusion_miniapp/decide.py
 class Services(Protocol):
-    async def llm(self, agent_id: str, messages: list[dict], thinking_budget: int) -> str: ...
-    async def simulate(self, agent_id: str, candidate: dict, seed: int) -> dict: ...   # awaits one evaluate
-    async def lookup(self, agent_id: str, what: str) -> dict: ...                       # tool call
-    async def remember(self, agent_id: str, state: dict) -> None: ...                   # memory / checkpoint
-    async def report(self, agent_id: str, result: dict) -> None: ...                    # to the campaign manager
-async def run_campaign(agent_id: str, seed: int, knobs: dict, svc: Services, on_state=None) -> dict: ...
+    async def llm(self, agent_id, messages, thinking_budget, reply_tokens) -> str: ...
+    async def simulate(self, agent_id, params, candidate_idx, generation, seed) -> dict: ...   # one evaluate
+    async def lookup(self, agent_id, what) -> dict: ...                                         # tool call
+    async def remember(self, agent_id, state) -> None: ...                                      # memory / checkpoint
+    async def report(self, agent_id, result) -> None: ...                                       # to the campaign manager
 ```
-- `run_campaign` is the whole workflow of the plan's section 1: lookup, then `sims_per_agent` rounds of (LLM proposal, simulate, feasibility and best-so-far update, remember), then an LLM summary, then report. It returns `{agent_id, best, history, summary, n_llm_calls, n_sims, n_tool_calls}`.
-- `on_state(agent_id, state)` is called with `"working"`, `"waiting"` or `"model_request"` at each transition; each layer maps it to its own counters.
-- With the stub LLM and a fixed seed, the result must be identical whichever agent layer runs it.
+- A campaign is the parent's three roles, each with its own memory and step functions:
+  - Generator: `generator_state`, `generator_step` (initialize / repopulate, plus the llm-mode refill call).
+  - Evaluator: `evaluation_calls`, `evaluate_population`.
+  - Coordinator: `coordinator_state`, `start`, `on_population`, `on_evaluated` (select_survivors, update_best_result and log_generation in one step), `summary_messages`, `finish`.
+- `run_campaign(agent_id, seed, knobs, svc, generator, evaluator, ask, out=None, on_state=None)` is the Coordinator's whole run against two handles with `initialize(msg)`, `repopulate(msg)` and `evaluate(population, generation)` (the Academy layer). The LangGraph layer runs the same steps as subgraph nodes.
+- The random generator's state travels as a JSON string in the repopulate message (`outer.rng: shared`), or each role keeps its own `SeedSequence(seed).spawn(2)` stream (`per_agent`).
+- A campaign's result (one line of `agents.jsonl`): `{agent_id, seed, best, generations, summary, sources, refill, n_llm_calls, n_sims, n_tool_calls, budget, touches, devices, touch_checks, fixture, sim_s, wait_s, worker_peak_rss_mb, t_start, t_end, llm_call_details}`.
+- With the stub LLM and a fixed seed, the result (`record.comparable`: without timings, memory, touch counts and device names) must be identical whichever agent layer runs it; with `generator: mutation`, the campaign's `evolution_log.csv`, `evolution_log.jsonl` (timestamps aside) and `best_result.json` must equal the parent driver's (`tests/test_parent_oracle.py`).
 
 ## The two layers and the flag
-- `layer_langgraph.py`: `async def run_agents(n_agents, knobs, svc_factory, out) -> list[dict]` using a LangGraph graph hosted by FlowGentic's agent host, with `evaluate` declared as a suspending task tool on a RHAPSODY session. On a laptop: RHAPSODY's concurrent backend on spawned worker processes for `--sim real` (threads for the fixture), in-memory store, stub model.
-- `layer_academy.py`: the same signature, using Academy agents hosted in-process (local exchange, no executor): a `CampaignAgent` running `run_campaign` and one `EvaluatorAgent` per process in front of the simulation, which submits to the same RHAPSODY session and worker processes.
-- Both accept extra keywords (`first`, `emit`; the LangGraph layer also `store`, `replicas`) used by `run.py` and the machine seams.
-- `run.py` entry point: `python -m fusion_miniapp.run --agents N [--use-academy] [--preset NAME | --knobs FILE] [--sim real|fixture] [--llm stub|openai] [--out DIR]`. `--use-academy` is read once; the chosen layer is imported lazily.
+- `layer_langgraph.py`: `async def run_agents(n_agents, knobs, svc_factory, out, *, first=0, emit=None, store=None, replicas=None) -> list[dict]`. One campaign graph per process with three compiled subgraphs (Coordinator, Generator, Evaluator) and mailbox keys, hosted by FlowGentic's `AgentHost` (`max_live_agents` = `agents.max_live` or all); `evaluate` is a suspending task tool on the process's RHAPSODY session, P calls per generation in one step.
+- `layer_academy.py`: the same signature (without `store`, `replicas`): a `CoordinatorAgent`, a `GeneratorAgent` and an `EvaluatorAgent` per campaign, hosted in-process (local exchange, no executor), launched when the campaign gets one of `agents.max_live` slots and shut down when it ends.
+- `run.py` entry point: `python -m fusion_miniapp.run [--agents N] [--use-academy] [--preset NAME] [--knobs FILE ...] [--sim real|fixture] [--llm stub|openai] [--out DIR]`. `--use-academy` is read once; the chosen layer is imported lazily.
 - While running, both layers print one line per interval to stderr: `agents working=<n> waiting=<n> model_requests=<n> done=<n>`.
 
 ## The run record
-`record.py` writes `<out>/run_record.json`: all knobs, `agent_layer`, `emulated`/`method`/`note` (all physics output synthetic), package versions, the parent commit, the device probe, counts (agents requested and reported, failed agent processes, sims, LLM calls, proposals by source, tool calls, suspensions where the layer has them), `lookups`, `sim_workers_total`, wall time, and the touch-check verdict summed over all evaluations. One JSON line per finished agent goes to `<out>/agents.jsonl`. Only the agent files of this run's agent processes are read.
+`record.py` writes `<out>/run_record.json` (atomically): `status` (pass, fail, interrupted), `run` (time, host, Slurm job, this package's git commit and dirty flag, backend), all knobs, `agent_layer`, `emulated`/`method`/`note` (all physics output synthetic), package versions, the parent commit, the device probe, `counts`, `llm_service`, `llm_check`, `lookups`, the touch-check verdict summed over all evaluations, `speed`, `peak_rss_mb`, `threads`, pool statistics and `results_sha256`. `<out>/agents.jsonl` gets one line per finished campaign, streamed from this run's agent-process files, which are removed only after both files are in place. stdout ends with one `speed:` line. `compare_records.py` compares two records.
 
 ## Changes recorded at integration (2026-11-19)
 1. The laptop backend for `--sim real` was a one-thread pool inside the agent process. It is now a pool of `workers.sim_workers` spawned processes (at least one per agent process), so simulations never share the agents' process or event loop, as the plan requires; this also ended the HDF5 diagnostics a second thread printed. Spawn, not fork, so each worker's exit hook removes its assets directory. The fixture stays on threads (it simulates nothing). `run.Services.open` gained `processes=`; RHAPSODY needs `cloudpickle` for this, added to both extras.
@@ -65,3 +70,10 @@ async def run_campaign(agent_id: str, seed: int, knobs: dict, svc: Services, on_
 4. `cold_start_fraction` is enforced at the pool (`max_tasks_per_child`), not by rebuilding the context in a warm process. `library_import` is touched once per worker process. `sim.py` sets the parent's `FP_TOL` to 0, so `small_forward` is exactly `puffs x fixed_point_cap`.
 5. Both layers admit at most `per_process / count` of `llm.MAX_IN_FLIGHT` model calls at once per process (LangGraph: the fleet; Academy: a semaphore in `_ViaEvaluator.llm`).
 6. `run.py`: the device probe runs before the agents; a failed agent process no longer discards the others' results (`record.write(..., failed=)`); with `--sim real` more agent processes than `workers.sim_workers` is refused; `--llm openai` with `llm.model: stub` is refused; `--agents 0` is rejected; the default output folder name ends in the process id; the exit code also fails when fewer agents report than were requested; SIGTERM unwinds like Ctrl-C, and spawned processes end when their parent ends. The record key `tool_service` is now `lookups`.
+
+## Changes recorded on 2026-11-21 (the IGNOS outer loop; plan `plans/Fusion miniapp pre-port fixes and IGNOS outer loop.md`)
+1. Each agent is one IGNOS campaign: the parent's `run_evolutionary_loop` carried by its three roles in both layers (Matt: "mirror ignos exactly"; "they should both have all three agents"). `agents.sims_per_agent` is gone (P x G); new section `outer`. `decide.run_campaign`, `Services.llm` and `Services.simulate` changed signature as above.
+2. `evaluate` takes `params`, `candidate_idx` and `generation`; cold starts are single-use processes inside the task (`max_tasks_per_child` is gone).
+3. `run.py`: `pool.ResilientProcessPool` (one rebuild per break, bounded shutdown), worker SIGTERM cleans up and `os._exit(143)`, SIGTERM/SIGINT through the event loop with an interrupted record (exit 143), one run-owned temp folder, RHAPSODY's finished tasks pruned, `--out` owned exclusively (`run.lock`), `--knobs` repeatable over `--preset`, thread limits per worker.
+4. `llm.py` (Antigravity): `reply_tokens`, `send_thinking_budget`, `timeout_s`, `max_retries`, per-call details (`call_with_meta`), `close()`. The record fails a run whose model filled too few refill slots or returned too many empty replies.
+5. `launch/` (Codex): machine knob files, `batch.sh`, GPU required, scratch output, `--signal=TERM@120`, probe with a GPU requirement and a finite convolution.

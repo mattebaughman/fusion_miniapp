@@ -1,4 +1,4 @@
-# ignos_shape: the IGNOS campaign shape (few agents, population 16 x 20 generations each, longer
+# ignos_shape: the IGNOS campaign shape (few campaigns, each population 16 x 20 generations, longer
 # simulations), still turned down from the real sizes. Not calibrated. All physics output is synthetic.
 
 sim:
@@ -13,11 +13,12 @@ sim:
   cold_start_fraction: 0.0
   keep_artifacts: false
   work_root: null
+  threads_per_worker: auto
 
 agents:
   count: 4
   per_process: 1
-  sims_per_agent: 320         # population 16 x 20 generations
+  max_live: null
   cost_scale: 1.0
   thinking_budget: 1024
   budget_scales_with_cost: false
@@ -32,6 +33,21 @@ llm:
   base_url_env: OPENAI_BASE_URL
   api_key_env: OPENAI_API_KEY
   model: stub
+  send_thinking_budget: true  # false for a server that rejects the thinking_token_budget field
+  timeout_s: 120              # per model call
+  max_retries: 2              # per model call, on connection errors and 5xx
+  min_model_share: 0.5        # openai mode: the run fails if the model filled fewer refill slots than this share
+  max_empty_share: 0.1        # openai mode: the run fails if more replies than this share were empty
 
 workers:
   sim_workers: 4
+
+outer:                        # each campaign's IGNOS outer loop: the parent's run_evolutionary_loop (the parent campaign: 320 evaluations)
+  population: 16              # P, candidates per generation, all evaluated at once
+  generations: 20             # G; evaluations per campaign = P x G, model calls = G
+  generator: llm              # llm: one model call per refill replaces mutants; mutation: the parent's loop exactly
+  rng: shared                 # shared: one generator, as run_evolutionary_loop; per_agent: two streams, as evo_agents.py
+  logs: per_agent             # per_agent: the parent's evolution_log.csv/.jsonl, config.json, best_result.json per campaign
+  wall_weight: 0.7            # the parent's DEFAULT_WALL_WEIGHT
+  noise: 0.1                  # the parent's mutation amplitude
+  parent_stdout: keep         # keep: the parent's per-generation prints; drop: discard them

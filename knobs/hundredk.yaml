@@ -1,4 +1,4 @@
-# hundredk: the shape of the existing 100,000-agent run (many agents, S of 1 to 3), heavily turned down.
+# hundredk: 100,000 campaigns, each the IGNOS outer loop at population 16 for 2 generations, heavily turned down.
 # These are choices for a demo shape, not calibrated values. All physics output is synthetic.
 
 sim:
@@ -13,11 +13,12 @@ sim:
   cold_start_fraction: 0.0
   keep_artifacts: false
   work_root: null             # set to node-local storage on the machines, e.g. $TMPDIR
+  threads_per_worker: auto
 
 agents:
   count: 100000
   per_process: 10000          # 10 agent processes at 100,000 agents (a choice; the laptop ladder used this)
-  sims_per_agent: 2           # S of 1 to 3; S = 1 is the one-wait shape of the existing run
+  max_live: null              # all 10,000 campaigns of a process live at once (100,000 in all)
   cost_scale: 1.0
   thinking_budget: 256
   budget_scales_with_cost: false
@@ -32,6 +33,21 @@ llm:
   base_url_env: OPENAI_BASE_URL
   api_key_env: OPENAI_API_KEY
   model: stub
+  send_thinking_budget: true  # false for a server that rejects the thinking_token_budget field
+  timeout_s: 120              # per model call
+  max_retries: 2              # per model call, on connection errors and 5xx
+  min_model_share: 0.5        # openai mode: the run fails if the model filled fewer refill slots than this share
+  max_empty_share: 0.1        # openai mode: the run fails if more replies than this share were empty
 
 workers:
   sim_workers: 10             # at least one per agent process; with --sim real each worker is a torch process
+
+outer:                        # each campaign's IGNOS outer loop: the parent's run_evolutionary_loop (3.2 million evaluations in all)
+  population: 16              # P, candidates per generation, all evaluated at once
+  generations: 2              # G; evaluations per campaign = P x G, model calls = G
+  generator: llm              # llm: one model call per refill replaces mutants; mutation: the parent's loop exactly
+  rng: shared                 # shared: one generator, as run_evolutionary_loop; per_agent: two streams, as evo_agents.py
+  logs: none                  # per_agent: the parent's evolution_log.csv/.jsonl, config.json, best_result.json per campaign
+  wall_weight: 0.7            # the parent's DEFAULT_WALL_WEIGHT
+  noise: 0.1                  # the parent's mutation amplitude
+  parent_stdout: drop         # keep: the parent's per-generation prints; drop: discard them

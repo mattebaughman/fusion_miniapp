@@ -14,3 +14,6 @@ results/*
 !results/laptop_2026-11-19_final/
 results/laptop_2026-11-19_final/*/agents.jsonl
 results/laptop_2026-11-19_final/*/rhapsody.session.*
+# the reference problem's records (README in that folder)
+!results/ignos_shape_reference/
+!results/laptop_2026-11-21/

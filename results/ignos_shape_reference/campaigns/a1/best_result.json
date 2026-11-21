@@ -1,0 +1,27 @@
+{
+  "te_core_metric": 909.1286010742188,
+  "params": {
+    "a1_ne": 3.249663,
+    "gamma_ne": 0.330384,
+    "Delta": 0.069236,
+    "a2_ne": 1.387587,
+    "a3": 1.2786193256428233,
+    "a4": 1.3418348907444477,
+    "bcore_ne": 0.028086572589585492,
+    "core_linear_frac_ne": 0.1102528212700378,
+    "a1_Te": 0.502308,
+    "gamma_Te": 0.120277,
+    "a2_Te": 0.406846,
+    "bcore_Te": 0.008752831765353342,
+    "core_linear_frac_Te": 0.5686661543812397,
+    "kind": "H",
+    "model": "three_region"
+  },
+  "generation": 19,
+  "candidate_idx": 0,
+  "is_good": false,
+  "selection_basis": "no_feasible_core_wall_blend",
+  "te_wall_eV": 811.225630037432,
+  "ti_wall_eV": 958.4712204212101,
+  "te_ped_eV": 718.1166381835938
+}

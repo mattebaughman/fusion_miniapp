@@ -6,8 +6,10 @@ stand-ins in standins.py. The parent is configured only through its module attri
 injected context. All physics output is synthetic (random-weight stand-in models).
 
 The parent's fixed-point tolerance is set to 0, so every fixed point runs to `fixed_point_cap` and
-the cap sets the duration. `sim.cold_start_fraction` is not read here: a cold start is a fresh
-worker process, which run.py makes by retiring each worker after round(1 / fraction) tasks.
+the cap sets the duration. A cold start (`sim.cold_start_fraction`) runs one evaluation in a fresh,
+single-use Python process started from inside the worker's task (`python -m fusion_miniapp.sim`), so it
+still counts against the worker pool's size. Which evaluations are cold is a fixed function of the
+campaign, generation and candidate number, so a run repeats exactly.
 
 Importing this module imports neither torch nor the parent files; `evaluate_fixture` never imports torch.
 """
@@ -20,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -37,6 +40,77 @@ PROFILE = ("three_region", "H")             # the parent's validated campaign pr
 _LOCK = threading.RLock()                   # the parent's module attributes and the touch recorder are per process
 _CONTEXTS: dict[tuple, tuple[Path, dict]] = {}   # per-process context cache: context knobs -> (assets, context)
 _CONTEXT_KNOBS = ("nodes_per_plane", "planes", "model_width", "checkpoint_mb", "device")
+_RUN_DIRS: set[Path] = set()                # work directories of evaluations in progress (for cleanup)
+_CHILDREN: set = set()                      # cold-start processes in progress (for cleanup)
+COLD_CHILD = "FUSION_MINIAPP_COLD_CHILD"     # set in a cold-start process, which never starts another
+
+
+def cleanup() -> None:
+    """Stop this process's cold-start children and remove its assets and in-progress work directories;
+    for a worker about to os._exit."""
+    for child in list(_CHILDREN):
+        child.kill()
+        child.wait()
+    for path in [assets for assets, _ in _CONTEXTS.values()] + list(_RUN_DIRS):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def is_cold(fraction: float, agent_id: str, generation: int, candidate_idx: int) -> bool:
+    """Whether this evaluation is a cold start: a hash of its place in the run below the fraction."""
+    if fraction <= 0:
+        return False
+    h = hashlib.sha256(f"{agent_id}/{generation}/{candidate_idx}".encode()).digest()
+    return int.from_bytes(h[:8], "little") / 2**64 < fraction
+
+
+def _cold(**kwargs) -> dict:
+    """One evaluation in a fresh Python process (it loads torch, builds its context, then exits). The
+    child works under a folder this worker owns, so the worker's cleanup removes it even after the child
+    is killed (unless sim.keep_artifacts)."""
+    t_start = time.time()                                # the worker starts the task: a cold start's
+    sim = sim_section(kwargs["knobs"])                   # interpreter launch is simulation time, not queue
+    root = Path(tempfile.mkdtemp(prefix="cold_", dir=work_root(sim)))
+    if not sim["keep_artifacts"]:
+        _RUN_DIRS.add(root)
+    kwargs = {**kwargs, "knobs": {**sim, "work_root": str(root)}}
+    try:
+        record = _cold_child(kwargs)
+        record.update(t_start=t_start, elapsed_seconds=time.time() - t_start)
+        return record
+    finally:
+        if not sim["keep_artifacts"]:
+            _RUN_DIRS.discard(root)
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def _cold_child(kwargs: dict) -> dict:
+    """The child gets the read end of a pipe whose only write end this worker holds. However the worker
+    ends, SIGKILL included, the child then reads end-of-file and exits, so it never overlaps the retry."""
+    life_r, life_w = os.pipe()
+    env = {**os.environ, COLD_CHILD: "1", "FUSION_MINIAPP_LIFELINE": str(life_r)}
+    try:
+        child = subprocess.Popen([sys.executable, "-m", "fusion_miniapp.sim"], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True,
+                                 pass_fds=(life_r,))
+    except BaseException:
+        os.close(life_w)
+        raise
+    finally:
+        os.close(life_r)
+    _CHILDREN.add(child)
+    try:
+        out, err = child.communicate(json.dumps(kwargs), timeout=3600)
+    finally:
+        _CHILDREN.discard(child)
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(life_w)
+    if child.returncode:
+        raise RuntimeError(f"cold-start evaluation failed ({child.returncode}): {err[-2000:]}")
+    record = json.loads(out.splitlines()[-1])
+    record["cold_start"] = True
+    return record
 
 
 def _parent():
@@ -62,9 +136,19 @@ def _parent():
         return evo, fil
 
 
-def _params(candidate: dict, seed: int, evo) -> dict:
-    """The candidate's mutable parameters, clipped to the parent's ranges as its mutation does;
-    every other parameter from the parent's own Latin-hypercube sampler at `seed`."""
+def _params(candidate: dict | None, seed: int, evo, params: dict | None = None) -> dict:
+    """A full parameter dict (`params`, as the parent's outer loop makes them) passes unchanged, as the
+    parent's evaluator takes it. Otherwise `candidate`: some of the seven mutable parameters, clipped to
+    the parent's ranges as its mutation does, every other parameter from the parent's own Latin-hypercube
+    sampler at `seed`."""
+    if params is not None:
+        if candidate:
+            raise ValueError("give a full params dict or a partial candidate, not both")
+        for name, value in params.items():
+            if not isinstance(value, str) and not math.isfinite(float(value)):
+                raise ValueError(f"parameter {name} is not finite: {value}")
+        return dict(params)
+    candidate = candidate or {}
     names = evo.MUTABLE_PARAMS[PROFILE[0]]
     unknown = sorted(set(candidate) - set(names))
     if unknown:
@@ -80,7 +164,23 @@ def _params(candidate: dict, seed: int, evo) -> dict:
     return params
 
 
-def _root(sim: dict) -> Path | None:
+def peak_rss_mb() -> float:
+    """This process's peak resident memory. Linux: VmHWM, which starts afresh at exec (ru_maxrss would
+    carry the parent's size over a spawn's fork and exec); elsewhere ru_maxrss."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        pass
+    import resource
+    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10), 1)
+
+
+def work_root(sim: dict) -> Path | None:
+    """sim.work_root with $VARS and ~ expanded, created; None for the system temp. An unset variable is
+    an error, never a literal folder name."""
     if sim["work_root"] is None:
         return None
     root = Path(os.path.expandvars(sim["work_root"])).expanduser()
@@ -97,8 +197,11 @@ def _context(sim: dict, fil) -> dict:
     if entry is not None and entry[0].is_dir():
         return entry[1]
     from . import standins                                      # first use in a process imports torch here
+    if os.environ.get("FUSION_MINIAPP_THREADS"):                # run.py's per-worker thread limit
+        import torch
+        torch.set_num_threads(int(os.environ["FUSION_MINIAPP_THREADS"]))
     if entry is None or not entry[0].is_dir():
-        assets = Path(tempfile.mkdtemp(prefix="fusion_miniapp_assets_", dir=_root(sim)))
+        assets = Path(tempfile.mkdtemp(prefix="fusion_miniapp_assets_", dir=work_root(sim)))
         atexit.register(shutil.rmtree, assets, True)
         standins.make_assets(assets, sim)
     else:
@@ -109,21 +212,29 @@ def _context(sim: dict, fil) -> dict:
     return context
 
 
-def evaluate(candidate: dict, knobs: dict | None = None, agent_id: str = "", seed: int = 0) -> dict:
+def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id: str = "", seed: int = 0, *,
+             params: dict | None = None, candidate_idx: int = 0, generation: int = 0) -> dict:
     """Evaluate one candidate with the parent's inner loop over the stand-ins; return a JSON-safe record.
 
-    candidate: any subset of the seven mutable profile parameters. knobs: the `sim` section of a knob
+    params: a full parameter dict from the parent's outer loop, passed to the parent's worker as is;
+    candidate_idx and generation are its place in the campaign (the parent's work directory is
+    gen{generation}_candidate{candidate_idx}). Or candidate: any subset of the seven mutable profile
+    parameters, the rest sampled at `seed`. knobs: the `sim` section of a knob
     file (None = smoke preset; a partial dict is merged over it). Calls in one process run one at a
     time (a lock); parallelism comes from processes. The worker never sets CUDA_VISIBLE_DEVICES:
     the launcher exposes the GPU and the device rule picks it up.
     """
     sim = sim_section(knobs)
+    if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):
+        return _cold(candidate=candidate, knobs=knobs, agent_id=agent_id, seed=seed, params=params,
+                     candidate_idx=candidate_idx, generation=generation)
     with _LOCK:
-        start = time.perf_counter()
+        t_start = time.time()   # start and duration on one clock: the speed section builds intervals of them
         evo, fil = _parent()
-        params = _params(candidate or {}, seed, evo)
+        params = _params(candidate, seed, evo, params)
         slug = re.sub(r"[^A-Za-z0-9_.-]", "_", str(agent_id))[:40]
-        run_dir = Path(tempfile.mkdtemp(prefix=f"eval_{slug}_", dir=_root(sim)))
+        run_dir = Path(tempfile.mkdtemp(prefix=f"eval_{slug}_", dir=work_root(sim)))
+        _RUN_DIRS.add(run_dir)
         try:
             with recording() as counts:
                 context = _context(sim, fil)
@@ -132,7 +243,7 @@ def evaluate(candidate: dict, knobs: dict | None = None, agent_id: str = "", see
                 fil.PUFFS = np.linspace(0.5e21, 4.0e21, sim["puffs"])
                 fil.FP_CAP = sim["fixed_point_cap"]
                 fil.FP_TOL = 0.0                                # never converged early: the cap sets duration
-                kw = {"inner_loop": "validated", "model": PROFILE[0], "kind": PROFILE[1], "generation": 0,
+                kw = {"inner_loop": "validated", "model": PROFILE[0], "kind": PROFILE[1], "generation": int(generation),
                       "evo_run_dir": str(run_dir), "conditioned_ckpt": context["conditioned_checkpoint"],
                       "conditioned_yaml": context["conditioned_yaml"],
                       "conditioned_config_name": context["conditioned_config_name"],
@@ -140,28 +251,30 @@ def evaluate(candidate: dict, knobs: dict | None = None, agent_id: str = "", see
                 evo._FINAL_CONTEXT_CACHE.clear()                # the parent must find this context, never build its own
                 evo._FINAL_CONTEXT_CACHE[(kw["conditioned_ckpt"], kw["conditioned_yaml"],
                                           kw["conditioned_config_name"], kw["matey_model_dir"])] = context
-                record = evo._evaluate_single_candidate((params, None, 0, kw))   # gpu_id None
+                record = evo._evaluate_single_candidate((params, None, int(candidate_idx), kw))   # gpu_id None
                 touch("result_return")
                 touch("artifact_write", sum(p.is_file() for p in run_dir.rglob("*")))
         finally:
+            _RUN_DIRS.discard(run_dir)
             if not sim["keep_artifacts"]:
                 shutil.rmtree(run_dir, ignore_errors=True)
         touches = {kind: counts[kind] for kind in KINDS}
-        record.update(emulated=True, device=str(context["device"]),
-                      elapsed_seconds=time.perf_counter() - start,
+        record.update(emulated=True, device=str(context["device"]), t_start=t_start,
+                      elapsed_seconds=time.time() - t_start, worker_peak_rss_mb=peak_rss_mb(),
                       touches=touches, touch_check=check(touches, sim))
         if not sim["keep_artifacts"]:
             record["summary_path"] = ""                         # the work directory is gone
         return fil._json_value(record)                          # NaN -> None, numpy -> Python
 
 
-def evaluate_fixture(candidate: dict, knobs: dict | None = None, agent_id: str = "", seed: int = 0) -> dict:
+def evaluate_fixture(candidate: dict | None = None, knobs: dict | None = None, agent_id: str = "", seed: int = 0, *,
+                     params: dict | None = None, candidate_idx: int = 0, generation: int = 0) -> dict:
     """The same keys as evaluate, instantly and without torch, plus fixture: true. For large agent-count
     tests. Values are a deterministic function of the parameters, not a simulation."""
-    start = time.perf_counter()
+    t_start = time.time()
     sim = sim_section(knobs)
     evo, fil = _parent()
-    params = _params(candidate or {}, seed, evo)
+    params = _params(candidate, seed, evo, params)
     profile = evo.generate_profile(psi=None, model=PROFILE[0], kind=PROFILE[1], params=dict(params))
     digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).digest()
     u = np.random.default_rng(int.from_bytes(digest[:8], "little")).uniform(size=5)
@@ -171,7 +284,7 @@ def evaluate_fixture(candidate: dict, knobs: dict | None = None, agent_id: str =
     wall_ok = bool(te_wall <= fil.WALL_LIMIT_EV and ti_wall <= fil.WALL_LIMIT_EV)
     pedestal_ok = bool(te_ped >= fil.PEDESTAL_FLOOR_EV)
     record = {
-        "params": params, "candidate_idx": 0, "input_te_core_keV": float(profile["Te"][0]),
+        "params": params, "candidate_idx": int(candidate_idx), "input_te_core_keV": float(profile["Te"][0]),
         "te_core_metric": te_core, "te_core_keV": te_core / 1e3, "ti_core_keV": float("nan"),
         "te_wall_eV": te_wall, "ti_wall_eV": ti_wall, "wall_ok": wall_ok, "pedestal_ok": pedestal_ok,
         "elm_ok": None, "is_good": wall_ok and pedestal_ok, "te_ped_eV": te_ped, "ne_ped_m3": ne_ped,
@@ -179,7 +292,27 @@ def evaluate_fixture(candidate: dict, knobs: dict | None = None, agent_id: str =
         "te_wall_div_eV": te_wall, "ti_wall_div_eV": ti_wall,
         "puff_best": float(np.linspace(0.5e21, 4.0e21, sim["puffs"])[int(u[4] * sim["puffs"])]),
         "summary_path": "", "inner_loop": "fixture",
-        "emulated": True, "fixture": True, "device": "none", "elapsed_seconds": time.perf_counter() - start,
+        "emulated": True, "fixture": True, "device": "none", "t_start": t_start, "worker_peak_rss_mb": None,
+        "elapsed_seconds": time.time() - t_start,
         "touches": {kind: 0 for kind in KINDS}, "touch_check": "fail: fixture, no touches made",
     }
     return fil._json_value(record)
+
+
+if __name__ == "__main__":   # a cold-start process: one evaluation, its record as the last stdout line
+    import signal
+
+    def _stop(*_):
+        cleanup()
+        os._exit(143)
+    signal.signal(signal.SIGTERM, _stop)
+
+    def _watch(fd: int) -> None:   # end-of-file: the worker that started this process is gone
+        while os.read(fd, 1):
+            pass
+        cleanup()
+        os._exit(143)
+    if os.environ.get("FUSION_MINIAPP_LIFELINE"):
+        threading.Thread(target=_watch, args=(int(os.environ["FUSION_MINIAPP_LIFELINE"]),), daemon=True).start()
+    _record = evaluate(**json.loads(sys.stdin.read()))
+    sys.stdout.write("\n" + json.dumps(_record) + "\n")
