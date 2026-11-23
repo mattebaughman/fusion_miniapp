@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import gc
 import importlib
 import json
 import multiprocessing as mp
@@ -148,6 +149,28 @@ def _install_running_shim() -> bool:
 
 
 RUNNING_SHIM = _install_running_shim()   # recorded in the run record's `autonmi` section
+
+FULL_GC_THRESHOLD = 10**9   # CPython's third threshold: full collections after this many generation-1 collections
+
+
+def full_gc_auto() -> bool:
+    """Whether CPython's automatic full collections stay on: FUSION_GC_FULL_AUTO=1 keeps them, as CPython has them."""
+    return os.environ.get("FUSION_GC_FULL_AUTO", "0") == "1"
+
+
+def bound_full_collections() -> tuple[int, int, int]:
+    """Turn off CPython's automatic full (generation 2) collections in this process, unless full_gc_auto().
+
+    While agents run, each full collection scans every live object, so its pause grows with the run: at 10,000
+    campaigns one stalled the event loop for 3.6 s, and the loop lag's 99th percentile grew 3.1x from 2,000
+    campaigns (`reports/overnight_2026-11-23/packages/P1/upstream_asks_draft.md`). Flowgentic's host raises only
+    the first threshold and keeps the other two it finds when its first host starts, so this runs before that,
+    in each population's process (Fusion.build). Explicit collections still run, Flowgentic's freeze included;
+    young objects are still collected as before. main() puts the thresholds back after the run."""
+    t = gc.get_threshold()
+    if not full_gc_auto() and t[2] < FULL_GC_THRESHOLD:
+        gc.set_threshold(t[0], t[1], FULL_GC_THRESHOLD)
+    return gc.get_threshold()
 
 ROLES = ("coordinator", "generator", "evaluator")   # a campaign's hosted agents, a<i>/<role>, in this order
 AGENTS_PER_CAMPAIGN = len(ROLES)
@@ -367,7 +390,9 @@ class Fusion:
 
     def build(self, pop) -> ScriptedAgent:
         """Called in the task that runs the population (locally, a block of the run's engine), which is
-        kept so that an interrupted run can wait for the population to end (miniapp_workflow)."""
+        kept so that an interrupted run can wait for the population to end (miniapp_workflow). Before the
+        population's host starts: the full collections' setting (bound_full_collections)."""
+        bound_full_collections()
         self.populations[f"p{pop.index:03d}"] = asyncio.current_task()
         return Script(self, pop).agent()
 
@@ -1431,6 +1456,7 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                       "summary": "summary.json", "runtime": a.runtime, "populations": a.populations,
                       "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions(),
                       "framework_commit": pin, "asyncflow_running_shim": RUNNING_SHIM,
+                      "gc": {"automatic_full_collections": full_gc_auto(), "thresholds": list(gc.get_threshold())},
                       "telemetry": telemetry_verdict(summary)}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     rows, n = _rows(out), knobs["agents"]["count"]
@@ -1466,6 +1492,7 @@ def main(argv=None) -> int:
     a.out = str(out)
     own(out)
     t0, t_run = time.perf_counter(), time.time()
+    thresholds = gc.get_threshold()   # put back after the run (bound_full_collections)
     work_root, threads = None, None
     if a.sim == "real":
         from fusion_miniapp.sim import work_root as sim_work_root
@@ -1495,6 +1522,7 @@ def main(argv=None) -> int:
     rec = write_record(a, knobs, out, wall_s=time.perf_counter() - t0, t_run=t_run, interrupted=interrupted,
                        crashed=crashed, rc=rc, loop_lag=loop_lag, device=device, threads=threads, pin=pin,
                        live=live)
+    gc.set_threshold(*thresholds)
     print(json.dumps({"run_record": str(out / "run_record.json"), "status": rec["status"], "agent_layer": "autonmi",
                       **rec["counts"], "touch_check": rec["touch_check"], "devices": rec["devices"],
                       "wall_seconds": rec["wall_seconds"], "peak_rss_mb": rec["peak_rss_mb"]}), flush=True)

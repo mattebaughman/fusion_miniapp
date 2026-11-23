@@ -185,7 +185,7 @@ def against_reference(out: Path, rec: dict, ref: dict) -> list[str]:
 def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
     """20 fixture campaigns in 2 populations: the same campaigns (results_sha256), counts and knobs as the
     LangGraph layer's run, and the same parent files for each campaign; and both as their recorded reference."""
-    from fusion_miniapp.layer_autonmi import AUTONMI_COMMIT
+    from fusion_miniapp.layer_autonmi import AUTONMI_COMMIT, FULL_GC_THRESHOLD
 
     knobs = fixture_knobs(case)
     common = (*FIXTURE_ARGS, "--knobs", knob_file(tmp_path, knobs))
@@ -204,6 +204,8 @@ def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
     assert (tel["complete"], tel["reasons"], sorted(tel["populations"])) == (True, [], ["p000", "p001"])
     assert tel["tasks"]["abandoned"] == 0 and tel["tasks"]["created"] == tel["tasks"]["completed"] > 0
     assert a["autonmi"]["asyncflow_running_shim"] is True   # the run that agreed had the shim (on by default)
+    assert a["autonmi"]["gc"] == {"automatic_full_collections": False,   # and no automatic full collections
+                                  "thresholds": [700, 10, FULL_GC_THRESHOLD]}, a["autonmi"]["gc"]
     assert 0 < a["counts"]["suspensions"] <= 20 * 2     # at most one per generation: the fan-out's barrier
     assert_three_agents_per_campaign(tmp_path / "autonmi", a)
     if knobs["outer"].get("logs", "per_agent") == "per_agent":
@@ -848,6 +850,25 @@ def test_the_asyncflow_shim_can_be_turned_off():
     proc = subprocess.run([sys.executable, "-c", code], env={**os.environ, "FUSION_ASYNCFLOW_RUNNING_SHIM": "0"},
                           capture_output=True, text=True, timeout=300, check=False)
     assert proc.stdout.split() == ["False", "False"], proc.stderr[-2000:]
+
+
+def test_automatic_full_collections_are_off_unless_asked_for(monkeypatch):
+    """bound_full_collections raises only CPython's third threshold, and leaves it with FUSION_GC_FULL_AUTO=1."""
+    import gc
+
+    from fusion_miniapp import layer_autonmi
+
+    before = gc.get_threshold()
+    try:
+        gc.set_threshold(700, 10, 10)
+        monkeypatch.setenv("FUSION_GC_FULL_AUTO", "1")
+        assert layer_autonmi.bound_full_collections() == (700, 10, 10) and layer_autonmi.full_gc_auto()
+        monkeypatch.delenv("FUSION_GC_FULL_AUTO")
+        assert layer_autonmi.bound_full_collections() == (700, 10, layer_autonmi.FULL_GC_THRESHOLD)
+        assert layer_autonmi.bound_full_collections() == (700, 10, layer_autonmi.FULL_GC_THRESHOLD)   # idempotent
+        assert not layer_autonmi.full_gc_auto()
+    finally:
+        gc.set_threshold(*before)
 
 
 def test_the_autonmi_commit_imported_is_checked_against_the_pin(monkeypatch, capsys):
