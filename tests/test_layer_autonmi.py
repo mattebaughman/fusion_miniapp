@@ -246,10 +246,14 @@ def assert_three_agents_per_campaign(out: Path, rec: dict) -> None:
         assert r["lookups"] == {"coordinator": 1, "generator": 1, "evaluator": 0}[r["role"]], r
         assert r["simulations"] == (r["role"] == "evaluator") * knobs["outer"]["population"] * G, r
         assert r["suspensions"] == 0 or r["role"] == "evaluator", r
+        if r["role"] == "evaluator":   # the inner-loop traces it kept, one per evaluation (monitor.capture)
+            assert r["traces"] == knobs["monitor"]["capture"] * r["simulations"], r
     by = rec["counts"]["by_role"]
     assert {role: by[role]["model_calls"] for role in ROLES} == {
         "coordinator": n, "generator": rec["counts"]["llm_calls"] - n, "evaluator": 0}
     assert by["evaluator"]["suspensions"] == rec["counts"]["suspensions"]
+    assert by["evaluator"]["traces"] == knobs["monitor"]["capture"] * rec["counts"]["sims"]
+    assert by["coordinator"]["traces"] == by["generator"]["traces"] == 0
     assert (rec["counts"]["campaigns"], rec["counts"]["hosted_agents"], rec["counts"]["agents_per_campaign"]) == \
         (n, 3 * n, 3)
     checks = {c["name"]: c for c in json.loads((out / "app" / "checks.json").read_text())}
@@ -281,12 +285,27 @@ def test_an_offset_run_hosts_the_same_campaigns(tmp_path, layer, per_process):
     assert parent_hashes(tmp_path / layer) == {k: ref["parent_files"][k] for k in ("a18", "a19")}
 
 
+@pytest.mark.parametrize("monitor", ({"capture": False}, {"fixture_trace": "hash"}))
+def test_the_trace_changes_no_result(tmp_path, monitor):
+    """The llm-refill case with no trace, or with the hash fixture trace (the smooth one is the default every
+    other run here uses): the reference's results and parent files; the Evaluators keep one trace per
+    evaluation, or none; no campaign's line holds one."""
+    knobs = {**fixture_knobs("llm refills, one random stream, all live"), "monitor": monitor}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs))
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    assert against_reference(tmp_path / "autonmi", rec, reference("fixture_llm_refills")) == []
+    assert_three_agents_per_campaign(tmp_path / "autonmi", rec)
+    assert rec["counts"]["by_role"]["evaluator"]["traces"] == (160 if monitor.get("capture", True) else 0)
+    assert '"trace"' not in (tmp_path / "autonmi" / "agents.jsonl").read_text()
+
+
 @pytest.mark.skipif(bool(_missing("torch")), reason="needs torch")
 def test_real_evaluate_through_the_autonmi_layer_on_cpu(tmp_path):
     common = (*REAL_ARGS, "--knobs", knob_file(tmp_path, REAL_KNOBS))
     a = run("autonmi", tmp_path, *common)
     b = run("langgraph", tmp_path, *common)
     assert a["touch_check"] == {"evaluations": 12, "fixture": 0, "pass": 12, "fail": {}}
+    assert a["counts"]["by_role"]["evaluator"]["traces"] == 12   # the real inner loop's, across processes
     assert a["device_probe"]["torch"]                     # taken in a spawned process, where simulations run
     assert (a["sim_pool"], a["sim_workers_total"]) == ("process", 2)
     assert agree(tmp_path, a, b) == []

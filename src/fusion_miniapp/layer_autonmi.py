@@ -76,7 +76,7 @@ from radical.asyncflow import WorkflowEngine
 from rhapsody.backends import ConcurrentExecutionBackend
 from wfMiniAPI.api import MiniApp
 
-from fusion_miniapp import decide, knobs as knob_files, record, run, tools
+from fusion_miniapp import decide, knobs as knob_files, record, run, tools, trace
 from fusion_miniapp.llm import REPLY_TOKENS, StubLLM
 
 # The AUTONMI framework's commit this layer is tested on: origin/MTU-188-framework (its PR #16). An editable
@@ -393,6 +393,8 @@ class Fusion:
             if role == "coordinator":   # the campaign's model calls by its own count (decide.finish)
                 row.update(llm_calls=sc.llm_calls.get(campaign), start_wait_s=sc.start_wait.get(a),
                            t_begin=sc.began.get(a))
+            elif role == "evaluator":   # the inner-loop traces it kept (monitor.capture)
+                row["traces"] = sc.traced[a]
             out.append(row)
         return out
 
@@ -456,7 +458,14 @@ class Script:
 
     Every id seen outside the agents is the campaign's, a<i>: the stub's key, the evaluations' agent_id
     (their cold starts and work folders), the lookups, the store key, the campaign's folder and its line
-    (its result, or its error), which goes to the population's agents-p<index>.jsonl."""
+    (its result, or its error), which goes to the population's agents-p<index>.jsonl.
+
+    With monitor.capture each evaluation's record carries its inner-loop trace (trace.py). The Evaluator
+    takes the traces out of the results before it sends them, so decide.py (whose collect refuses a trace),
+    the parent's files and the campaign's line never see one. `traces` (campaign -> generation -> the P
+    traces, in candidate order) indexes them for the Monitor until the campaign's Evaluator ends. Popping it
+    frees no memory: AsyncFlow and RHAPSODY keep each evaluate task's returned record, and RHAPSODY a text
+    copy of it (its `stdout`), until the population ends, so the traces are held per population."""
 
     def __init__(self, definition: Fusion, pop) -> None:
         self.knobs, self.sim, self.out, self.pop = definition.knobs, definition.sim, definition.out, pop
@@ -473,6 +482,8 @@ class Script:
         self.llm_calls: dict[str, int] = {}   # each reported campaign's n_llm_calls
         self.start_wait: dict[str, float] = {}   # each Coordinator's wait for every agent to start
         self.began: dict[str, float] = {}        # when each Coordinator began its campaign (time.time())
+        self.traces: dict[str, dict[int, list]] = {}   # each live campaign's traces, by generation
+        self.traced: Counter = Counter()         # the traces each Evaluator kept
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
@@ -480,6 +491,7 @@ class Script:
             run.sim_function(definition.sim), suspend=True, name="evaluate", args_schema=EvaluateArgs,
             description="Evaluate one candidate profile with the turned-down IGNOS inner loop.",
             prepare=lambda agent_id, call_id, args: {**args, "knobs": definition.sim_knobs(args["seed"]),
+                                                     "monitor": self.knobs["monitor"],
                                                      "agent_id": campaign_of(agent_id)})
 
     def agent(self) -> ScriptedAgent:
@@ -574,8 +586,13 @@ class Script:
         candidate order, to the Coordinator; after the last generation, done."""
         me, g = s["agent_id"], s["g"]
         if s["phase"] == "evaluating":   # resumed: the generation's evaluations, all ended
+            results, traces = trace.split(event)   # the traces stay here, out of decide's way
+            kept = sum(t is not None for t in traces)
+            if kept:
+                self.traces.setdefault(s["campaign"], {})[g] = traces
+                self.traced[me] += kept
             self._send(me, "coordinator", "results", g,
-                       {"results": event, "t0": s["t0"], "elapsed_s": time.time() - s["t0"]})
+                       {"results": results, "t0": s["t0"], "elapsed_s": time.time() - s["t0"]})
             g += 1
         if g == self.G:
             await self.mail.receive(me, "done", self.G)
@@ -652,6 +669,8 @@ class Script:
         cancelled (the run was interrupted) writes nothing."""
         self.live["ended"] += 1
         campaign = campaign_of(result.id)
+        if result.id.rpartition("/")[2] == "evaluator":   # its campaign's index of traces ends with it
+            self.traces.pop(campaign, None)
         if result.status == "done":
             self.finished.add(result.id)
         elif result.status == "failed":
@@ -1234,9 +1253,9 @@ def _rows(out: Path) -> list[dict]:
 def by_role(rows: list[dict]) -> dict:
     """counts.by_role, from AUTONMI's rows: each role's agents, those that ended normally, their model calls
     (the fleets' count), lookups, messages sent, received and dropped (a failed campaign's), suspensions
-    (AUTONMI's: the Evaluator's, one per generation unless every evaluation had ended when it asked), and each
-    agent's seconds waiting for messages (their sum, and n, mean, median, 95th percentile and maximum over the
-    agents)."""
+    (AUTONMI's: the Evaluator's, one per generation unless every evaluation had ended when it asked), the
+    inner-loop traces the Evaluators kept (monitor.capture), and each agent's seconds waiting for messages
+    (their sum, and n, mean, median, 95th percentile and maximum over the agents)."""
     out = {}
     for role in ROLES:
         rs = [r for r in rows if r.get("role") == role]
@@ -1244,7 +1263,7 @@ def by_role(rows: list[dict]) -> dict:
         out[role] = {"agents": len(rs), "finished": sum(bool(r.get("finished")) for r in rs),
                      **{k: sum(r.get(k) or 0 for r in rs) for k in ("model_calls", "lookups", "messages_sent",
                                                                      "messages_received", "messages_dropped",
-                                                                     "suspensions")},
+                                                                     "suspensions", "traces")},
                      "message_wait_s": {"sum": round(sum(waits), 3), **record._pct(waits)}}
     return out
 

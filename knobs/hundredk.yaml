@@ -57,3 +57,9 @@ outer:                        # each campaign's IGNOS outer loop: the parent's r
   wall_weight: 0.7            # the parent's DEFAULT_WALL_WEIGHT
   noise: 0.1                  # the parent's mutation amplitude
   parent_stdout: drop         # keep: the parent's per-generation prints; drop: discard them
+
+monitor:                      # the inner-loop trace for the Monitor: added instrumentation, not in IGNOS (trace.py)
+  capture: true               # each evaluation's record carries `trace` (the AUTONMI layer; the LangGraph and
+                              # Academy layers never ask for one). It changes no result
+  fixture_trace: smooth       # --sim fixture, which has no inner loop: smooth (a function of the parameters with
+                              # one planted split) or hash (random, ending at the record's values); synthetic

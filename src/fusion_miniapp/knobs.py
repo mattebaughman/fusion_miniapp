@@ -1,6 +1,6 @@
 """Knob files: load, validate, presets.
 
-A knob file is YAML with six sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
+A knob file is YAML with seven sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
 root is the complete base: a preset, then any knob files in order, are merged over it, so a file
 only needs the keys it changes (a machine file under knobs/machines/ sets only the machine's keys). Unknown sections or keys, wrong types and out-of-range values raise KnobError
 with the dotted name of the offending knob. This module imports no torch.
@@ -78,6 +78,10 @@ SCHEMA = {
         "wall_weight": ("num", 0, 1),
         "noise": ("num", 0, None),
         "parent_stdout": ("choice", ("keep", "drop")),  # the parent's per-generation prints
+    },
+    "monitor": {                              # the inner-loop trace (trace.py): added instrumentation, not in IGNOS
+        "capture": ("bool",),                 # each evaluation's record carries `trace` (the AUTONMI layer)
+        "fixture_trace": ("choice", ("smooth", "hash")),   # --sim fixture: its synthetic trace
     },
 }
 
@@ -189,6 +193,16 @@ def load(path: str | Path | None = None, preset: str | None = None, paths=()) ->
         f = Path(f)
         out = _merge_checked(out, _read_yaml(f), str(f))
     return out
+
+
+def monitor_section(monitor: dict | None) -> dict | None:
+    """The `monitor` section that evaluate() takes, merged over the smoke preset's and checked; None stays
+    None (no trace)."""
+    if monitor is None:
+        return None
+    if not isinstance(monitor, dict):
+        raise KnobError(f"evaluate's monitor must be the 'monitor' section as a dict, got {type(monitor).__name__}")
+    return _merge_checked({"monitor": _base_cached()["monitor"]}, {"monitor": monitor}, "monitor knobs")["monitor"]
 
 
 def sim_section(sim: dict | None) -> dict:

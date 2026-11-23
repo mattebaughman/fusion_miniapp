@@ -38,6 +38,8 @@ def test_partial_file_merges_over_smoke(tmp_path):
     ({"agents": {"cost_scale": [1, "x"]}}, "agents.cost_scale must be a number"),
     ({"agents": {"cost_scale": []}}, "agents.cost_scale must be a number"),
     ({"workers": {"gpus_for_sim": 1}}, "unknown knob workers.gpus_for_sim"),
+    ({"monitor": {"capture": "yes"}}, "monitor.capture must be true or false"),
+    ({"monitor": {"fixture_trace": "random"}}, "monitor.fixture_trace must be one of"),
 ])
 def test_validation_errors_name_the_knob(bad, message):
     with pytest.raises(KnobError) as info:
@@ -55,3 +57,8 @@ def test_load_errors(tmp_path):
         knobs.load(tmp_path / "missing.yaml")
     with pytest.raises(KnobError, match="'sim' section as a dict"):
         knobs.sim_section([1, 2])
+    assert knobs.monitor_section(None) is None                   # evaluate records no trace
+    assert knobs.monitor_section({}) == knobs.base()["monitor"] == {"capture": True, "fixture_trace": "smooth"}
+    assert knobs.monitor_section({"capture": False}) == {"capture": False, "fixture_trace": "smooth"}
+    with pytest.raises(KnobError, match="'monitor' section as a dict"):
+        knobs.monitor_section([1, 2])

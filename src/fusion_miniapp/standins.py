@@ -10,6 +10,9 @@ Random weights and a generated mesh: this reproduces the data flow, library load
 touches of the real loop, not its physics. Core PyTorch only, so one code path serves CUDA and
 ROCm builds. Lifted from research_notes/.../prototypes/inner_loop/inject_probe.py, plus the second
 graph-checkpoint load, xgc_input.npz per step, the colour-range file and the touch records.
+
+The calls to trace.py record per-step values for the Monitor (added instrumentation, not in IGNOS). They
+only read arrays, and do nothing unless the evaluation records a trace.
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ import torch.nn as nn
 import yaml
 from scipy.io import loadmat, savemat
 
+from . import trace
 from .touches import touch
 
 H, W = 38, 98                 # SOLPS grid at its real size; the parent's _clean_pfr indexes it
@@ -221,6 +225,7 @@ def run_ar(model_dir, edge_bcs, xgc_case_dir, n_ar_steps=2, output_base_dir=None
     pos, ei, lo, hi = batch()
     y, _ = forward(model, pos, ei, lo, hi, _up(seed, device))
     primed = _down(y)
+    trace.xgc_step(seed, primed, psi_n_full)
     touch("handoff_memory")                                     # priming output -> rollout input, via the host
 
     pos, ei, lo, hi = batch()                                   # AR helper: mesh again, checkpoint again
@@ -243,6 +248,7 @@ def run_ar(model_dir, edge_bcs, xgc_case_dir, n_ar_steps=2, output_base_dir=None
         w, a = _up(weight, device), _up(anchor, device)
         state = w * y + (1 - w) * a                             # core anchor, blended on the device
         y_np = _down(state)
+        trace.xgc_step(results[-1]["output"] if results else primed, y_np, psi_n_full)
         np.savez(it / "out" / "xgc_output.npz", output=y_np, input=_down(x))
         results.append({"output": y_np, "input": _down(x), "iter_idx": k, "iter_dir": str(it)})
         read_mesh(xgc_case_dir)                                 # the real step reopens the case for a unit
@@ -257,6 +263,7 @@ def load_aux(solps_data_dir, reference_model_dir, device):
     """Normalisation ranges from the hand-off file, uploaded to the device."""
     s = _read_nc(solps_data_dir)
     lo, hi = s.min(axis=(1, 2), keepdims=True), s.max(axis=(1, 2), keepdims=True) * 1.5 + 1e-6
+    trace.handoff(lo, hi)
     return {"lo": _up(lo.astype(np.float32), device), "hi": _up(hi.astype(np.float32), device), "device": device}
 
 
@@ -267,6 +274,7 @@ def read_state_nc(path):
 
 def forward_conditioned(model, aux, hist, puff):
     """One fixed-point iteration's model call: upload, normalise, forward, denormalise, clamp, download."""
+    trace.puff(puff)
     lo, hi = aux["lo"], aux["hi"]
     x = (_up(np.stack(hist).astype(np.float32), aux["device"]) - lo) / (hi - lo)
     cond = torch.full((1, len(hist) + 1), float(puff) / PUFF_SCALE, device=aux["device"])
@@ -277,16 +285,36 @@ def forward_conditioned(model, aux, hist, puff):
 
 
 def rel_l2(a, b):
-    return float(np.linalg.norm(np.asarray(a) - np.asarray(b)) / np.linalg.norm(b))
+    """The fixed point's residual: called once per iteration, with the new state and the one before."""
+    residual = float(np.linalg.norm(np.asarray(a) - np.asarray(b)) / np.linalg.norm(b))
+    trace.fixed_point_step(residual, a, wall_cells, wall_values)
+    return residual
+
+
+# a state's wall cells, rows 19-37 at columns 1 and 96 of each of its 3 fields, as flat indices into (3, 38, 98)
+WALL_CELLS = (np.arange(3)[:, None, None] * H * W + np.arange(19, 38)[:, None] * W + np.array([1, 96])).reshape(3, -1)
+
+
+def wall_cells(state) -> np.ndarray:
+    """A state's (3, 38, 98) wall cells: density, electron and ion temperature, each (38,)."""
+    return np.asarray(state).reshape(-1)[WALL_CELLS]
+
+
+def wall_values(cells) -> tuple:
+    """te_wall_eV, ti_wall_eV and q_peak_proxy: the largest over the wall cells, of one state (3, 38) or of
+    several at once (n, 3, 38)."""
+    ne, te, ti = cells[..., 0, :], cells[..., 1, :], cells[..., 2, :]
+    return te.max(-1), ti.max(-1), (ne * np.abs(te) ** 1.5).max(-1)
 
 
 def wall_pedestal_metrics(state, geom):
     ne, te, ti = state
-    rows, cols, jxa = np.arange(19, 38), [1, 96], geom["jxa"]
-    return {"te_wall_eV": float(te[rows][:, cols].max()), "ti_wall_eV": float(ti[rows][:, cols].max()),
+    jxa = geom["jxa"]
+    te_wall, ti_wall, q_peak = wall_values(wall_cells(state))
+    return {"te_wall_eV": float(te_wall), "ti_wall_eV": float(ti_wall),
             "te_ped_eV": float(te[0, jxa]), "ne_ped_m3": float(ne[0, jxa]),
             "p_ped_Pa": float(ne[0, jxa] * (te[0, jxa] + ti[0, jxa]) * 1.602e-19),
-            "q_peak_proxy": float((ne[rows][:, cols] * np.abs(te[rows][:, cols]) ** 1.5).max())}
+            "q_peak_proxy": float(q_peak)}
 
 
 # ------------------------------ the context builder ------------------------------

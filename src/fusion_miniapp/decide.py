@@ -390,7 +390,8 @@ def on_population(cst: dict, reply: dict) -> tuple[dict, dict]:
 
 def collect(population: list[dict], results: list[dict]) -> list[dict]:
     """The generation as the parent's evaluator returns it: in candidate order, each result's params the
-    submitted candidate, and NaN where the parent has a float and the JSON round trip left None."""
+    submitted candidate, and NaN where the parent has a float and the JSON round trip left None. A result
+    that still holds its inner-loop trace (trace.py) is refused: the outer loop and its logs never see one."""
     results = sorted(results, key=lambda r: r["candidate_idx"])
     if [r["candidate_idx"] for r in results] != list(range(len(population))):
         raise RuntimeError(f"expected candidates 0..{len(population) - 1}, got "
@@ -399,6 +400,8 @@ def collect(population: list[dict], results: list[dict]) -> list[dict]:
     for r, p in zip(results, population):
         if r["params"] != p:
             raise RuntimeError(f"candidate {r['candidate_idx']}: the result's params are not the submitted ones")
+        if "trace" in r:
+            raise RuntimeError(f"candidate {r['candidate_idx']}: the result holds its inner-loop trace")
         out.append({k: float("nan") if v is None and k in FLOAT_KEYS else v for k, v in r.items()})
     return out
 

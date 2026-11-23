@@ -4,7 +4,8 @@
 
 Results must agree: the counts and the knobs other than the machine's own (sim.device, sim.work_root,
 sim.threads_per_worker, workers.sim_workers; agents.per_process, max_live and start_together: the layout) and
-the model service's (llm.stub_latency_s, llm.max_in_flight, llm.admission_tokens), and the campaigns. A record
+the model service's (llm.stub_latency_s, llm.max_in_flight, llm.admission_tokens) and the Monitor's trace
+(monitor.capture, monitor.fixture_trace: no result reads it), and the campaigns. A record
 older than a knob ran with the value ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
 once. Otherwise each campaign in the two neighbouring agents.jsonl files is compared by agent_id: ids,
 booleans, strings (selection basis) and integers (generations, counts, candidate numbers) exactly, floats
@@ -23,7 +24,8 @@ from pathlib import Path
 
 MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_worker"), ("workers", "sim_workers"),
                  ("agents", "per_process"), ("agents", "max_live"), ("agents", "start_together"),   # the layout
-                 ("llm", "stub_latency_s"), ("llm", "max_in_flight"), ("llm", "admission_tokens")}   # the model's
+                 ("llm", "stub_latency_s"), ("llm", "max_in_flight"), ("llm", "admission_tokens"),   # the model's
+                 ("monitor", "capture"), ("monitor", "fixture_trace")}   # the trace, which no result reads
 # knobs newer than some records, with the value those records ran with
 ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False}
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",

@@ -68,6 +68,48 @@ evaluation:
 Every call checks its own touches (below). `--sim fixture` replaces `evaluate` with an instant,
 torch-free stand-in for large agent counts. It makes no touches.
 
+### The inner-loop trace: added instrumentation, not in IGNOS
+
+For the Monitor (planned: plan `separate agents and Monitor on AUTONMI`, package P6), each evaluation's record
+can carry `trace`, a step-by-step account of its inner loop (`trace.py`). IGNOS records none of it; the
+values are read, never changed, so results, touches and the parent's files are the same with or without it.
+In the `hundredk` shape it holds 232 numbers:
+- what the parent computes and then drops: the summary's per-puff scan rows (puff, the six wall and pedestal
+  metrics, iterations, residual, converged) and its four stage timings. `sim.py` wraps the parent's
+  `evaluate_final_innerloop`, as it wraps `_clean_pfr`; the parent's files are untouched.
+- values recorded in the stand-ins (`standins.py`): for the XGC stage's priming state and each rollout step,
+  the relative change and the mean density, electron and ion temperature over the nodes with psi > 0.80
+  (outside the anchored core); for each iteration of each puff's fixed point, the residual and the new
+  state's te_wall, ti_wall and q_peak_proxy (the cells `wall_pedestal_metrics` reads); and the hand-off
+  file's normalisation ranges.
+
+The field is `{"kind", "synthetic", "complete", "sections", "f32"}`: the values as float32 in base64, with a
+one-line header of section shapes (`xgc:3x4 fixed_point:3x15x4 handoff:6 scan:3x10 timings_s:4`), about
+1.4 KB. `trace.unpack` returns the arrays. Each puff's series ends at that puff's scan row, and the selected
+puff's at the record's own values. Every fixed point runs to its cap (the tolerance is 0), so `converged` is
+always false; the residual series is the only convergence signal.
+
+The fixture has no inner loop, so its trace is synthetic, of the same shape, and labelled
+(`"kind": "synthetic_smooth"` or `"synthetic_hash"`, `"synthetic": true`). It uses none of the fixture's own
+draws: every other field of the fixture's record is byte-identical with or without it.
+- `smooth` (the default) is a smooth function of the normalised parameters with one planted split.
+  Candidates on either side of the middle of `a1_Te`'s range follow each other until fixed-point iteration
+  `fixed_point_cap // 2` of each puff, and then part in te_wall, ti_wall and q_peak_proxy. Its series end at
+  their own values, not the record's (the record's come from a hash of the parameters).
+- `hash` is random, from a second generator seeded by the parameters' digest. The selected puff ends at the
+  record's te_wall, ti_wall and q_peak_proxy.
+
+Knobs `monitor.capture` (default true) and `monitor.fixture_trace` (`smooth` or `hash`). They are not under
+`sim`, so no campaign's `config.json` changes. Only the AUTONMI layer asks for a trace. Its Evaluator takes
+each trace out of the results before it sends them to the Coordinator, so `decide.py` (whose `collect`
+refuses a result that holds one), the parent's files and `agents.jsonl` never see one; it indexes them for
+the Monitor until its campaign ends (`counts.by_role.evaluator.traces` counts them). The memory stays held
+until the population ends: AsyncFlow and RHAPSODY keep each evaluation's returned record, and RHAPSODY a
+text copy of it, until then. Measured at 2,000 campaigns (fixture, hundredk, one population) that is about
+3.6-3.8 KiB per evaluation, and the run was about 4.6% slower; `capture: false` removes both. The LangGraph
+and Academy layers never ask for a trace, so in their run records the `monitor` knobs are recorded but do
+nothing.
+
 ## Two agent layers, one flag
 
 `--use-academy` picks the agent layer, once, at invocation. Both layers give every campaign the same
@@ -410,7 +452,7 @@ machines, or both layers) against each other:
 
 ## The knob file
 
-One YAML file with six sections. A preset and any number of knob files are merged in order over
+One YAML file with seven sections. A preset and any number of knob files are merged in order over
 `knobs/smoke.yaml`, so a file needs only the keys it changes. The turn-down is the `sim` section.
 
 | Section | Knobs |
@@ -421,6 +463,7 @@ One YAML file with six sections. A preset and any number of knob files are merge
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server) |
 | `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one) |
+| `monitor` | `capture` (each evaluation's record carries the inner-loop trace; the AUTONMI layer only; default true), `fixture_trace` (`smooth` or `hash`: the fixture's synthetic trace). Added instrumentation, not in IGNOS; no result reads it |
 
 | Preset | Campaigns | P | G | Simulations per campaign | Simulations in all | Notes |
 |---|---|---|---|---|---|---|
@@ -496,6 +539,9 @@ people (see Open items).
   generation with no feasible candidate.
 - Results cross processes as JSON, so NaN arrives as None. The Coordinator puts NaN back for the
   parent's float keys before selection and logging.
+- The inner-loop trace (above) is added instrumentation, not in IGNOS: `evaluate_final_innerloop` is
+  wrapped to keep its summary's scan rows and timings, and the stand-ins record per-step values. Nothing it
+  records reaches selection or the parent's files.
 
 ## Machines
 

@@ -148,3 +148,184 @@ def test_evaluate_pickles_by_name_and_runs_in_spawned_pool():
     t = r["touches"]                                            # a cold start: a fresh process
     assert (t["context_build"], t["library_import"], t["checkpoint_load"], t["model_to_device"]) == (1, 4, 3, 3)
     assert f["fixture"] is True
+
+
+# --- the inner-loop trace (trace.py; monitor knobs): added instrumentation, not in IGNOS ---------------------
+
+TIMING = ("elapsed_seconds", "t_start", "worker_peak_rss_mb")
+HUNDREDK_SHAPE = {"rollout_steps": 2, "puffs": 3, "fixed_point_cap": 15}
+
+
+def _same_but_trace(on: dict, off: dict) -> None:
+    """on is off plus its trace: every other field byte-identical, in the same order."""
+    assert "trace" not in off and set(on) == set(off) | {"trace"}
+    strip = lambda r: {k: v for k, v in r.items() if k not in TIMING + ("trace",)}   # noqa: E731
+    assert json.dumps(strip(on)) == json.dumps(strip(off))
+
+
+def test_capture_changes_nothing_but_the_trace():
+    """Real evaluations in a warm process, capture off and on, the same candidates: the same record (touch counts
+    included), plus the trace; None (as the LangGraph and Academy layers call evaluate) records none."""
+    from fusion_miniapp import trace
+    for knobs in (DEV, {**DEV, **HUNDREDK_SHAPE, "nodes_per_plane": 400}):
+        evaluate({}, knobs)                                     # warm: this context is built
+        none = evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4)
+        off = evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4, monitor={"capture": False})
+        on = evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4, monitor={})
+        _same_but_trace(on, off)
+        _same_but_trace(on, none)
+        assert on["touch_check"] == "pass" and on["touches"] == off["touches"]
+        t = on["trace"]
+        assert (t["kind"], t["synthetic"], t["complete"]) == ("inner_loop", False, True)
+        shapes = {k: v.shape for k, v in trace.unpack(t).items()}
+        assert shapes == trace.shapes(sim.sim_section(knobs))
+
+
+def test_a_cold_start_keeps_its_trace():
+    """A cold start runs in a fresh process, which gets the monitor knobs: the same record as with capture off,
+    plus a complete trace; None records none."""
+    knobs = {**DEV, "cold_start_fraction": 1.0}
+    off = evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4, monitor={"capture": False})
+    on = evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4, monitor={})
+    _same_but_trace(on, off)
+    assert on["cold_start"] is True and on["touch_check"] == "pass"
+    assert (on["trace"]["kind"], on["trace"]["complete"]) == ("inner_loop", True)
+    assert "trace" not in evaluate({"a1_Te": 0.75}, knobs, agent_id="c", seed=4)
+
+
+def test_an_incomplete_recording_says_so():
+    """pack checks every hook's count against the knobs' shape: a missing fixed-point iteration, or an XGC step
+    too many, makes the trace incomplete, and a cell nothing came for is NaN."""
+    from fusion_miniapp import trace
+    shape = {"rollout_steps": 1, "puffs": 2, "fixed_point_cap": 2}
+    psi, states = np.linspace(0, 1, 10), [np.full((10, 8), i + 1, np.float32) for i in range(4)]
+    state = np.arange(3 * 5, dtype=float).reshape(3, 5)
+    cells = lambda s: s                                                                     # noqa: E731
+    values = lambda c: (c[..., 1, :].max(-1), c[..., 2, :].max(-1), c[..., 0, :].max(-1))   # noqa: E731
+
+    def record(xgc_steps: int, skip: tuple | None) -> dict:
+        with trace.recording(shape) as rec:
+            for i in range(xgc_steps):
+                trace.xgc_step(states[i], states[i + 1], psi)
+            trace.handoff(np.zeros((3, 1, 1)), np.ones((3, 1, 1)))
+            for p, puff in enumerate((1e21, 2e21)):
+                trace.puff(puff)
+                for it in range(2):
+                    if (p, it) != skip:
+                        trace.fixed_point_step(0.5 / (it + 1), state, cells, values)
+            trace.summary({"scan": [{"puff": 1e21}, {"puff": 2e21}], "timings": {"step3_seconds": 0.1}})
+        return trace.pack(rec)
+    whole = record(2, None)
+    assert whole["complete"] and np.isfinite(trace.unpack(whole)["fixed_point"]).all()
+    assert list(trace.unpack(whole)["fixed_point"][1, 1]) == [0.25, 9, 14, 4]
+    missing = record(2, (1, 1))
+    assert not missing["complete"] and np.isnan(trace.unpack(missing)["fixed_point"][1, 1]).all()
+    assert trace.unpack(missing)["fixed_point"][1, 0, 0] == 0.5
+    extra = record(3, None)
+    assert not extra["complete"] and trace.unpack(extra)["xgc"].shape == (2, 4)
+    assert trace.unpack(whole)["xgc"].tolist() == trace.unpack(extra)["xgc"].tolist()
+
+
+def test_decide_refuses_a_result_that_holds_its_trace():
+    """The outer loop never sees a trace: decide.collect refuses a result that still holds one (the AUTONMI
+    Evaluator takes them out first)."""
+    from fusion_miniapp import decide
+    population, result = [{"a1_Te": 0.5}], {"candidate_idx": 0, "params": {"a1_Te": 0.5}}
+    assert decide.collect(population, [result]) == [result]
+    with pytest.raises(RuntimeError, match="inner-loop trace"):
+        decide.collect(population, [{**result, "trace": {"kind": "inner_loop"}}])
+
+
+def test_real_series_end_at_the_records_values():
+    """Each puff's fixed-point series ends at its own scan row (te_wall, ti_wall, q_peak_proxy, residual), and the
+    selected puff's at the record's values; every fixed point runs to the cap; the XGC rows and the hand-off ranges
+    are there (float32 throughout)."""
+    from fusion_miniapp import trace
+    knobs = {**DEV, "puffs": 3, "fixed_point_cap": 4, "rollout_steps": 3}
+    r = evaluate({"a1_Te": 0.6, "a2_Te": 0.8}, knobs, seed=7, monitor={})
+    a, f32 = trace.unpack(r["trace"]), np.float32
+    scan, fp = a["scan"], a["fixed_point"]
+    assert fp.shape == (3, 4, 4) and scan.shape == (3, 10) and a["xgc"].shape == (4, 4)
+    for i in range(3):
+        assert list(fp[i, -1]) == [scan[i, 8], scan[i, 1], scan[i, 2], scan[i, 6]]
+    assert list(scan[:, 0]) == list(np.linspace(0.5e21, 4.0e21, 3).astype(f32))
+    assert list(scan[:, 7]) == [4, 4, 4] and list(scan[:, 9]) == [0, 0, 0]   # the cap, never converged (FP_TOL 0)
+    (sel,) = np.flatnonzero(scan[:, 0] == f32(r["puff_best"]))
+    assert list(fp[sel, -1, 1:]) == [f32(r[k]) for k in ("te_wall_eV", "ti_wall_eV", "q_peak_proxy")]
+    assert list(scan[sel, 1:7]) == [f32(r[k]) for k in ("te_wall_eV", "ti_wall_eV", "te_ped_eV", "ne_ped_m3",
+                                                         "p_ped_Pa", "q_peak_proxy")]
+    assert np.isfinite(a["xgc"]).all() and (a["xgc"][:, 0] > 0).all()
+    assert (a["handoff"][:3] < a["handoff"][3:]).all() and (a["timings_s"] >= 0).all()
+    assert np.isfinite(fp).all() and (np.diff(fp[:, :, 0], axis=1) != 0).all()   # a residual per iteration
+
+
+def test_the_trace_survives_the_parents_json_value_json_and_pickle():
+    """About 1.4 KB at the hundredk shape (232 values), in strings and a bool: the parent's _json_value, JSON and
+    pickle give it back unchanged."""
+    from fusion_miniapp import trace
+    evo, fil = sim._parent()
+    for r in (evaluate({}, DEV, monitor={}), evaluate_fixture({}, HUNDREDK_SHAPE, monitor={})):
+        t = r["trace"]
+        assert fil._json_value(t) == t and json.loads(json.dumps(t)) == t and pickle.loads(pickle.dumps(t)) == t
+    assert sum(v.size for v in trace.unpack(t).values()) == 232 and len(json.dumps(t)) < 1500
+
+
+@pytest.mark.parametrize("how", ["smooth", "hash"])
+def test_fixture_fields_and_draws_are_unchanged_by_its_trace(how):
+    """The fixture's record with a trace is its record without one, byte for byte (its five draws untouched), plus
+    a synthetic trace that says so; the same parameters give the same trace."""
+    from fusion_miniapp import trace
+    for seed in range(5):
+        off = evaluate_fixture({}, HUNDREDK_SHAPE, seed=seed)
+        on = evaluate_fixture({}, HUNDREDK_SHAPE, seed=seed, monitor={"fixture_trace": how})
+        _same_but_trace(on, off)
+        _same_but_trace(on, evaluate_fixture({}, HUNDREDK_SHAPE, seed=seed, monitor={"capture": False}))
+        assert (on["trace"]["kind"], on["trace"]["synthetic"]) == (f"synthetic_{how}", True)
+        again = evaluate_fixture({}, HUNDREDK_SHAPE, seed=seed, monitor={"fixture_trace": how})
+        assert on["trace"] == again["trace"]
+        shapes = {k: v.shape for k, v in trace.unpack(on["trace"]).items()}
+        assert shapes == trace.shapes(sim.sim_section(HUNDREDK_SHAPE))
+
+
+def test_hash_fixture_trace_ends_at_the_records_values():
+    from fusion_miniapp import trace
+    f32 = np.float32
+    for seed in range(5):
+        r = evaluate_fixture({}, HUNDREDK_SHAPE, seed=seed, monitor={"fixture_trace": "hash"})
+        a = trace.unpack(r["trace"])
+        (sel,) = np.flatnonzero(a["scan"][:, 0] == f32(r["puff_best"]))
+        wall = [f32(r[k]) for k in ("te_wall_eV", "ti_wall_eV", "q_peak_proxy")]
+        assert list(a["fixed_point"][sel, -1, 1:]) == wall
+        assert list(a["scan"][sel, 1:7]) == [f32(r[k]) for k in ("te_wall_eV", "ti_wall_eV", "te_ped_eV", "ne_ped_m3",
+                                                                  "p_ped_Pa", "q_peak_proxy")]
+
+
+def _gaps(t1: dict, t2: dict) -> np.ndarray:
+    """The relative gap |a - b| / (|a| + |b| + eps) at each step of the inner loop (the XGC rows, then each puff's
+    iterations), the largest over the step's values (the Monitor's measure, plan section 3.3)."""
+    from fusion_miniapp import trace
+    a, b = trace.unpack(t1), trace.unpack(t2)
+    steps = lambda x: np.concatenate([x["xgc"], x["fixed_point"].reshape(-1, 4)]).astype(float)   # noqa: E731
+    sa, sb = steps(a), steps(b)
+    return (np.abs(sa - sb) / (np.abs(sa) + np.abs(sb) + 1e-30)).max(axis=1)
+
+
+@pytest.mark.parametrize("shape", [HUNDREDK_SHAPE, {}])   # hundredk's and smoke's
+def test_smooth_fixture_trace_has_its_planted_split(shape):
+    """Two candidates either side of a1_Te's mid-range (normalised 0.47 and 0.53, everything else equal) agree to
+    within 1% at every step before fixed-point iteration cap // 2 of the first puff, and part there (more than 5%);
+    two on one side (0.60, 0.70) never part; the trace is smooth: a small step in a1_Te makes a small change."""
+    from fusion_miniapp import decide, trace
+    lo, hi = decide.ranges()[trace.SPLIT_PARAM]
+    s = sim.sim_section(shape)
+    k, c = s["rollout_steps"], s["fixed_point_cap"]
+
+    def at(x: float) -> dict:
+        return evaluate_fixture({trace.SPLIT_PARAM: lo + x * (hi - lo)}, shape, seed=11, monitor={})["trace"]
+    across = _gaps(at(0.47), at(0.53))
+    split = k + 1 + c // 2                                      # the XGC rows, then puff 0's iterations
+    assert (across[:split] < 0.01).all() and split >= 2, across
+    assert across[split] > 0.05 and np.flatnonzero(across > 0.05)[0] == split, across
+    assert across[-1] > 0.05                                    # parted to the end: the outcomes differ
+    assert (_gaps(at(0.60), at(0.70)) < 0.01).all()
+    assert (_gaps(at(0.30), at(0.301)) < 1e-3).all()
