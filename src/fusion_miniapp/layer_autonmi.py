@@ -44,6 +44,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections import Counter
@@ -59,6 +60,7 @@ from flowgentic.host import current_agent
 from flowgentic.tools import task_tool
 from pydantic import BaseModel
 from radical.asyncflow import WorkflowEngine
+from rhapsody.backends import ConcurrentExecutionBackend
 from wfMiniAPI.api import MiniApp
 
 from fusion_miniapp import decide, knobs as knob_files, record, run, tools
@@ -110,10 +112,52 @@ def sim_pool(workers: int):
     return pool
 
 
+class FixturePool(run.FixturePool):
+    """run.py's fixture threads, each running the simulations' coroutines on one event loop of its own.
+
+    Flowgentic makes every simulation a coroutine (AsyncFlow runs async tasks only), and RHAPSODY's thread
+    backend runs each one with asyncio.run (`_run_in_thread`). On Python 3.12 asyncio.run ends by collecting
+    every task of the process (asyncio.all_tasks walks one process-wide set), the live campaigns' included:
+    a cost per evaluation that grows with the campaigns, so a run grew about with their square (2,000
+    campaigns in the hundredk shape: 2,053 s, against 180 s on one loop per thread). RHAPSODY's own fix
+    (reuse_event_loop, radical-cybertools/rhapsody#163) is not released; once it is, PopulationConfig(
+    reuse_event_loop=True) replaces this class. Every other call is submitted unchanged, and so is this one
+    if RHAPSODY stops making it. The fixture's coroutines leave no tasks behind on the loop."""
+
+    def __init__(self, workers: int) -> None:
+        super().__init__(workers)
+        self._local = threading.local()
+        self._loops: list = []
+        self._loops_lock = threading.Lock()
+
+    def submit(self, fn, /, *args, **kwargs):
+        if fn is ConcurrentExecutionBackend._run_in_thread and len(args) == 3 and not kwargs \
+                and asyncio.iscoroutinefunction(args[0]):   # RHAPSODY's own test, so both agree
+            return super().submit(self._on_thread_loop, *args)
+        return super().submit(fn, *args, **kwargs)
+
+    def _on_thread_loop(self, func, args, kwargs):
+        loop = getattr(self._local, "loop", None)
+        if loop is None:
+            loop = self._local.loop = asyncio.new_event_loop()
+            with self._loops_lock:
+                self._loops.append(loop)
+        return loop.run_until_complete(func(*args, **kwargs))
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+        if wait:   # the threads have ended: their loops can close
+            with self._loops_lock:
+                loops, self._loops = self._loops, []
+            for loop in loops:
+                loop.close()
+
+
 def fixture_pool(workers: int):
     """The executor of a population's fixture evaluations: run.py's threads, which drop their queued work
-    when they close (an interrupted run can hold tens of thousands of queued evaluations)."""
-    return run.FixturePool(workers)
+    when they close (an interrupted run can hold tens of thousands of queued evaluations), each with an
+    event loop of its own (FixturePool)."""
+    return FixturePool(workers)
 
 
 class Fusion:

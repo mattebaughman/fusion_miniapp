@@ -106,7 +106,9 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   of its own for its simulations.
   - Locally the populations run in one process. Real simulations run in spawned workers
     (`pool.ResilientProcessPool`, `--workers` per population; by default its share of
-    `workers.sim_workers`).
+    `workers.sim_workers`). Fixture simulations run on threads that each keep one event loop
+    (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the
+    process each time, and a run's time grew about with the square of its campaigns.
   - Under Dragon (`--runtime dragon`), each population is a Dragon process, its simulations run on
     RHAPSODY's native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not
     place populations on nodes yet, and refuses more.

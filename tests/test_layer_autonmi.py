@@ -270,6 +270,25 @@ def test_populations_and_workers_follow_run_py():
         layout(hundredk, "real", populations=20)                   # fewer workers than populations
 
 
+def test_fixture_threads_keep_one_event_loop_each():
+    """RHAPSODY's thread backend runs each coroutine task with asyncio.run, whose end walks every task of
+    the process (a cost that grows with the live campaigns); the fixture pool the layer gives AUTONMI runs
+    them on one loop per thread. Other calls, and its queued work at close, are as run.py's pool."""
+    from rhapsody.backends import ConcurrentExecutionBackend
+
+    from fusion_miniapp.layer_autonmi import fixture_pool
+
+    async def loop_of_task():
+        return asyncio.get_running_loop()
+
+    pool = fixture_pool(1)
+    loops = [pool.submit(ConcurrentExecutionBackend._run_in_thread, loop_of_task, (), {}).result() for _ in range(5)]
+    assert len({id(loop) for loop in loops}) == 1 and not loops[0].is_closed()   # the list keeps each alive
+    assert pool.submit(sum, (1, 2)).result() == 3
+    pool.shutdown()
+    assert loops[0].is_closed()
+
+
 def test_autonmi_layer_has_the_mini_app_shape():
     """The script-shape check that workflow-mini-apps applies to its own mini-apps, from the clone wfMiniAPI
     is installed from."""
