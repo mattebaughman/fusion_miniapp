@@ -2,7 +2,10 @@
 # Academy layers run in it too: their tests pass on this Flowgentic.
 #
 # The AUTONMI framework (the package `autonmi`) is installed separately, into the same environment: it
-# is not public yet, and the RADICAL team can provide access. The rest, from this folder:
+# is not public yet, and the RADICAL team can provide access. This layer is tested on its commit
+# e20861a8cf5d996c4b1fb332f57d7758bfeb4c75 (origin/MTU-188-framework): layer_autonmi.AUTONMI_COMMIT, which
+# each run checks against the commit it imported (a warning on stderr when they differ; the run record's
+# autonmi.framework_commit). The rest, from this folder:
 #   git clone https://github.com/radical-cybertools/workflow-mini-apps ../workflow-mini-apps
 #   git -C ../workflow-mini-apps checkout d8056266d23b112b96b91ff42c48622f0b45f6ad
 #   uv venv --python 3.12 .venv-autonmi

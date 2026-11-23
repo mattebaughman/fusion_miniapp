@@ -1,0 +1,253 @@
+{
+ "recorded_from": "the LangGraph layer (python -m fusion_miniapp.run), dev's frozen comparison",
+ "header": {
+  "code": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "subject": "asyncflow running-set shim",
+   "dirty": false,
+   "how": "git archive of the commit, run with PYTHONPATH=<export>/src",
+   "imported": "<export>/src/fusion_miniapp/__init__.py"
+  },
+  "helpers": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "dirty": true,
+   "how": "the cases and digests (test_layer_autonmi, record.comparable, compare_records.EXACT_COUNTS) from the recorder's own checkout"
+  },
+  "command": "python -m fusion_miniapp.run --preset smoke --sim real --agents 2 --knobs <knobs.yaml> --out <out>",
+  "recorder": "python tests/references/record_references.py --commit HEAD",
+  "date": "2026-11-23T07:20:21Z",
+  "machine": {
+   "platform": "macOS-26.7.3-arm64-arm-64bit",
+   "python": "3.12.13",
+   "cpus": 12
+  },
+  "threads_per_sim_worker": {
+   "per_worker": 6,
+   "cpus": 12,
+   "knob": "auto"
+  },
+  "versions": {
+   "fusion_miniapp": "0.1.0",
+   "numpy": "2.5.5",
+   "scipy": "1.18.1",
+   "netCDF4": "1.7.5.1.post1",
+   "PyYAML": "6.0.4",
+   "torch": "2.15.0",
+   "langgraph": "1.2.24",
+   "langchain-core": "1.7.7",
+   "flowgentic": "0.6.0",
+   "rhapsody-py": "0.7.0",
+   "academy-py": "1.0.0",
+   "openai": "3.57.0",
+   "dragonhpc": null,
+   "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+   "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+  },
+  "run_miniapp_git": {
+   "commit": null,
+   "dirty": null
+  },
+  "note": "all physics output is synthetic; the fixture cases simulate nothing; the model server is a test FIXTURE, not a model"
+ },
+ "reference_sha256": "f8f2fcf4e97cb11494c78bf0689a9d93c91a88d60589542e13490a18603d8a72",
+ "name": "real_cpu",
+ "knobs": {
+  "sim": {
+   "device": "cpu"
+  },
+  "outer": {
+   "population": 3,
+   "generations": 2,
+   "parent_stdout": "drop"
+  },
+  "workers": {
+   "sim_workers": 2
+  }
+ },
+ "args": [
+  "--preset",
+  "smoke",
+  "--sim",
+  "real",
+  "--agents",
+  "2"
+ ],
+ "status": "pass",
+ "results_sha256": "04d714fec5ee99f222d193807ac4ea2cc9f4d3a3156c26d6dc8f8f86b6b0aedf",
+ "campaign_sha256": {
+  "a1": "2e0dc5c9c6ddf22fed81b52ec248eba59bccae976e46a9db107f8bbb0b7ebbe2",
+  "a0": "a9a0212e6754b438157e506ffb8fb25fffb49443f0522cebb8c626b1321bdc65"
+ },
+ "counts": {
+  "agents": 2,
+  "agents_requested": 2,
+  "agents_failed": 0,
+  "sims": 12,
+  "llm_calls": 4,
+  "tool_calls": 4,
+  "generations": 4,
+  "candidates_by_source": {
+   "start": 6,
+   "survivor": 2,
+   "mutation": 0,
+   "model": 4,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 4,
+   "filled_by_model": 4
+  },
+  "sim_tasks": 12,
+  "memory_writes": 4,
+  "reports": 2,
+  "feasible_agents": 0
+ },
+ "campaigns": [
+  {
+   "agent_id": "a0",
+   "best": {
+    "candidate_idx": 0,
+    "generation": 1,
+    "is_good": false,
+    "params": {
+     "Delta": 0.04923470218594029,
+     "a1_Te": 0.6167622298000581,
+     "a1_ne": 4.477609616463024,
+     "a2_Te": 0.45880174807095836,
+     "a2_ne": 1.0684105388250567,
+     "a3": 0.9611385039667878,
+     "a4": 1.0167146849104358,
+     "bcore_Te": 0.06410248141979102,
+     "bcore_ne": 0.21030837050697887,
+     "core_linear_frac_Te": 0.4232644891476233,
+     "core_linear_frac_ne": 0.16194672147575617,
+     "gamma_Te": 0.0931750234122548,
+     "gamma_ne": 0.4013563035713371,
+     "kind": "H",
+     "model": "three_region"
+    },
+    "selection_basis": "no_feasible_core_wall_blend",
+    "te_core_metric": 1073.971435546875,
+    "te_ped_eV": 858.92724609375,
+    "te_wall_eV": 724.9197188491821,
+    "ti_wall_eV": 722.5315632095336
+   },
+   "budget": 64,
+   "fixture": 0,
+   "generations": [
+    {
+     "best_te_core_metric": 1513.548828125,
+     "generation": 0,
+     "n_evaluated": 3,
+     "n_good": 0,
+     "n_survivors": 1
+    },
+    {
+     "best_te_core_metric": 1381.9613037109375,
+     "generation": 1,
+     "n_evaluated": 3,
+     "n_good": 0,
+     "n_survivors": 2
+    }
+   ],
+   "n_llm_calls": 2,
+   "n_sims": 6,
+   "n_tool_calls": 2,
+   "refill": {
+    "asked": 2,
+    "filled": 2
+   },
+   "seed": 0,
+   "sources": {
+    "model": 2,
+    "mutation": 0,
+    "restart": 0,
+    "start": 3,
+    "survivor": 1
+   },
+   "summary": "Stub summary: 6 candidates evaluated over 2 generations; best: te_core_metric=1074.0, te_wall_eV=724.9, te_ped_eV=858.9, feasible=False, basis=no_feasible_core_wall_blend.",
+   "touch_checks": {
+    "pass": 6
+   }
+  },
+  {
+   "agent_id": "a1",
+   "best": {
+    "candidate_idx": 0,
+    "generation": 1,
+    "is_good": false,
+    "params": {
+     "Delta": 0.09625145312858037,
+     "a1_Te": 0.6849328931929279,
+     "a1_ne": 3.472515429635044,
+     "a2_Te": 0.5600678538892996,
+     "a2_ne": 1.5150372933919338,
+     "a3": 0.9645241885936162,
+     "a4": 1.3806890645882048,
+     "bcore_Te": 0.41190178945666306,
+     "bcore_ne": 0.31686803259499996,
+     "core_linear_frac_Te": 0.6081328234229193,
+     "core_linear_frac_ne": 0.37055281427628367,
+     "gamma_Te": 0.16330809180836392,
+     "gamma_ne": 0.4315405863969753,
+     "kind": "H",
+     "model": "three_region"
+    },
+    "selection_basis": "no_feasible_core_wall_blend",
+    "te_core_metric": 1242.7509765625,
+    "te_ped_eV": 955.1895141601562,
+    "te_wall_eV": 840.0580177993774,
+    "ti_wall_eV": 832.6727680130005
+   },
+   "budget": 64,
+   "fixture": 0,
+   "generations": [
+    {
+     "best_te_core_metric": 1431.0477294921875,
+     "generation": 0,
+     "n_evaluated": 3,
+     "n_good": 0,
+     "n_survivors": 1
+    },
+    {
+     "best_te_core_metric": 1282.1678466796875,
+     "generation": 1,
+     "n_evaluated": 3,
+     "n_good": 0,
+     "n_survivors": 2
+    }
+   ],
+   "n_llm_calls": 2,
+   "n_sims": 6,
+   "n_tool_calls": 2,
+   "refill": {
+    "asked": 2,
+    "filled": 2
+   },
+   "seed": 1,
+   "sources": {
+    "model": 2,
+    "mutation": 0,
+    "restart": 0,
+    "start": 3,
+    "survivor": 1
+   },
+   "summary": "Stub summary: 6 candidates evaluated over 2 generations; best: te_core_metric=1242.8, te_wall_eV=840.1, te_ped_eV=955.2, feasible=False, basis=no_feasible_core_wall_blend.",
+   "touch_checks": {
+    "pass": 6
+   }
+  }
+ ],
+ "parent_files": {
+  "a0": {
+   "config.json": "a2b7365e67e3c16c193868e5cdbb05441cc34cbf38aa0ad709dca748e4f38138",
+   "evolution_log.csv": "3e7a55ce4c4d3d843668d2010a13305650bd69b7edbee20596d152d4d098959f",
+   "best_result.json": "a4ae86d6585c8c3ccfe165476274929cf513eb1a8a761b16b5156ba258ff103c"
+  },
+  "a1": {
+   "config.json": "de4c7afaef83b5f6fb5fbea0e5973bb08574de3e1f3fbd09742aff0a53330e3c",
+   "evolution_log.csv": "be7a211645ab5610248f6b97f55d786d44dc1d3ca8d60ae2d2a11d2099048cc4",
+   "best_result.json": "84063cf28d77efb3d34f8732481ff0fb2fdd4a3a701b83b56a899f4c7207a5b7"
+  }
+ }
+}

@@ -22,7 +22,7 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
 ## Knob file (YAML; `knobs.py` loads, validates, applies presets `smoke`, `hundredk`, `ignos_shape`, then knob files in order)
 ```yaml
 sim:      {nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap, model_width, checkpoint_mb, device, cold_start_fraction, keep_artifacts, work_root, threads_per_worker}
-agents:   {count, per_process, max_live, cost_scale (number or list), thinking_budget, budget_scales_with_cost}
+agents:   {count, first, per_process, max_live, cost_scale (number or list), thinking_budget, budget_scales_with_cost}
 tools:    {constraints_lookup, abstract_lookup, latency_ms}
 llm:      {mode: stub|openai, base_url_env, api_key_env, model, send_thinking_budget, timeout_s, max_retries, min_model_share, max_empty_share}
 workers:  {sim_workers}
@@ -82,3 +82,9 @@ class Services(Protocol):
 ## Changes proposed on 2026-11-22 (the AUTONMI layer; for agreement)
 1. `layer_autonmi.py`, `tests/test_layer_autonmi.py`, `requirements-autonmi.txt`, and a README section. No other file changes: `decide.py`, `sim.py`, `run.py`, `record.py` and both layers are untouched; the layer calls `record.write` and `run`'s pool, thread and signal helpers.
 2. Its environment pins Flowgentic 0.6.0 (`v0.6.0`), on which the LangGraph and Academy layers' tests also pass; the `stack` extra keeps its own pin. The AUTONMI framework is installed separately; without it, the layer's tests are skipped.
+
+## Changes proposed on 2026-11-23 (dev, overnight; decided by an advisor, pending Matt's confirmation)
+1. Knob `agents.first` (default 0, in every preset): a run hosts campaigns `a<first>` .. `a<first+count-1>`, each seeded with its index, in `run.py` and in `layer_autonmi.py`. In `run.py`, which dev otherwise keeps frozen as the comparison, that is 3 lines; at `first` 0 it hosts the same campaigns as before, so that the two layers never host different campaigns under one knob file. It is not under `sim`, so no campaign's config.json changes. `compare_records` reads it as 0 in records from before it (`ADDED_KNOBS`).
+2. `tests/test_parent_oracle.py` also runs its cases through `python -m fusion_miniapp.layer_autonmi` (one campaign, `agents.first` = the seed); skipped without the AUTONMI framework.
+3. `tests/references/*.json`, recorded from the LangGraph layer by `tests/references/record_references.py` at a named commit: `tests/test_layer_autonmi.py` compares both layers' runs with them, besides comparing the two layers with each other. A campaign's config.json is compared without `git` and `constraints_path`, which name the checkout.
+4. `layer_autonmi.AUTONMI_COMMIT` pins the AUTONMI framework's commit; the run record's `autonmi.framework_commit` names the commit imported, and a run on another one warns once on stderr.

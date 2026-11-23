@@ -1,0 +1,119 @@
+{
+ "recorded_from": "the LangGraph layer (python -m fusion_miniapp.run), dev's frozen comparison",
+ "header": {
+  "code": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "subject": "asyncflow running-set shim",
+   "dirty": false,
+   "how": "git archive of the commit, run with PYTHONPATH=<export>/src",
+   "imported": "<export>/src/fusion_miniapp/__init__.py"
+  },
+  "helpers": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "dirty": true,
+   "how": "the cases and digests (test_layer_autonmi, record.comparable, compare_records.EXACT_COUNTS) from the recorder's own checkout"
+  },
+  "command": "python -m fusion_miniapp.run --preset smoke --sim fixture --agents 20 --knobs <knobs.yaml> --out <out>",
+  "recorder": "python tests/references/record_references.py --commit HEAD",
+  "date": "2026-11-23T07:20:18Z",
+  "machine": {
+   "platform": "macOS-26.7.3-arm64-arm-64bit",
+   "python": "3.12.13",
+   "cpus": 12
+  },
+  "threads_per_sim_worker": null,
+  "versions": {
+   "fusion_miniapp": "0.1.0",
+   "numpy": "2.5.5",
+   "scipy": "1.18.1",
+   "netCDF4": "1.7.5.1.post1",
+   "PyYAML": "6.0.4",
+   "torch": "2.15.0",
+   "langgraph": "1.2.24",
+   "langchain-core": "1.7.7",
+   "flowgentic": "0.6.0",
+   "rhapsody-py": "0.7.0",
+   "academy-py": "1.0.0",
+   "openai": "3.57.0",
+   "dragonhpc": null,
+   "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+   "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+  },
+  "run_miniapp_git": {
+   "commit": null,
+   "dirty": null
+  },
+  "note": "all physics output is synthetic; the fixture cases simulate nothing; the model server is a test FIXTURE, not a model"
+ },
+ "reference_sha256": "f18b0a0edd82390f05165294532c7ea5073ebd833748347af75e387ec19456a1",
+ "name": "fixture_mutation_no_logs",
+ "knobs": {
+  "outer": {
+   "population": 4,
+   "generations": 2,
+   "parent_stdout": "drop",
+   "generator": "mutation",
+   "rng": "per_agent",
+   "logs": "none"
+  },
+  "agents": {
+   "max_live": 3
+  }
+ },
+ "args": [
+  "--preset",
+  "smoke",
+  "--sim",
+  "fixture",
+  "--agents",
+  "20"
+ ],
+ "status": "pass",
+ "results_sha256": "682ec93bb031c5d279f12d02342f148160cd7fdd628055b4ce060f8205547264",
+ "campaign_sha256": {
+  "a0": "60fff955c055235080fb0362ece1adac0ac301354529503913c804168489ade6",
+  "a1": "d72497b0ba76451cb491fde05a23584e91549889a335348a169ca923c5e0fffa",
+  "a2": "62c957266b71e9d8d030a1a2bb1c2ea56c4faa9c3257f0db97fa87ec830166bc",
+  "a3": "621d6ca74bd9b0246e35777269df2f959b365b48df4bf5b788ae06afdff9c8f4",
+  "a4": "1b539d85fd220d7af68593104b395d9499447e0a9fc85a8c5f230ed460b63ecf",
+  "a5": "d52b496865aff25a3cbbe4335619c9cacf3974099e81531cfa45d17f57e44793",
+  "a6": "b468860a82db5b0794e513976d27fd6a27a5d875e2969d5f0bdc925ca51d70ef",
+  "a7": "988d39739f42f89311c64ea08bf7de8b6678fca2ec20380b97fd8c51824a86ff",
+  "a8": "1c06a4c754a13227c6029aa5503c59717a41d96fd2146ddbfbee9f851411fb4c",
+  "a9": "7045266f0f800b179d73cf87dbdab14550ba8f2ca08bd5c673d2578b0917dc25",
+  "a10": "db50bf5d93568450df7ad4c8559b43698c9ccccbeba2a7292f97257a30328fc3",
+  "a11": "19154a4a8df1b2b65d440278d8e473dd359126775d9a053ce71a41781e0d3ffa",
+  "a12": "2f534aa629df42aa65ab4972b0fff33ebb8e5008bba3feac877112dcad426932",
+  "a13": "9b2b1c781775bb1f7b1329da1d8c730731f117c940d9da4f6469fa27358877d5",
+  "a14": "44c0dc0952354cd8720be82878a8f5c3f58b8362b22f9796f15ef1b71d0ca202",
+  "a15": "d83885938c39071ee32abd49bfd8db0aa9a9b8025a241198205bd5326c4da406",
+  "a16": "1199e6f66b87e6181df3aadf642fe9952afba422b088150155c2c02a1ebb1063",
+  "a17": "796718d40ee37e04f0f49364097588dc32bcda338116309243bea6afac97b992",
+  "a18": "d1846c94917831b07e2ae4540fb1856bc60070030aa31bd0bb5f5b76b9f13769",
+  "a19": "db3ee7539881f023ad653068e44eadc2dd24344907b987e403a48dba40cf4248"
+ },
+ "counts": {
+  "agents": 20,
+  "agents_requested": 20,
+  "agents_failed": 0,
+  "sims": 160,
+  "llm_calls": 20,
+  "tool_calls": 40,
+  "generations": 40,
+  "candidates_by_source": {
+   "start": 80,
+   "survivor": 41,
+   "mutation": 39,
+   "model": 0,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 0,
+   "filled_by_model": 0
+  },
+  "sim_tasks": 160,
+  "memory_writes": 40,
+  "reports": 20,
+  "feasible_agents": 0
+ }
+}

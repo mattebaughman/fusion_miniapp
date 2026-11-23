@@ -3,8 +3,9 @@
     python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json [--tol 0.25]
 
 Results must agree: the counts and the knobs other than the machine's own (sim.device, sim.work_root,
-sim.threads_per_worker, workers.sim_workers), and the campaigns. Identical results_sha256 settles the
-campaigns at once. Otherwise each campaign in the two neighbouring agents.jsonl files is compared by
+sim.threads_per_worker, workers.sim_workers), and the campaigns. A record older than a knob ran with the
+value ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at once. Otherwise each
+campaign in the two neighbouring agents.jsonl files is compared by
 agent_id: ids, booleans, strings (selection basis) and integers (generations, counts, candidate numbers)
 exactly, floats within --rtol/--atol (macOS and Linux, or CPU and GPU, differ in the last digits). Without
 the agents files, unlike digests are unverifiable and fail. Suspensions are compared only between runs of
@@ -21,6 +22,7 @@ from pathlib import Path
 
 MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_worker"), ("workers", "sim_workers"),
                  ("agents", "per_process"), ("agents", "max_live")}   # the machine's layout, not the problem
+ADDED_KNOBS = {("agents", "first"): 0}   # knobs newer than some records, with the value those records ran with
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",
                 "candidates_by_source", "refill_slots", "sim_tasks", "memory_writes", "reports", "feasible_agents")
 SPEED = (("campaigns_live", "max"), ("campaigns_live", "mean"), ("agent_phase_s",), ("rates_per_s", "evaluations"),
@@ -115,8 +117,10 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
     for section in sorted(set(a["knobs"]) | set(b["knobs"])):
         sa, sb = a["knobs"].get(section, {}), b["knobs"].get(section, {})
         for key in sorted(set(sa) | set(sb)):
-            if (section, key) not in MACHINE_KNOBS and sa.get(key) != sb.get(key):
-                bad.append(f"knobs.{section}.{key}: {sa.get(key)!r} != {sb.get(key)!r}")
+            old = ADDED_KNOBS.get((section, key))
+            x, y = sa.get(key, old), sb.get(key, old)
+            if (section, key) not in MACHINE_KNOBS and x != y:
+                bad.append(f"knobs.{section}.{key}: {x!r} != {y!r}")
     apart = []
     for path in SPEED:
         x, y = _get(a.get("speed", {}), path), _get(b.get("speed", {}), path)

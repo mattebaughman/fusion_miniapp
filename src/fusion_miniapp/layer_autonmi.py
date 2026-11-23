@@ -67,6 +67,10 @@ from fusion_miniapp import decide, knobs as knob_files, record, run, tools
 from fusion_miniapp.llm import MAX_IN_FLIGHT, REPLY_TOKENS, StubLLM
 
 ADMISSION_TOKENS = 2_000_000   # admitted tokens per model server, as the LangGraph layer's ADMISSION
+# The AUTONMI framework's commit this layer is tested on: origin/MTU-188-framework (its PR #16). An editable
+# install runs whatever its clone has checked out (MTU-188-retry, for one, turns on reruns), so the run record
+# names the commit imported, and a run on another commit, or on changed files, warns once (autonmi_pin).
+AUTONMI_COMMIT = "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75"
 # Under `python -m dragon -s .../layer_autonmi.py` (and `python -m`) this file runs as __main__. The
 # definition and the simulation pools' factory are taken from the module of this name instead, so the
 # populations' processes can unpickle them, and so _POOLS is the list the factory fills.
@@ -229,7 +233,8 @@ class Fusion:
         self.knobs, self.sim, self.out, self.work_root = knobs, sim, Path(out), work_root
 
     def agents(self):
-        for i in range(self.knobs["agents"]["count"]):   # as the other layers: campaign a<i>, seed i
+        first = self.knobs["agents"]["first"]   # as the other layers: campaign a<i>, seed i
+        for i in range(first, first + self.knobs["agents"]["count"]):
             yield AgentSpec(f"a{i}", {"seed": i})
 
     def services(self, run_dir: Path, servers: int = 1) -> tuple[list, list[str]]:
@@ -647,10 +652,52 @@ def framework_versions() -> dict:
     return out
 
 
+def autonmi_commit() -> dict:
+    """The commit of the autonmi package this process imported: git's, in the clone it is imported from
+    (an editable install), with whether tracked files differ; else its installer's record (direct_url.json,
+    when installed from git). None when neither says."""
+    import subprocess
+
+    import autonmi
+
+    src = Path(autonmi.__file__).resolve().parent
+
+    def git(*args) -> str:
+        return subprocess.run(["git", "-C", str(src), *args], capture_output=True, text=True, timeout=10,
+                              check=True).stdout.strip()
+    try:
+        git("ls-files", "--error-unmatch", "__init__.py")   # the package's own clone, not a repository above it
+        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+                "from": "git", "path": str(src)}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for dist in metadata.packages_distributions().get("autonmi", []):
+        vcs = json.loads(metadata.distribution(dist).read_text("direct_url.json") or "{}").get("vcs_info", {})
+        if vcs.get("commit_id"):
+            return {"commit": vcs["commit_id"], "dirty": None, "from": "direct_url.json", "path": str(src)}
+    return {"commit": None, "dirty": None, "from": None, "path": str(src)}
+
+
+def autonmi_pin() -> dict:
+    """autonmi_commit() against AUTONMI_COMMIT, for the run record; one warning on stderr when the commit
+    differs (or is unknown) or its tracked files are changed. The clone's path is in the warning only: run
+    records name no local path."""
+    got = autonmi_commit()
+    path = got.pop("path")
+    got.update(pin=AUTONMI_COMMIT, matches_pin=got["commit"] == AUTONMI_COMMIT and not got["dirty"])
+    if not got["matches_pin"]:
+        what = "an unknown commit" if got["commit"] is None else got["commit"][:12] + (
+            " with changed files" if got["dirty"] else "")
+        print(f"[fusion/autonmi] warning: the autonmi package imported ({path}) is at {what}, not at the "
+              f"pinned {AUTONMI_COMMIT[:12]} (layer_autonmi.AUTONMI_COMMIT)", file=sys.stderr, flush=True)
+    return got
+
+
 def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, interrupted: bool, crashed: bool,
-                 rc: int, loop_lag, device, threads) -> dict:
+                 rc: int, loop_lag, device, threads, pin: dict | None = None) -> dict:
     """run_record.json and agents.jsonl by record.write, one part per population; then AUTONMI's verdict
-    (summary.json, by autonmi.assemble) in its `autonmi` section. A run whose AUTONMI checks fail fails."""
+    (summary.json, by autonmi.assemble) and the framework's commit against its pin (`pin`, autonmi_pin) in
+    its `autonmi` section. A run whose AUTONMI checks fail fails."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -670,7 +717,7 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     rec["autonmi"] = {"ok": ok, "failed_checks": [c["name"] for c in summary.get("checks", []) if not c["ok"]],
                       "summary": "summary.json", "runtime": a.runtime, "populations": a.populations,
                       "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions(),
-                      "asyncflow_running_shim": RUNNING_SHIM}
+                      "framework_commit": pin, "asyncflow_running_shim": RUNNING_SHIM}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     if rec["status"] == "pass" and not ok:
         rec["status"] = "fail"
@@ -686,6 +733,7 @@ def main(argv=None) -> int:
     if knobs["llm"]["mode"] == "openai" and not a.endpoints_file:
         raise SystemExit("--llm openai needs --endpoints-file: the model job's servers")
     a.populations, a.workers = layout(knobs, a.sim, a.populations, a.workers)
+    pin = autonmi_pin()   # before the run, so that its warning comes first
     n = knobs["agents"]["count"]
     out = Path(a.out or f"results/{time.strftime('%Y%m%d-%H%M%S')}-autonmi-{n}-{os.getpid()}").resolve()
     a.out = str(out)
@@ -714,7 +762,7 @@ def main(argv=None) -> int:
         if work_root is not None:
             shutil.rmtree(work_root, ignore_errors=True)
     rec = write_record(a, knobs, out, wall_s=time.perf_counter() - t0, t_run=t_run, interrupted=interrupted,
-                       crashed=crashed, rc=rc, loop_lag=loop_lag, device=device, threads=threads)
+                       crashed=crashed, rc=rc, loop_lag=loop_lag, device=device, threads=threads, pin=pin)
     print(json.dumps({"run_record": str(out / "run_record.json"), "status": rec["status"], "agent_layer": "autonmi",
                       **rec["counts"], "touch_check": rec["touch_check"], "devices": rec["devices"],
                       "wall_seconds": rec["wall_seconds"], "peak_rss_mb": rec["peak_rss_mb"]}), flush=True)

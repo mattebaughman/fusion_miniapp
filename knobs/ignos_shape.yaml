@@ -17,6 +17,7 @@ sim:
 
 agents:
   count: 4
+  first: 0
   per_process: 1
   max_live: null
   cost_scale: 1.0

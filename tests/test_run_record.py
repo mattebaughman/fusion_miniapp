@@ -87,6 +87,11 @@ def test_compare_records_across_layers(tmp_path):
     assert compare_records.compare(a, b)["results"] == []
     b["knobs"]["outer"]["population"] = 5
     assert compare_records.compare(a, b)["results"] == ["knobs.outer.population: 4 != 5"]
+    b["knobs"]["outer"]["population"] = 4
+    del a["knobs"]["agents"]["first"]                               # a record from before the knob: first 0
+    assert compare_records.compare(a, b)["results"] == []
+    b["knobs"]["agents"]["first"] = 5
+    assert compare_records.compare(a, b)["results"] == ["knobs.agents.first: 0 != 5"]
 
 
 def test_compare_records_tolerates_last_digit_differences(tmp_path):

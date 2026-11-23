@@ -1,0 +1,216 @@
+{
+ "recorded_from": "the LangGraph layer (python -m fusion_miniapp.run), dev's frozen comparison",
+ "header": {
+  "code": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "subject": "asyncflow running-set shim",
+   "dirty": false,
+   "how": "git archive of the commit, run with PYTHONPATH=<export>/src",
+   "imported": "<export>/src/fusion_miniapp/__init__.py"
+  },
+  "helpers": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "dirty": true,
+   "how": "the cases and digests (test_layer_autonmi, record.comparable, compare_records.EXACT_COUNTS) from the recorder's own checkout"
+  },
+  "command": "python -m fusion_miniapp.run --preset smoke --sim fixture --agents 20 --knobs <knobs.yaml> --out <out>",
+  "recorder": "python tests/references/record_references.py --commit HEAD",
+  "date": "2026-11-23T07:20:17Z",
+  "machine": {
+   "platform": "macOS-26.7.3-arm64-arm-64bit",
+   "python": "3.12.13",
+   "cpus": 12
+  },
+  "threads_per_sim_worker": null,
+  "versions": {
+   "fusion_miniapp": "0.1.0",
+   "numpy": "2.5.5",
+   "scipy": "1.18.1",
+   "netCDF4": "1.7.5.1.post1",
+   "PyYAML": "6.0.4",
+   "torch": "2.15.0",
+   "langgraph": "1.2.24",
+   "langchain-core": "1.7.7",
+   "flowgentic": "0.6.0",
+   "rhapsody-py": "0.7.0",
+   "academy-py": "1.0.0",
+   "openai": "3.57.0",
+   "dragonhpc": null,
+   "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+   "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+  },
+  "run_miniapp_git": {
+   "commit": null,
+   "dirty": null
+  },
+  "note": "all physics output is synthetic; the fixture cases simulate nothing; the model server is a test FIXTURE, not a model"
+ },
+ "reference_sha256": "6ce4fb28f4e685e25b13a3c19bcf3864375dedbfd7e65c64b482672ad38e4ec3",
+ "name": "fixture_llm_refills",
+ "knobs": {
+  "outer": {
+   "population": 4,
+   "generations": 2,
+   "parent_stdout": "drop"
+  },
+  "agents": {}
+ },
+ "args": [
+  "--preset",
+  "smoke",
+  "--sim",
+  "fixture",
+  "--agents",
+  "20"
+ ],
+ "status": "pass",
+ "results_sha256": "dce99495bcc616ed85db38c4b09cafdf7a4fc333d43789e6cd481512889b8ad7",
+ "campaign_sha256": {
+  "a0": "b2aabb662eb1ff6d1483b0c0ecd8c48171cd8346c4ff02453686adace3204cd4",
+  "a1": "b751d15021447e1a537f56bbd31bb9e7768421a7df181be6cadb5b9e3a5d9297",
+  "a2": "20b5fe81b209d121930fad7b0eb727e484f55964ca109aa4ac8760bd8447020c",
+  "a3": "1add2acb6ece646e2fad05107cfec510eab583c3567b5c28b0896dced74fbfb2",
+  "a4": "ace9c0e5eee6b351d25e253676d97a7006560a34eab7e4769bf1ac0afb424c33",
+  "a5": "783de39bcac1ed8ab3ddcfd07fa80385eafc910e4d37821ae0a915232c114783",
+  "a6": "50c4207b1f7cc94cb09ea38a46fb54d0f6ccc71c0685a0b3914b1e02631dbc80",
+  "a7": "a56f39d8356b4b74cd5b31d69013b6103837844cf30c4e59a2825b2a7a142c95",
+  "a8": "74124ed41b1009679ccf893f901afe640f17dc252ea0d17d52672604551f2128",
+  "a9": "60a7dcc73a6984791c54cab8de2ab7bfba945845d26721e6aa72e8cf58b76084",
+  "a10": "62c904081fc86c4aa9d2e9cdf86b5dc3ad0a7b9e6c2712fdf41f34c19321013c",
+  "a11": "611ac5b96eddbda3c53c687561a61b05bfbb3d4a5c4f42fdca8d11f5355eb0c2",
+  "a12": "a4856ef8bbe973e4fe1bb72f42b85a28e482e3da4a708542e44f9e55b09c4c5b",
+  "a13": "40d0090e1c9bfb332814cd7738e8fd2d31c0e5ef87f7d5d09157816d2039cebe",
+  "a14": "ea7fcfd0a724e936379f61430b683bbf413e0ff6a0ca30bb8a163e7a6501530d",
+  "a15": "adcfce03564b055a5fd68e6559663a80f8184b24d8cfeb92cd846091ac96b3c5",
+  "a16": "404123af42be0d3073c892d3256d039aa426529e87a161a44d3bac68a1c4d4ac",
+  "a17": "90b9b5532444e3a99227f217fe6afe5fd838b4491320d03377f7585c7c7fa6ee",
+  "a18": "5e3f317d32d823f7813d3f7c5fbca9bef3c8bfb64cb7e831b4367e43b62cd75a",
+  "a19": "105720020bf91f639fdb353e5938200ee7da21297f8d61fe0a136caee54fd66b"
+ },
+ "counts": {
+  "agents": 20,
+  "agents_requested": 20,
+  "agents_failed": 0,
+  "sims": 160,
+  "llm_calls": 40,
+  "tool_calls": 40,
+  "generations": 40,
+  "candidates_by_source": {
+   "start": 80,
+   "survivor": 38,
+   "mutation": 0,
+   "model": 42,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 42,
+   "filled_by_model": 42
+  },
+  "sim_tasks": 160,
+  "memory_writes": 40,
+  "reports": 20,
+  "feasible_agents": 0
+ },
+ "parent_files": {
+  "a0": {
+   "config.json": "8671fb9b813ec92657dced21105724b23e242f2ac2328c6c0c6a4945e408a471",
+   "evolution_log.csv": "b129619a5b550da1075a99bc1e38afe44e67e51d400db807b3e4ada822c62b1c",
+   "best_result.json": "10b755aab6cb10692c4a0bdf8f829a6aa3d1491ddac6ce9847c1494805dda230"
+  },
+  "a1": {
+   "config.json": "e69d6faecbb35761849b8d1dc88ed1eb29907b3b4e42c3904d3d526ebc63da81",
+   "evolution_log.csv": "896068f8a5bd5130870783ca08bb44f42cafa65ca1d5d347d03903cb59e64d02",
+   "best_result.json": "891045932501ea5dc21d046dad5abee0566db0680719a4fdde405c908dd6e446"
+  },
+  "a10": {
+   "config.json": "00a2e39068684f28d8a8c036dd78b87460468a82319112a9f7fe9b3bac4fcf47",
+   "evolution_log.csv": "c24c7f0cab9075c23d74e1b3ef44b979d7f1ff1c6221a1c261dbe48ae37f5b7f",
+   "best_result.json": "691ea9413d0e83e1ef32f8e9cb8b16bd766dce1551d282b5724607e5ae4e7df5"
+  },
+  "a11": {
+   "config.json": "d4f0ac33693d855aefd7ac98b64b22fb7f8947c38c24a8d823418be35dd35a50",
+   "evolution_log.csv": "7abddda2fa79282e875f0302b49310a75ce5eabf23987fd93efad6c5e8a3d76c",
+   "best_result.json": "73ae9194838deeb39d8028548da0e96d98760aa33e26394dfbbf5bbb58a85cab"
+  },
+  "a12": {
+   "config.json": "ccfabc7ce55e6c28e8573e24733f58041db59f53fbd97071f6f93a85b1714bdc",
+   "evolution_log.csv": "94d33834c8ed90141b831d68360be4464d5348a63de140bee6d8a0d4aed9a7f8",
+   "best_result.json": "cee71649d0200b69041df257432ed64d6bc290f3485a596bfd9ee6be1900c06b"
+  },
+  "a13": {
+   "config.json": "6e271a37cd5415799f985dd46245c81c98a309815bd92757174b40ac855b874b",
+   "evolution_log.csv": "e9b012c0f349bb936742b550b7e491ea4a3dff693ec92b8ed8065f0e7ad753cc",
+   "best_result.json": "f53dad3cf05ff9586b602fa8656205d02ab1f3683bbaa991614321205f402eb4"
+  },
+  "a14": {
+   "config.json": "0cccb259089231124d54db66db95990c689fa03d4012825acdbbe9a4b2a0f0e8",
+   "evolution_log.csv": "26bc8531438e855a55c42e353cbc6bf9722cec759b826750a97cc713b0bbcac7",
+   "best_result.json": "07169b4f683f1cafeeaa9ce6d820d47f9184406c6808ca0b09357ff2ba6132ff"
+  },
+  "a15": {
+   "config.json": "8d4a5d2e9b3cc2523af86dd8732cab700ea5d3a69a14e09a48623549e43398f8",
+   "evolution_log.csv": "7c8392ed04097619aafe42318016b719402a19c22642a45e8f2374d954b9f3bd",
+   "best_result.json": "4b24959e60281e9449fc589947029918e9fbcd4f6333da640958d1f7936d9e61"
+  },
+  "a16": {
+   "config.json": "41fde6e0f3682c16a3336ff0576c2ca4fe7669a54bd3ea52e68509ef64d3fe9c",
+   "evolution_log.csv": "6144720958c509366fb189193564ca136610d107a3d5732e50df61df7db1f594",
+   "best_result.json": "d26401de6de747f90e8864c536390f2db4355fc159b3d2cc2dde6b5cf52e779a"
+  },
+  "a17": {
+   "config.json": "242d5de78dcb71a317fbdceffc6ffffe9c7a0525bf077223daa5f25182ff34c6",
+   "evolution_log.csv": "7d3658d38f3d25b9257762ef1b91d6f16f0e03fe5b19e032a5eb2822516a8a1c",
+   "best_result.json": "b02abfc9948c4423e0366187c4ac453dae1d6e25848ba77b3dd0691308f06ddd"
+  },
+  "a18": {
+   "config.json": "170bd2761874de9882caf172d8dd37ca5f86b24e006274a2d82afcfa9ff0b8e7",
+   "evolution_log.csv": "8610064d0089a65803df5211967202d2c2c216f1f219fc84977170074ff9a37a",
+   "best_result.json": "fcdefea89f0a407903a0ca3435da2af095b20015af6cd5c979bd3860e7ae1832"
+  },
+  "a19": {
+   "config.json": "5ce6c60b8697367b58987efca101c6734f085b458f4ef3518a7397784d8f2dba",
+   "evolution_log.csv": "a8e631679d6dc0b3ce23d91242c7da7f04d26c709c8c7f4c1207a9b0f3a63740",
+   "best_result.json": "7c149fab7a45f1bcc9c1f6dd93c3dc60bce96983b6d2c000afbd187f540bab69"
+  },
+  "a2": {
+   "config.json": "bd9562c1a56db45b430922c5d2f7c77b70e1f425b4301d5167270ded8cbcc790",
+   "evolution_log.csv": "63911ea6cc677009878f46d09077fb8efc0987c87f1d46d20e52855be358ec93",
+   "best_result.json": "36cf4c306d5f3de5a5f4b394054e2a85d1894314e3b2a3bcd580683b369cb7f2"
+  },
+  "a3": {
+   "config.json": "35c5dc2f4c0001a148b657acd753bbb31a3097544b77320b88af22e72d11a368",
+   "evolution_log.csv": "aaf4ec054d171905d271e518a9d180552ca96eaab9e0872d50470ab64fc13681",
+   "best_result.json": "69845d19334b63a45718ff03566afc6baf74b6e3db965816bc42b83a78d75a30"
+  },
+  "a4": {
+   "config.json": "ae96bb6102c62ae0f5899c729eb5c92664140215c1a47fd6720c22ff56caa2d5",
+   "evolution_log.csv": "01aa271a8172698ebe74159be9a730e4448560e8bee77ba474a92dab1248ea6b",
+   "best_result.json": "486bf87c42a4917efd3578b04ceecc4c510f03b4b957f77e60d61581b2ac58a9"
+  },
+  "a5": {
+   "config.json": "7e24fd459b6ed291f0ee86fa5fea7f57aa6186933e2e0a2cd1ea206abc2e56f1",
+   "evolution_log.csv": "eb7ffdad38f5e12c22c2a7c8d3e9c4ea90b68622b587c4408e2ad854b2940684",
+   "best_result.json": "d7e3d68e5ac07a9b0d8c83893005af85752e991f734df75fb970daa6d7d5583d"
+  },
+  "a6": {
+   "config.json": "712991df30332873d84fc3228a58083812c6e7dfd12c545139fd6ab89fad8c36",
+   "evolution_log.csv": "ba38427b8f2180f8d39761ac9cc2a9416fcf2fb7e9ce8c4f6eaacd8c334f8cad",
+   "best_result.json": "b1fa3d3c92a1f42b6eac5f2a44b3acde18842507a43422a5e1baf15c56cff692"
+  },
+  "a7": {
+   "config.json": "7b3ec9e0735e745bfc7b7f4c405aeb061cfeca1e451881a081710fb17e77c1ef",
+   "evolution_log.csv": "80c714c8198c393ecd37184723324e3b19258067ac1c4e0154dbd2254547d1ea",
+   "best_result.json": "15ad6a7ac76d44b7d059c7e2c481302cac82e8e465a0ba859b3ee52b26a23968"
+  },
+  "a8": {
+   "config.json": "1733054f664741f138873d6bd9acf99aa322edc7c89b028dd70f586328010d08",
+   "evolution_log.csv": "287a62a8a1f903b73c87809591a36e8c07db8148574607be4e93812a7c909007",
+   "best_result.json": "cb9f0d5ae3994249458fc079cbb4d14870a7b43098790f562fe7da5a087b7983"
+  },
+  "a9": {
+   "config.json": "709920d4449e41cb329ce618c3567a96fb3d1a4feb1e8c3c6bbac582e5978714",
+   "evolution_log.csv": "3be2db09d37c360d1ae4049e7cf5074e489bf1473b69c851ed64044ad368f092",
+   "best_result.json": "375553c5351cf6f80b7de637557de00026ec1dce8fbe224ebe5c2c97d9a2b362"
+  }
+ }
+}

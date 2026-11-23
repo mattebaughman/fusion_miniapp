@@ -44,7 +44,9 @@ does.
 
 **Exact match.** `tests/test_parent_oracle.py` runs the unmodified parent driver in a fresh process,
 with only its population evaluator replaced by this package's `evaluate`, and compares it with the
-mini-app campaign in both agent layers (generator: mutation). It does this for P 4 and G 3:
+mini-app campaign in both agent layers (generator: mutation), and, where the AUTONMI framework is
+installed, in the AUTONMI layer through its entry point (one campaign, `agents.first` = the seed). It
+does this for P 4 and G 3:
 - fixture seeds 0, 1, 2 and 99 (99 reaches a feasible candidate), one random stream;
 - fixture seeds 0 and 99 with two streams, against `evo_agents`;
 - real stand-in seeds 0, 1 and 2, one stream, and seed 0 with two streams.
@@ -138,11 +140,18 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
 - **Its environment.** It needs the AUTONMI framework (the package `autonmi`) installed: it is not
   public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
   Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in
-  that environment.
+  that environment. The layer is tested on the framework's commit `layer_autonmi.AUTONMI_COMMIT`
+  (`e20861a`, origin/MTU-188-framework). Each run records the commit it imported (git in an editable
+  clone, else the installer's record) in `autonmi.framework_commit`, and warns once on stderr when it is
+  another commit, unknown, or has changed files.
 - **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
   fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
   requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires.
-  Without the AUTONMI framework it is skipped.
+  Both layers' runs are also compared with references recorded from the LangGraph layer
+  (`tests/references/*.json`: results_sha256, each campaign's hash, counts, parent files and model
+  requests, with the commit, command and date that made them). `python tests/references/record_references.py`
+  records them again from a commit (default HEAD, exported with `git archive`). The parent oracle
+  (above) runs through it too. Without the AUTONMI framework these are skipped.
 
 ## Install
 
@@ -258,7 +267,7 @@ One YAML file with six sections. A preset and any number of knob files are merge
 | Section | Knobs |
 |---|---|
 | `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`; sets OMP, OpenBLAS, MKL and torch threads) |
-| `agents` | `count` (campaigns), `per_process`, `max_live` (null = all of a process's campaigns), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
+| `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
 | `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share` |

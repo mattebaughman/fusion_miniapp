@@ -18,6 +18,7 @@ sim:                          # the turn-down; "real" = the IGNOS loop at Fusion
 
 agents:
   count: 100                  # campaigns
+  first: 0                    # the first campaign's index and seed: campaigns a<first> .. a<first+count-1>
   per_process: 1000           # agents per agent process; each process also starts its own simulation workers
   max_live: null              # campaigns live at once in each agent process; null = all of them
   cost_scale: 1.0             # multiplier on nodes_per_plane and fixed_point_cap; a list such as [0.5, 1, 4]

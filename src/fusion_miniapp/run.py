@@ -406,8 +406,8 @@ def main(argv=None) -> int:
     knobs = knob_files.validate({**knobs, **{s: {**knobs[s], **v} for s, v in over.items()}})
     if knobs["llm"]["mode"] == "openai" and knobs["llm"]["model"] == "stub":
         raise knob_files.KnobError('llm.mode is openai but llm.model is still "stub"; set llm.model in a knob file')
-    n, per = knobs["agents"]["count"], knobs["agents"]["per_process"]
-    slices = [(first, min(per, n - first)) for first in range(0, n, per)]
+    n, per, start = knobs["agents"]["count"], knobs["agents"]["per_process"], knobs["agents"]["first"]
+    slices = [(first, min(per, start + n - first)) for first in range(start, start + n, per)]
     if a.sim == "real" and len(slices) > knobs["workers"]["sim_workers"]:
         raise knob_files.KnobError(
             f"{len(slices)} agent processes each need a simulation worker, but workers.sim_workers is "
@@ -428,7 +428,7 @@ def main(argv=None) -> int:
     t0, t_run = time.perf_counter(), time.time()
     if len(slices) == 1:
         try:
-            parts, failed = [asyncio.run(run_slice(layer, knobs, a.sim, out, 0, n, 0, workers))[1]], []
+            parts, failed = [asyncio.run(run_slice(layer, knobs, a.sim, out, start, n, 0, workers))[1]], []
             interrupted = False
         except KeyboardInterrupt:   # before the agents' event loop took the signals over
             parts, failed, interrupted = [], [0], True

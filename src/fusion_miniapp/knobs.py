@@ -39,6 +39,7 @@ SCHEMA = {
     },
     "agents": {
         "count": ("int", 1, None),
+        "first": ("int", 0, None),            # campaigns first .. first+count-1, each seeded with its index
         "per_process": ("int", 1, None),
         "max_live": ("optint", 1),            # campaigns live at once per agent process; null = all of them
         "cost_scale": ("nums", 0, None),      # a number, or a list: agent i uses entry i % len (each > 0)

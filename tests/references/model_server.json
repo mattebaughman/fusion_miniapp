@@ -1,0 +1,713 @@
+{
+ "recorded_from": "the LangGraph layer (python -m fusion_miniapp.run), dev's frozen comparison",
+ "header": {
+  "code": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "subject": "asyncflow running-set shim",
+   "dirty": false,
+   "how": "git archive of the commit, run with PYTHONPATH=<export>/src",
+   "imported": "<export>/src/fusion_miniapp/__init__.py"
+  },
+  "helpers": {
+   "commit": "cff939f0edc2384bc2c269b95b4e7c2d76ab84e1",
+   "dirty": true,
+   "how": "the cases and digests (test_layer_autonmi, record.comparable, compare_records.EXACT_COUNTS) from the recorder's own checkout"
+  },
+  "command": "OPENAI_BASE_URL=<the ModelServer fixture>/v1 python -m fusion_miniapp.run --preset smoke --sim fixture --agents 12 --knobs <knobs.yaml> --out <out>",
+  "recorder": "python tests/references/record_references.py --commit HEAD",
+  "date": "2026-11-23T07:20:22Z",
+  "machine": {
+   "platform": "macOS-26.7.3-arm64-arm-64bit",
+   "python": "3.12.13",
+   "cpus": 12
+  },
+  "threads_per_sim_worker": null,
+  "versions": {
+   "fusion_miniapp": "0.1.0",
+   "numpy": "2.5.5",
+   "scipy": "1.18.1",
+   "netCDF4": "1.7.5.1.post1",
+   "PyYAML": "6.0.4",
+   "torch": "2.15.0",
+   "langgraph": "1.2.24",
+   "langchain-core": "1.7.7",
+   "flowgentic": "0.6.0",
+   "rhapsody-py": "0.7.0",
+   "academy-py": "1.0.0",
+   "openai": "3.57.0",
+   "dragonhpc": null,
+   "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+   "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+  },
+  "run_miniapp_git": {
+   "commit": null,
+   "dirty": null
+  },
+  "note": "all physics output is synthetic; the fixture cases simulate nothing; the model server is a test FIXTURE, not a model"
+ },
+ "reference_sha256": "1f0230c3b22455c22cf9a8d467ae3079706e942f6ed38aeb976f967d7de13fc2",
+ "name": "model_server",
+ "knobs": {
+  "llm": {
+   "mode": "openai",
+   "model": "stand-in"
+  },
+  "outer": {
+   "population": 4,
+   "generations": 3,
+   "parent_stdout": "drop"
+  }
+ },
+ "args": [
+  "--preset",
+  "smoke",
+  "--sim",
+  "fixture",
+  "--agents",
+  "12"
+ ],
+ "status": "pass",
+ "results_sha256": "5939dbe88ea3d5149763fe4fb617921f9a2e963fe5f0f5f3272522d896c7b114",
+ "campaign_sha256": {
+  "a0": "826ce9a1e798321316288da57c8a965a302d799ac60d77ac357d6b6dceccb970",
+  "a1": "75d2fcf6c009262ffdbfb3b295b51e299d7fe8f824f397ff97b2942bf2def455",
+  "a2": "c8acdb199c54e67ef4022a6ef473415b2197161e5f1fd1c405b9664b34c82935",
+  "a3": "03960570354bfd52eb8aefc23f092e322060da8ff5c23b18493ea8fcb757bb90",
+  "a4": "a811365a6ed50141ac1ec5539bf29ba5bfd3499406590c25ceb9930dbd1727fc",
+  "a5": "da92c28521c3fd5ae29636554a235c7cf5bd2181d6d1563adc03f7252c439c2e",
+  "a6": "fdb404534a46ae79ecf2b1e7b1b5f363fc020304e7c9952b691c04a5c9473621",
+  "a7": "a37ec2a91293e38917f6bb2386acf56ab76aaa37422e81c817acc05c5af241e8",
+  "a8": "83e4200cbaf791802b86b453602ada7a94bc224aacb68c697b593cebb46a5784",
+  "a9": "971806be1f8eb9e054cae089d86bb11f62acfed72949a0ee5d520e61f07a5edd",
+  "a10": "c191f29ca76094c60c7d06f9ae137da9986bee61c8c6ddeb173b9acb23048865",
+  "a11": "a172dcf84e91c0cee23eeb8e1247e5fa9bc686e48273dba7f99ef27daf16398e"
+ },
+ "counts": {
+  "agents": 12,
+  "agents_requested": 12,
+  "agents_failed": 0,
+  "sims": 144,
+  "llm_calls": 36,
+  "tool_calls": 24,
+  "generations": 36,
+  "candidates_by_source": {
+   "start": 48,
+   "survivor": 50,
+   "mutation": 0,
+   "model": 46,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 46,
+   "filled_by_model": 46
+  },
+  "sim_tasks": 144,
+  "memory_writes": 36,
+  "reports": 12,
+  "feasible_agents": 0
+ },
+ "parent_files": {
+  "a0": {
+   "config.json": "96ca31323415745f6ded331ab233a3c461450f4589d4b678a0d1101ff87d18c8",
+   "evolution_log.csv": "0fcbe04229589ad97f30178f939bdba53cf04aacc83b3dba1cb83433d2a7eca5",
+   "best_result.json": "0406ea446c5a4cfc5df79d22cfe378efea21ff19ba8d01e650f39b5605db67d0"
+  },
+  "a1": {
+   "config.json": "6e111e9f579cdc736b9a971e86568d128d0873877ab58162c337570c98a7b081",
+   "evolution_log.csv": "ba2cb79f90177a7637e9ca25159bcbcff9669757545cd68c3981ee5dab6371cb",
+   "best_result.json": "0390185a1e12fdb5f6f983e2b71a7ff4531452a025ea4a0c20fa16b8324a0390"
+  },
+  "a10": {
+   "config.json": "a9ee38b90e474b260809deaf22308703bc8661db7ce1f2dac234eee3ff56d4b9",
+   "evolution_log.csv": "1e93ab85522d5b54b974c736bec593e5dc3fb7fb16c5d3cdb3c1bb95866686f6",
+   "best_result.json": "e10f2768a646057a7dedc6d2b291526d9277f9b1d2c7c731efcd1a9d76cf30e3"
+  },
+  "a11": {
+   "config.json": "f6a6bffe095c0f149132685c4eb82bfd0bcc4a056830b6016a006c8f752c0e12",
+   "evolution_log.csv": "ad38e655c49704975e61964731d2dc7db9f7c522def8fec5ecf164e97fc71529",
+   "best_result.json": "76aee507342c201a15b7a1018c2de234e7018fb2df19b283a7c5ba0f83f8f5c9"
+  },
+  "a2": {
+   "config.json": "ad43f5fff94f8d274ad090f1ae434526391219a6814d9dc7889c3962725e9f5b",
+   "evolution_log.csv": "af4b194e0bd7b43a425cd8c6056071f50c19e7d396e9d1102246010da5e4186d",
+   "best_result.json": "1697aba211edaa75b4d32c303cc1bc2e7bf10f402d178cceadcb81e89fc660f8"
+  },
+  "a3": {
+   "config.json": "387b6680af022727b225ae0161e52d8bc5690385b14415901003725bd63a6aee",
+   "evolution_log.csv": "1f1b3d6e4a089108d863b4d857e50a6d3abad781ba79b13d545a565eb568bc69",
+   "best_result.json": "11c87a18caa4af39ed0f85e23acbf807de9d23a69cbfc6a8574ba05cb52c372c"
+  },
+  "a4": {
+   "config.json": "ce43ca0a14dafde239fcfa919f412512a02b44c81d1fe41195f2298ebd45c4f0",
+   "evolution_log.csv": "aae80ed2ca20e282f032fe5ee71568c2a63bbd38e39aa8fa0bf77415ab756a4f",
+   "best_result.json": "c9675d7b07788ec5152302562dd07a05a6e77295d1c01986249d91992dafa8e7"
+  },
+  "a5": {
+   "config.json": "2868127e50524b0b6e5e31c9c78e2fe1bf5bb0711b330b8a917089d9c0371786",
+   "evolution_log.csv": "8a1617e6b1a997bf243f405253a973568f843d84ffd88e0920e1f454c1b2d33d",
+   "best_result.json": "ac853f9f50e10d499ceebf6cea3b26982e7ba0a5197ee69ead24abf77631f0fe"
+  },
+  "a6": {
+   "config.json": "21631fa0a3ae22bedf35afedeb0476403a53f74c1197f23decb438732b120728",
+   "evolution_log.csv": "1dacf9972dbfd19ea6b9ffbd642e313008a9a5554b2e2eb98d3cc2600287d45f",
+   "best_result.json": "1375c5b280589e47a5636258945d1fbacf97e282046c7663b013938e815f6863"
+  },
+  "a7": {
+   "config.json": "aac279dc3094f5de5e106510bce60071deab813cc855171e2bd6342e0a342537",
+   "evolution_log.csv": "d3e71377853ba04bd4f80bae8f83c9933e2d202439ec0453972d092e34e00a38",
+   "best_result.json": "f6abf264d5e30ea7209318278f98b36d0634b92bcd155969a1f828e47cde3676"
+  },
+  "a8": {
+   "config.json": "cebe63a94abd08a2eaa12de5161cdea02a5ed8a36181fe174ad7c9923596e9aa",
+   "evolution_log.csv": "814430422d0993824df659c7bf67f5f769ec921ebe6fd162076d8b24f3011d57",
+   "best_result.json": "25b57547d76515111b9d63f39d4659faa1031c0efc404dbc1229b123ddeb2875"
+  },
+  "a9": {
+   "config.json": "24e4a019809d36475dc59d3e9975ff0691ee65cb5fd4f485f14e0a8959b95cd7",
+   "evolution_log.csv": "2978e6936aa723c3d7d748605ed3986a2bbb88ff4e4623fd840973aa8a8781fd",
+   "best_result.json": "49acdb31e1cecca7d358ce79dc601898a6cd9bbef8fdf465c680ac6004b020e7"
+  }
+ },
+ "requests": [
+  {
+   "max_tokens": 256,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.869194, \"gamma_ne\": 0.335075, \"Delta\": 0.050751, \"a2_ne\": 2.090532, \"a1_Te\": 0.672503, \"gamma_Te\": 0.150277, \"a2_Te\": 0.454717} -> te_core_metric=1127.2, te_wall_eV=649.9, ti_wall_eV=1041.4, te_ped_eV=964.3, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 3.165351, \"gamma_ne\": 0.428861, \"Delta\": 0.071419, \"a2_ne\": 2.137212, \"a1_Te\": 0.748893, \"gamma_Te\": 0.173264, \"a2_Te\": 0.803055} -> te_core_metric=1551.9, te_wall_eV=912.0, ti_wall_eV=73.1, te_ped_eV=998.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 4.264545, \"gamma_ne\": 0.265312, \"Delta\": 0.098124, \"a2_ne\": 1.335796, \"a1_Te\": 0.535556, \"gamma_Te\": 0.127804, \"a2_Te\": 0.710428} -> te_core_metric=1246.0, te_wall_eV=557.6, ti_wall_eV=783.6, te_ped_eV=769.3, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 3.780907, \"gamma_ne\": 0.355388, \"Delta\": 0.03676, \"a2_ne\": 1.438991, \"a1_Te\": 0.878378, \"gamma_Te\": 0.106979, \"a2_Te\": 0.645174} -> te_core_metric=1523.6, te_wall_eV=965.4, ti_wall_eV=647.1, te_ped_eV=817.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n3 candidates survive; propose the other 1.\n\nGeneration 2 of 3: reply with a JSON list of 1 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 256,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 4.264545, \"gamma_ne\": 0.265312, \"Delta\": 0.098124, \"a2_ne\": 1.335796, \"a1_Te\": 0.535556, \"gamma_Te\": 0.127804, \"a2_Te\": 0.710428} -> te_core_metric=1246.0, te_wall_eV=557.6, ti_wall_eV=783.6, te_ped_eV=769.3, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.165351, \"gamma_ne\": 0.428861, \"Delta\": 0.071419, \"a2_ne\": 2.137212, \"a1_Te\": 0.748893, \"gamma_Te\": 0.173264, \"a2_Te\": 0.803055} -> te_core_metric=1551.9, te_wall_eV=912.0, ti_wall_eV=73.1, te_ped_eV=998.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.780907, \"gamma_ne\": 0.355388, \"Delta\": 0.03676, \"a2_ne\": 1.438991, \"a1_Te\": 0.878378, \"gamma_Te\": 0.106979, \"a2_Te\": 0.645174} -> te_core_metric=1523.6, te_wall_eV=965.4, ti_wall_eV=647.1, te_ped_eV=817.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.598013, \"gamma_ne\": 0.416953, \"Delta\": 0.048931, \"a2_ne\": 1.445605, \"a1_Te\": 0.525358, \"gamma_Te\": 0.15689, \"a2_Te\": 0.449105} -> te_core_metric=974.5, te_wall_eV=654.9, ti_wall_eV=249.2, te_ped_eV=205.7, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\n\n3 candidates survive; propose the other 1.\n\nGeneration 3 of 3: reply with a JSON list of 1 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 256,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.181519, \"gamma_ne\": 0.336511, \"Delta\": 0.099283, \"a2_ne\": 2.118802, \"a1_Te\": 0.745638, \"gamma_Te\": 0.111948, \"a2_Te\": 0.548018} -> te_core_metric=1293.7, te_wall_eV=726.0, ti_wall_eV=140.6, te_ped_eV=688.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.483207, \"gamma_ne\": 0.263517, \"Delta\": 0.061926, \"a2_ne\": 1.051308, \"a1_Te\": 0.887572, \"gamma_Te\": 0.089881, \"a2_Te\": 0.819101} -> te_core_metric=1706.7, te_wall_eV=82.2, ti_wall_eV=873.1, te_ped_eV=686.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.501395, \"gamma_ne\": 0.400958, \"Delta\": 0.070503, \"a2_ne\": 1.506078, \"a1_Te\": 0.547465, \"gamma_Te\": 0.190693, \"a2_Te\": 0.464271} -> te_core_metric=1011.7, te_wall_eV=161.6, ti_wall_eV=142.3, te_ped_eV=278.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 2.821102, \"gamma_ne\": 0.371424, \"Delta\": 0.041867, \"a2_ne\": 2.277137, \"a1_Te\": 0.637681, \"gamma_Te\": 0.16748, \"a2_Te\": 0.670919} -> te_core_metric=1308.6, te_wall_eV=850.3, ti_wall_eV=999.2, te_ped_eV=699.0, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n3 candidates survive; propose the other 1.\n\nGeneration 2 of 3: reply with a JSON list of 1 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 256,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.957175, \"gamma_ne\": 0.338159, \"Delta\": 0.068478, \"a2_ne\": 1.156689, \"a1_Te\": 0.626542, \"gamma_Te\": 0.10659, \"a2_Te\": 0.851096} -> te_core_metric=1477.6, te_wall_eV=98.3, ti_wall_eV=125.4, te_ped_eV=527.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.206601, \"gamma_ne\": 0.263108, \"Delta\": 0.048265, \"a2_ne\": 1.643425, \"a1_Te\": 0.802654, \"gamma_Te\": 0.161048, \"a2_Te\": 0.735752} -> te_core_metric=1538.4, te_wall_eV=347.2, ti_wall_eV=621.1, te_ped_eV=553.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 4.264345, \"gamma_ne\": 0.411336, \"Delta\": 0.046969, \"a2_ne\": 1.859888, \"a1_Te\": 0.579281, \"gamma_Te\": 0.121097, \"a2_Te\": 0.48773} -> te_core_metric=1067.0, te_wall_eV=1043.1, ti_wall_eV=895.5, te_ped_eV=581.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.890642, \"gamma_ne\": 0.358506, \"Delta\": 0.088491, \"a2_ne\": 2.24395, \"a1_Te\": 0.789768, \"gamma_Te\": 0.174507, \"a2_Te\": 0.600759} -> te_core_metric=1390.5, te_wall_eV=548.1, ti_wall_eV=779.7, te_ped_eV=889.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n3 candidates survive; propose the other 1.\n\nGeneration 2 of 3: reply with a JSON list of 1 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 256,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.968825, \"gamma_ne\": 0.417934, \"Delta\": 0.032579, \"a2_ne\": 1.527647, \"a1_Te\": 0.624697, \"gamma_Te\": 0.105562, \"a2_Te\": 0.797547} -> te_core_metric=1422.2, te_wall_eV=239.6, ti_wall_eV=830.7, te_ped_eV=324.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.744089, \"gamma_ne\": 0.252477, \"Delta\": 0.079977, \"a2_ne\": 2.144256, \"a1_Te\": 0.545041, \"gamma_Te\": 0.199173, \"a2_Te\": 0.680811} -> te_core_metric=1225.9, te_wall_eV=594.6, ti_wall_eV=121.3, te_ped_eV=167.8, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=959.5, ti_wall_eV=52.8, te_ped_eV=851.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=901.8, ti_wall_eV=904.1, te_ped_eV=284.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n3 candidates survive; propose the other 1.\n\nGeneration 3 of 3: reply with a JSON list of 1 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1011.7, te_wall_eV=161.6, te_ped_eV=278.8, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1095.0, te_wall_eV=304.7, te_ped_eV=497.0, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1095.4, te_wall_eV=329.2, te_ped_eV=666.1, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1236.2, te_wall_eV=346.3, te_ped_eV=192.6, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1236.2, te_wall_eV=607.6, te_ped_eV=124.2, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1259.6, te_wall_eV=240.6, te_ped_eV=706.6, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1261.0, te_wall_eV=755.6, te_ped_eV=634.2, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1300.6, te_wall_eV=245.0, te_ped_eV=552.8, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1361.8, te_wall_eV=58.9, te_ped_eV=105.1, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1363.5, te_wall_eV=457.8, te_ped_eV=923.9, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1442.1, te_wall_eV=52.9, te_ped_eV=994.5, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 320,
+   "messages": [
+    {
+     "content": "You summarise the evidence of one IGNOS fusion design campaign.",
+     "role": "system"
+    },
+    {
+     "content": "12 candidates evaluated over 3 generations; best: te_core_metric=1477.6, te_wall_eV=98.3, te_ped_eV=527.6, feasible=False, basis=no_feasible_core_wall_blend.\nSummarise in one or two sentences what this campaign found.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.836514, \"gamma_ne\": 0.350636, \"Delta\": 0.041923, \"a2_ne\": 1.079294, \"a1_Te\": 0.889305, \"gamma_Te\": 0.125631, \"a2_Te\": 0.494831} -> te_core_metric=1384.1, te_wall_eV=308.6, ti_wall_eV=332.7, te_ped_eV=626.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.403068, \"gamma_ne\": 0.259309, \"Delta\": 0.075098, \"a2_ne\": 2.40403, \"a1_Te\": 0.584979, \"gamma_Te\": 0.188858, \"a2_Te\": 0.864422} -> te_core_metric=1449.4, te_wall_eV=945.9, ti_wall_eV=760.8, te_ped_eV=205.5, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 4.302666, \"gamma_ne\": 0.330334, \"Delta\": 0.054207, \"a2_ne\": 1.9554, \"a1_Te\": 0.790389, \"gamma_Te\": 0.159025, \"a2_Te\": 0.717478} -> te_core_metric=1507.9, te_wall_eV=262.1, ti_wall_eV=350.0, te_ped_eV=274.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 3.974082, \"gamma_ne\": 0.402195, \"Delta\": 0.087398, \"a2_ne\": 1.37921, \"a1_Te\": 0.668897, \"gamma_Te\": 0.096503, \"a2_Te\": 0.61548} -> te_core_metric=1284.4, te_wall_eV=236.9, ti_wall_eV=422.1, te_ped_eV=495.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.021999, \"gamma_ne\": 0.439616, \"Delta\": 0.085502, \"a2_ne\": 1.319019, \"a1_Te\": 0.857449, \"gamma_Te\": 0.111292, \"a2_Te\": 0.796833} -> te_core_metric=1654.3, te_wall_eV=604.0, ti_wall_eV=325.3, te_ped_eV=665.4, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 3.623349, \"gamma_ne\": 0.308645, \"Delta\": 0.048665, \"a2_ne\": 2.070627, \"a1_Te\": 0.614676, \"gamma_Te\": 0.19081, \"a2_Te\": 0.528771} -> te_core_metric=1143.4, te_wall_eV=64.9, ti_wall_eV=508.2, te_ped_eV=190.1, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 4.358783, \"gamma_ne\": 0.269707, \"Delta\": 0.041659, \"a2_ne\": 2.245507, \"a1_Te\": 0.773802, \"gamma_Te\": 0.105518, \"a2_Te\": 0.757901} -> te_core_metric=1531.7, te_wall_eV=705.6, ti_wall_eV=69.9, te_ped_eV=670.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 2.67546, \"gamma_ne\": 0.358122, \"Delta\": 0.068919, \"a2_ne\": 1.622682, \"a1_Te\": 0.562673, \"gamma_Te\": 0.150985, \"a2_Te\": 0.510669} -> te_core_metric=1073.3, te_wall_eV=533.1, ti_wall_eV=198.2, te_ped_eV=132.5, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.230918, \"gamma_ne\": 0.332836, \"Delta\": 0.041041, \"a2_ne\": 1.234564, \"a1_Te\": 0.732008, \"gamma_Te\": 0.166311, \"a2_Te\": 0.643534} -> te_core_metric=1375.5, te_wall_eV=647.7, ti_wall_eV=430.0, te_ped_eV=840.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.010616, \"gamma_ne\": 0.40865, \"Delta\": 0.086259, \"a2_ne\": 2.481969, \"a1_Te\": 0.587772, \"gamma_Te\": 0.13441, \"a2_Te\": 0.712842} -> te_core_metric=1300.6, te_wall_eV=245.0, ti_wall_eV=176.6, te_ped_eV=552.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.94656, \"gamma_ne\": 0.356691, \"Delta\": 0.062556, \"a2_ne\": 1.585128, \"a1_Te\": 0.654586, \"gamma_Te\": 0.093823, \"a2_Te\": 0.403689} -> te_core_metric=1058.3, te_wall_eV=992.5, ti_wall_eV=431.4, te_ped_eV=850.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 2.819072, \"gamma_ne\": 0.284398, \"Delta\": 0.067077, \"a2_ne\": 2.100439, \"a1_Te\": 0.876119, \"gamma_Te\": 0.176745, \"a2_Te\": 0.845394} -> te_core_metric=1721.5, te_wall_eV=166.4, ti_wall_eV=741.3, te_ped_eV=564.4, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.836514, \"gamma_ne\": 0.350636, \"Delta\": 0.041923, \"a2_ne\": 1.079294, \"a1_Te\": 0.889305, \"gamma_Te\": 0.125631, \"a2_Te\": 0.494831} -> te_core_metric=1384.1, te_wall_eV=308.6, ti_wall_eV=332.7, te_ped_eV=626.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.302666, \"gamma_ne\": 0.330334, \"Delta\": 0.054207, \"a2_ne\": 1.9554, \"a1_Te\": 0.790389, \"gamma_Te\": 0.159025, \"a2_Te\": 0.717478} -> te_core_metric=1507.9, te_wall_eV=262.1, ti_wall_eV=350.0, te_ped_eV=274.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=278.3, ti_wall_eV=619.3, te_ped_eV=440.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=329.2, ti_wall_eV=123.2, te_ped_eV=666.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.623349, \"gamma_ne\": 0.308645, \"Delta\": 0.048665, \"a2_ne\": 2.070627, \"a1_Te\": 0.614676, \"gamma_Te\": 0.19081, \"a2_Te\": 0.528771} -> te_core_metric=1143.4, te_wall_eV=64.9, ti_wall_eV=508.2, te_ped_eV=190.1, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 2.67546, \"gamma_ne\": 0.358122, \"Delta\": 0.068919, \"a2_ne\": 1.622682, \"a1_Te\": 0.562673, \"gamma_Te\": 0.150985, \"a2_Te\": 0.510669} -> te_core_metric=1073.3, te_wall_eV=533.1, ti_wall_eV=198.2, te_ped_eV=132.5, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=730.3, ti_wall_eV=451.0, te_ped_eV=690.4, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=896.7, ti_wall_eV=563.1, te_ped_eV=214.8, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 4.010616, \"gamma_ne\": 0.40865, \"Delta\": 0.086259, \"a2_ne\": 2.481969, \"a1_Te\": 0.587772, \"gamma_Te\": 0.13441, \"a2_Te\": 0.712842} -> te_core_metric=1300.6, te_wall_eV=245.0, ti_wall_eV=176.6, te_ped_eV=552.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.230918, \"gamma_ne\": 0.332836, \"Delta\": 0.041041, \"a2_ne\": 1.234564, \"a1_Te\": 0.732008, \"gamma_Te\": 0.166311, \"a2_Te\": 0.643534} -> te_core_metric=1375.5, te_wall_eV=647.7, ti_wall_eV=430.0, te_ped_eV=840.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=255.1, ti_wall_eV=207.9, te_ped_eV=674.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=795.6, ti_wall_eV=239.3, te_ped_eV=809.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 4.012907, \"gamma_ne\": 0.255116, \"Delta\": 0.085226, \"a2_ne\": 1.227848, \"a1_Te\": 0.772855, \"gamma_Te\": 0.14361, \"a2_Te\": 0.641973} -> te_core_metric=1414.8, te_wall_eV=595.0, ti_wall_eV=569.9, te_ped_eV=589.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.083053, \"gamma_ne\": 0.321362, \"Delta\": 0.060739, \"a2_ne\": 1.798632, \"a1_Te\": 0.746583, \"gamma_Te\": 0.181983, \"a2_Te\": 0.515113} -> te_core_metric=1261.7, te_wall_eV=660.7, ti_wall_eV=1028.7, te_ped_eV=911.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 3.658646, \"gamma_ne\": 0.395447, \"Delta\": 0.043494, \"a2_ne\": 1.584178, \"a1_Te\": 0.591296, \"gamma_Te\": 0.139342, \"a2_Te\": 0.850824} -> te_core_metric=1442.1, te_wall_eV=52.9, ti_wall_eV=178.0, te_ped_eV=994.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 2.910905, \"gamma_ne\": 0.371803, \"Delta\": 0.059501, \"a2_ne\": 1.66891, \"a1_Te\": 0.558227, \"gamma_Te\": 0.1473, \"a2_Te\": 0.722804} -> te_core_metric=1281.0, te_wall_eV=179.9, ti_wall_eV=672.1, te_ped_eV=368.3, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.935715, \"gamma_ne\": 0.275036, \"Delta\": 0.036974, \"a2_ne\": 1.364242, \"a1_Te\": 0.805167, \"gamma_Te\": 0.121343, \"a2_Te\": 0.853876} -> te_core_metric=1659.0, te_wall_eV=239.8, ti_wall_eV=794.8, te_ped_eV=778.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 4.362346, \"gamma_ne\": 0.393102, \"Delta\": 0.086209, \"a2_ne\": 1.873615, \"a1_Te\": 0.679549, \"gamma_Te\": 0.153388, \"a2_Te\": 0.589547} -> te_core_metric=1269.1, te_wall_eV=729.8, ti_wall_eV=291.2, te_ped_eV=788.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.882349, \"gamma_ne\": 0.30989, \"Delta\": 0.049822, \"a2_ne\": 2.451715, \"a1_Te\": 0.757005, \"gamma_Te\": 0.195569, \"a2_Te\": 0.44083} -> te_core_metric=1197.8, te_wall_eV=909.0, ti_wall_eV=273.5, te_ped_eV=427.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.391426, \"gamma_ne\": 0.448346, \"Delta\": 0.078987, \"a2_ne\": 1.620345, \"a1_Te\": 0.598312, \"gamma_Te\": 0.105205, \"a2_Te\": 0.650446} -> te_core_metric=1248.8, te_wall_eV=594.7, ti_wall_eV=350.1, te_ped_eV=264.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.187452, \"gamma_ne\": 0.305139, \"Delta\": 0.068926, \"a2_ne\": 1.290547, \"a1_Te\": 0.720293, \"gamma_Te\": 0.155962, \"a2_Te\": 0.862121} -> te_core_metric=1582.4, te_wall_eV=975.9, ti_wall_eV=154.6, te_ped_eV=168.2, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 4.277462, \"gamma_ne\": 0.424773, \"Delta\": 0.055314, \"a2_ne\": 1.376687, \"a1_Te\": 0.883979, \"gamma_Te\": 0.091624, \"a2_Te\": 0.519507} -> te_core_metric=1403.5, te_wall_eV=790.8, ti_wall_eV=498.5, te_ped_eV=403.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.766897, \"gamma_ne\": 0.354142, \"Delta\": 0.088989, \"a2_ne\": 2.307206, \"a1_Te\": 0.530797, \"gamma_Te\": 0.133982, \"a2_Te\": 0.728808} -> te_core_metric=1259.6, te_wall_eV=240.6, ti_wall_eV=84.5, te_ped_eV=706.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 2.922769, \"gamma_ne\": 0.28662, \"Delta\": 0.032094, \"a2_ne\": 1.933828, \"a1_Te\": 0.645886, \"gamma_Te\": 0.184767, \"a2_Te\": 0.541083} -> te_core_metric=1187.0, te_wall_eV=132.1, ti_wall_eV=1034.6, te_ped_eV=272.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.391426, \"gamma_ne\": 0.448346, \"Delta\": 0.078987, \"a2_ne\": 1.620345, \"a1_Te\": 0.598312, \"gamma_Te\": 0.105205, \"a2_Te\": 0.650446} -> te_core_metric=1248.8, te_wall_eV=594.7, ti_wall_eV=350.1, te_ped_eV=264.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 4.362346, \"gamma_ne\": 0.393102, \"Delta\": 0.086209, \"a2_ne\": 1.873615, \"a1_Te\": 0.679549, \"gamma_Te\": 0.153388, \"a2_Te\": 0.589547} -> te_core_metric=1269.1, te_wall_eV=729.8, ti_wall_eV=291.2, te_ped_eV=788.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=457.8, ti_wall_eV=530.4, te_ped_eV=923.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=425.1, ti_wall_eV=576.3, te_ped_eV=250.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.501395, \"gamma_ne\": 0.400958, \"Delta\": 0.070503, \"a2_ne\": 1.506078, \"a1_Te\": 0.547465, \"gamma_Te\": 0.190693, \"a2_Te\": 0.464271} -> te_core_metric=1011.7, te_wall_eV=161.6, ti_wall_eV=142.3, te_ped_eV=278.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.181519, \"gamma_ne\": 0.336511, \"Delta\": 0.099283, \"a2_ne\": 2.118802, \"a1_Te\": 0.745638, \"gamma_Te\": 0.111948, \"a2_Te\": 0.548018} -> te_core_metric=1293.7, te_wall_eV=726.0, ti_wall_eV=140.6, te_ped_eV=688.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 4.483207, \"gamma_ne\": 0.263517, \"Delta\": 0.061926, \"a2_ne\": 1.051308, \"a1_Te\": 0.887572, \"gamma_Te\": 0.089881, \"a2_Te\": 0.819101} -> te_core_metric=1706.7, te_wall_eV=82.2, ti_wall_eV=873.1, te_ped_eV=686.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.598013, \"gamma_ne\": 0.416953, \"Delta\": 0.048931, \"a2_ne\": 1.445605, \"a1_Te\": 0.525358, \"gamma_Te\": 0.15689, \"a2_Te\": 0.449105} -> te_core_metric=974.5, te_wall_eV=606.6, ti_wall_eV=603.7, te_ped_eV=404.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.564875, \"gamma_ne\": 0.335659, \"Delta\": 0.054445, \"a2_ne\": 1.083425, \"a1_Te\": 0.597341, \"gamma_Te\": 0.126883, \"a2_Te\": 0.589382} -> te_core_metric=1186.7, te_wall_eV=851.6, ti_wall_eV=737.8, te_ped_eV=784.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 4.084689, \"gamma_ne\": 0.250835, \"Delta\": 0.068769, \"a2_ne\": 1.631649, \"a1_Te\": 0.721741, \"gamma_Te\": 0.080368, \"a2_Te\": 0.65172} -> te_core_metric=1373.5, te_wall_eV=415.9, ti_wall_eV=842.0, te_ped_eV=887.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 2.645897, \"gamma_ne\": 0.422275, \"Delta\": 0.031343, \"a2_ne\": 2.466351, \"a1_Te\": 0.880491, \"gamma_Te\": 0.198132, \"a2_Te\": 0.884185} -> te_core_metric=1764.7, te_wall_eV=784.8, ti_wall_eV=529.7, te_ped_eV=677.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 3.386951, \"gamma_ne\": 0.381147, \"Delta\": 0.08909, \"a2_ne\": 1.831714, \"a1_Te\": 0.681067, \"gamma_Te\": 0.152121, \"a2_Te\": 0.450664} -> te_core_metric=1131.7, te_wall_eV=70.7, ti_wall_eV=574.7, te_ped_eV=422.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.744089, \"gamma_ne\": 0.252477, \"Delta\": 0.079977, \"a2_ne\": 2.144256, \"a1_Te\": 0.545041, \"gamma_Te\": 0.199173, \"a2_Te\": 0.680811} -> te_core_metric=1225.9, te_wall_eV=594.6, ti_wall_eV=121.3, te_ped_eV=167.8, wall_ok=False, pedestal_ok=False, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.105786, \"gamma_ne\": 0.38484, \"Delta\": 0.057064, \"a2_ne\": 2.074734, \"a1_Te\": 0.771959, \"gamma_Te\": 0.125444, \"a2_Te\": 0.527408} -> te_core_metric=1299.4, te_wall_eV=418.0, ti_wall_eV=959.5, te_ped_eV=158.0, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 3.229387, \"gamma_ne\": 0.336155, \"Delta\": 0.097189, \"a2_ne\": 1.011278, \"a1_Te\": 0.8387, \"gamma_Te\": 0.142481, \"a2_Te\": 0.520051} -> te_core_metric=1358.8, te_wall_eV=678.5, ti_wall_eV=939.7, te_ped_eV=241.9, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 2.968825, \"gamma_ne\": 0.417934, \"Delta\": 0.032579, \"a2_ne\": 1.527647, \"a1_Te\": 0.624697, \"gamma_Te\": 0.105562, \"a2_Te\": 0.797547} -> te_core_metric=1422.2, te_wall_eV=239.6, ti_wall_eV=830.7, te_ped_eV=324.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\n\n2 candidates survive; propose the other 2.\n\nGeneration 2 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.645897, \"gamma_ne\": 0.422275, \"Delta\": 0.031343, \"a2_ne\": 2.466351, \"a1_Te\": 0.880491, \"gamma_Te\": 0.198132, \"a2_Te\": 0.884185} -> te_core_metric=1764.7, te_wall_eV=784.8, ti_wall_eV=529.7, te_ped_eV=677.2, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.084689, \"gamma_ne\": 0.250835, \"Delta\": 0.068769, \"a2_ne\": 1.631649, \"a1_Te\": 0.721741, \"gamma_Te\": 0.080368, \"a2_Te\": 0.65172} -> te_core_metric=1373.5, te_wall_eV=415.9, ti_wall_eV=842.0, te_ped_eV=887.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=787.2, ti_wall_eV=751.6, te_ped_eV=691.4, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=59.7, ti_wall_eV=951.7, te_ped_eV=855.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 2.957175, \"gamma_ne\": 0.338159, \"Delta\": 0.068478, \"a2_ne\": 1.156689, \"a1_Te\": 0.626542, \"gamma_Te\": 0.10659, \"a2_Te\": 0.851096} -> te_core_metric=1477.6, te_wall_eV=98.3, ti_wall_eV=125.4, te_ped_eV=527.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 3.206601, \"gamma_ne\": 0.263108, \"Delta\": 0.048265, \"a2_ne\": 1.643425, \"a1_Te\": 0.802654, \"gamma_Te\": 0.161048, \"a2_Te\": 0.735752} -> te_core_metric=1538.4, te_wall_eV=347.2, ti_wall_eV=621.1, te_ped_eV=553.9, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.890642, \"gamma_ne\": 0.358506, \"Delta\": 0.088491, \"a2_ne\": 2.24395, \"a1_Te\": 0.789768, \"gamma_Te\": 0.174507, \"a2_Te\": 0.600759} -> te_core_metric=1390.5, te_wall_eV=548.1, ti_wall_eV=779.7, te_ped_eV=889.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.598013, \"gamma_ne\": 0.416953, \"Delta\": 0.048931, \"a2_ne\": 1.445605, \"a1_Te\": 0.525358, \"gamma_Te\": 0.15689, \"a2_Te\": 0.449105} -> te_core_metric=974.5, te_wall_eV=342.2, ti_wall_eV=1045.0, te_ped_eV=999.4, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 384,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.249887, \"gamma_ne\": 0.402071, \"Delta\": 0.041376, \"a2_ne\": 2.416086, \"a1_Te\": 0.773217, \"gamma_Te\": 0.172107, \"a2_Te\": 0.588534} -> te_core_metric=1361.8, te_wall_eV=58.9, ti_wall_eV=59.0, te_ped_eV=105.1, wall_ok=True, pedestal_ok=False, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.083053, \"gamma_ne\": 0.321362, \"Delta\": 0.060739, \"a2_ne\": 1.798632, \"a1_Te\": 0.746583, \"gamma_Te\": 0.181983, \"a2_Te\": 0.515113} -> te_core_metric=1261.7, te_wall_eV=655.2, ti_wall_eV=700.2, te_ped_eV=760.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 3.658646, \"gamma_ne\": 0.395447, \"Delta\": 0.043494, \"a2_ne\": 1.584178, \"a1_Te\": 0.591296, \"gamma_Te\": 0.139342, \"a2_Te\": 0.850824} -> te_core_metric=1442.1, te_wall_eV=118.8, ti_wall_eV=250.2, te_ped_eV=964.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 2.910905, \"gamma_ne\": 0.371803, \"Delta\": 0.059501, \"a2_ne\": 1.66891, \"a1_Te\": 0.558227, \"gamma_Te\": 0.1473, \"a2_Te\": 0.722804} -> te_core_metric=1281.0, te_wall_eV=778.6, ti_wall_eV=974.8, te_ped_eV=327.0, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n2 candidates survive; propose the other 2.\n\nGeneration 3 of 3: reply with a JSON list of 2 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 512,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Gas puffing raises edge density and cools the scrape-off layer and divertor, lowering wall temperatures, but too much puffing can erode the pedestal.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.097499, \"gamma_ne\": 0.359603, \"Delta\": 0.073482, \"a2_ne\": 2.017824, \"a1_Te\": 0.595124, \"gamma_Te\": 0.080025, \"a2_Te\": 0.443454} -> te_core_metric=1038.6, te_wall_eV=706.7, ti_wall_eV=166.2, te_ped_eV=691.1, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 4.012907, \"gamma_ne\": 0.255116, \"Delta\": 0.085226, \"a2_ne\": 1.227848, \"a1_Te\": 0.772855, \"gamma_Te\": 0.14361, \"a2_Te\": 0.641973} -> te_core_metric=1414.8, te_wall_eV=595.0, ti_wall_eV=569.9, te_ped_eV=589.7, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 2: {\"a1_ne\": 3.886341, \"gamma_ne\": 0.405228, \"Delta\": 0.049737, \"a2_ne\": 2.493056, \"a1_Te\": 0.679675, \"gamma_Te\": 0.130252, \"a2_Te\": 0.799223} -> te_core_metric=1478.9, te_wall_eV=78.6, ti_wall_eV=719.1, te_ped_eV=189.0, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 2.650744, \"gamma_ne\": 0.327573, \"Delta\": 0.033519, \"a2_ne\": 1.661681, \"a1_Te\": 0.876381, \"gamma_Te\": 0.199564, \"a2_Te\": 0.658347} -> te_core_metric=1534.7, te_wall_eV=633.6, ti_wall_eV=737.3, te_ped_eV=418.8, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n1 candidates survive; propose the other 3.\n\nGeneration 2 of 3: reply with a JSON list of 3 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 512,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). In H-mode the edge pedestal sets the boundary condition for the core: with stiff core transport, a higher pedestal temperature tends to raise the core temperature.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 2 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 3.766897, \"gamma_ne\": 0.354142, \"Delta\": 0.088989, \"a2_ne\": 2.307206, \"a1_Te\": 0.530797, \"gamma_Te\": 0.133982, \"a2_Te\": 0.728808} -> te_core_metric=1259.6, te_wall_eV=240.6, ti_wall_eV=84.5, te_ped_eV=706.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=True\ncandidate 1: {\"a1_ne\": 4.277462, \"gamma_ne\": 0.424773, \"Delta\": 0.055314, \"a2_ne\": 1.376687, \"a1_Te\": 0.883979, \"gamma_Te\": 0.091624, \"a2_Te\": 0.519507} -> te_core_metric=1403.5, te_wall_eV=790.8, ti_wall_eV=498.5, te_ped_eV=403.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 2.684473, \"gamma_ne\": 0.32309, \"Delta\": 0.030726, \"a2_ne\": 1.956087, \"a1_Te\": 0.678755, \"gamma_Te\": 0.16357, \"a2_Te\": 0.684782} -> te_core_metric=1363.5, te_wall_eV=637.3, ti_wall_eV=442.8, te_ped_eV=947.0, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 3: {\"a1_ne\": 3.066683, \"gamma_ne\": 0.372855, \"Delta\": 0.068943, \"a2_ne\": 1.082391, \"a1_Te\": 0.649405, \"gamma_Te\": 0.130865, \"a2_Te\": 0.445978} -> te_core_metric=1095.4, te_wall_eV=146.1, ti_wall_eV=526.2, te_ped_eV=683.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\n\n1 candidates survive; propose the other 3.\n\nGeneration 3 of 3: reply with a JSON list of 3 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  },
+  {
+   "max_tokens": 512,
+   "messages": [
+    {
+     "content": "You are the experiment generator of one IGNOS fusion design campaign. You propose H-mode plasma profile parameters for the three-region profile model. The goal is the highest te_core_metric among feasible candidates (wall_ok and pedestal_ok both true). Constraints and parameter ranges: {\"param_ranges\": {\"Delta\": [0.03, 0.1], \"a1_Te\": [0.5, 0.9], \"a1_ne\": [2.5, 4.5], \"a2_Te\": [0.4, 0.9], \"a2_ne\": [1.0, 2.5], \"gamma_Te\": [0.08, 0.2], \"gamma_ne\": [0.25, 0.45]}, \"pedestal_floor_eV\": 250.0, \"target_core_temperature_keV\": 3.0, \"wall_limit_eV\": 100.0} Background: Stand-in abstract (synthetic). Pedestal width and height are linked through edge stability limits; a wider pedestal can support a higher pedestal pressure before an edge instability is triggered.",
+     "role": "system"
+    },
+    {
+     "content": "Generation 1 of 3 results (survivors go into the next generation unchanged):\ncandidate 0: {\"a1_ne\": 4.028472, \"gamma_ne\": 0.324434, \"Delta\": 0.047916, \"a2_ne\": 1.719686, \"a1_Te\": 0.812836, \"gamma_Te\": 0.093682, \"a2_Te\": 0.412223} -> te_core_metric=1225.1, te_wall_eV=548.2, ti_wall_eV=290.1, te_ped_eV=636.5, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 1: {\"a1_ne\": 3.605527, \"gamma_ne\": 0.250792, \"Delta\": 0.07603, \"a2_ne\": 1.01165, \"a1_Te\": 0.60572, \"gamma_Te\": 0.15003, \"a2_Te\": 0.883326} -> te_core_metric=1489.0, te_wall_eV=1031.9, ti_wall_eV=431.7, te_ped_eV=452.6, wall_ok=False, pedestal_ok=True, is_good=False, survived=False\ncandidate 2: {\"a1_ne\": 3.249887, \"gamma_ne\": 0.402071, \"Delta\": 0.041376, \"a2_ne\": 2.416086, \"a1_Te\": 0.773217, \"gamma_Te\": 0.172107, \"a2_Te\": 0.588534} -> te_core_metric=1361.8, te_wall_eV=58.9, ti_wall_eV=59.0, te_ped_eV=105.1, wall_ok=True, pedestal_ok=False, is_good=False, survived=True\ncandidate 3: {\"a1_ne\": 2.89151, \"gamma_ne\": 0.365372, \"Delta\": 0.086514, \"a2_ne\": 2.053454, \"a1_Te\": 0.503749, \"gamma_Te\": 0.113473, \"a2_Te\": 0.727214} -> te_core_metric=1231.0, te_wall_eV=852.6, ti_wall_eV=325.6, te_ped_eV=122.0, wall_ok=False, pedestal_ok=False, is_good=False, survived=False\n\n1 candidates survive; propose the other 3.\n\nGeneration 2 of 3: reply with a JSON list of 3 objects, each with numeric values for exactly these keys: a1_ne, gamma_ne, Delta, a2_ne, a1_Te, gamma_Te, a2_Te.",
+     "role": "user"
+    }
+   ],
+   "model": "stand-in",
+   "thinking_token_budget": 64
+  }
+ ]
+}
