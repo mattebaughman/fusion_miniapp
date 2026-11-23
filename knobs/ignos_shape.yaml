@@ -20,6 +20,7 @@ agents:
   first: 0
   per_process: 1
   max_live: null
+  start_together: false       # the AUTONMI layer: true = generation 0 waits until every agent has started
   cost_scale: 1.0
   thinking_budget: 1024
   budget_scales_with_cost: false

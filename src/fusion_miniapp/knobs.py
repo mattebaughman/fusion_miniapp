@@ -42,6 +42,7 @@ SCHEMA = {
         "first": ("int", 0, None),            # campaigns first .. first+count-1, each seeded with its index
         "per_process": ("int", 1, None),
         "max_live": ("optint", 1),            # campaigns live at once per agent process; null = all of them
+        "start_together": ("bool",),          # the AUTONMI layer: generation 0 waits until every agent has started
         "cost_scale": ("nums", 0, None),      # a number, or a list: agent i uses entry i % len (each > 0)
         "thinking_budget": ("int", 0, None),
         "budget_scales_with_cost": ("bool",),

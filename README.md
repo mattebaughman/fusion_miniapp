@@ -98,11 +98,51 @@ python -m fusion_miniapp.layer_autonmi --preset smoke --sim fixture --agents 100
 python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --populations 2 ...   # under Dragon
 ```
 
-- **The same campaigns.** Each campaign is one AUTONMI scripted agent that drives `decide.py`'s three
-  roles with the same messages, in the same order. Its results are the other layers' results:
-  `results_sha256` is the same, and so are the parent's per-campaign files.
+- **The same campaigns.** Each campaign is `decide.py`'s three roles with the same messages, in the same
+  order. Its results are the other layers' results: `results_sha256` is the same, and so are the parent's
+  per-campaign files.
+- **Three agents per campaign.** On this layer each role is a hosted AUTONMI agent of its own:
+  `a<i>/coordinator`, `a<i>/generator` and `a<i>/evaluator`, one after another in the agent list. Each has
+  its own state, start and end, row in AUTONMI's records (`app/agents-p*.jsonl`), model calls (under its own
+  id, so its own routing and call records) and lookups. They share one AUTONMI agent definition, so they
+  share its list of actions and one model-call limit (the largest role's); fusion checks each role's exact
+  counts. Model calls are whole replies: no token streaming, and no tools chosen by a model.
+  - They talk only through messages, JSON copies kept in a mailbox per population
+    (`layer_autonmi.Mailbox`) under the key `a<i>/<to>/<kind>/<g>`. Each generation: Coordinator ->
+    Generator `make/g`; Generator -> Coordinator `population/g`; Coordinator -> Evaluator `evaluate/g`;
+    Evaluator -> Coordinator `results/g`. After the last one the Coordinator makes the summary call, sends
+    `done` to the other two, reports and ends; the others end on `done`, so all three stay live until their
+    campaign ends. That is 4G + 2 messages per campaign. A waiting agent awaits its message inside its step,
+    counted as waiting on a tool, and is never polled; only the Evaluator's wait for its evaluations is
+    AUTONMI's real suspension (its state goes to the store). The other waits keep the paused step in memory.
+  - The Coordinator makes the constraints lookup and sends it in `make/0`; the Generator makes the abstract
+    lookup itself (`decide.LOOKUP_ROLE`). Every id seen outside the agents stays the campaign's, `a<i>`: the
+    stub's key, the evaluations' `agent_id` (cold starts, work folders), the lookups, the store key
+    `campaign/a<i>`, the campaign's folder and its `run_tag`.
+  - `agents.start_together` (on in `hundredk`, off in `smoke`): no Coordinator begins until every agent of
+    its population has started, so all are live at once. It needs `agents.max_live: null`; with a cap the
+    run is refused.
+  - `agents.max_live` still counts campaigns: AUTONMI's cap is three agents per campaign, and a cap of one
+    campaign runs (a cap below that is refused). The start-up stagger (`--stagger-batch`, campaigns) is
+    likewise three agents per campaign.
+  - A campaign's agents must stay in one population, and AUTONMI splits its agent list into equal
+    contiguous blocks, so the populations must divide the campaigns. By default the layer takes the
+    smallest count that does, from `run.py`'s agent processes up to twice that, and otherwise refuses with
+    nearby campaign counts that work. A `--populations` that does not divide is refused.
+  - When one of a campaign's agents fails, the other two end with an error instead of waiting, and the
+    campaign is one line with that error, the failing `role` and every role's model calls. The other
+    campaigns go on, as before.
+  - The record counts campaigns (`counts.agents`, as in the other layers) and the hosted agents
+    (`counts.hosted_agents`, `agents_per_campaign`), and per role (`counts.by_role`): agents, those that
+    ended normally, model calls, lookups, messages sent, received and dropped (a failed campaign's messages
+    not yet received), suspensions and each agent's seconds waiting for messages. `counts.llm_calls` keeps
+    counting the outer loop's calls. AUTONMI's checks include each role's exact counts, every message
+    received once with none left, the lookups against AUTONMI's own count, and the store at the end
+    (`store_holds_only_the_memories`: no agent's saved state, each reported campaign's memory under
+    `campaign/a<i>`).
 - **A generation is one fan-out.** The Evaluator's P `evaluate` calls are submitted at once as
-  suspending task tools. The campaign is saved and dropped until all P end, as in the LangGraph layer.
+  suspending task tools. The Evaluator is saved and dropped until all P end, as the campaign is in the
+  LangGraph layer.
 - **What runs the campaigns is AUTONMI's.** The campaigns are split into populations
   (`--populations`; by default one per agent process of `run.py`), each an AsyncFlow node with an engine
   of its own for its simulations.
@@ -152,9 +192,16 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   gap (up to about 2.2 s at 2,000 campaigns on a laptop, measured). Under Dragon only the servers' count is seen in
   the head process (the populations run elsewhere; untested).
 - **The decoding metric** (`speed` in the record). For each count: the maximum, the time-weighted mean,
-  and the seconds at or above 50, 90 and 95% of each reference: the hosted agents (one per campaign) and
+  and the seconds at or above 50, 90 and 95% of each reference: the hosted agents (three per campaign) and
   the admission capacity (`llm.max_in_flight` x servers, split over the populations).
-  - `agents_live`: from AUTONMI's rows (`app/agents-p*.jsonl`, each agent's `t_start` to `t_end`).
+  - `agents_live`: from AUTONMI's rows (`app/agents-p*.jsonl`, each agent's `t_start` to `t_end`), in all
+    and per role (`by_role`, against one agent per campaign), with `all_live_s`: how long every hosted agent
+    was live at once (from the last start to the first end). `start_together` gives each Coordinator's wait
+    for every agent to start, and `begin_margin_s`: the earliest Coordinator's start of its campaign
+    (`t_begin` in its row) minus the last start of its population's agents, the smallest over populations;
+    at least 0 when every campaign began after every agent had started, as the knob promises. With the
+    default stagger every agent is soon live at once with or without the knob (`all_live_s` > 0 at 20 and
+    at 2,000 campaigns), so `begin_margin_s` is what shows the knob at work.
   - `model_requests_in_flight` (client side): exact, from each call's `[t_end - service_s, t_end]`
     (kept in `llm_call_details` with the call's `role`, `wait_s` and `recovery_s`); beside it AUTONMI's
     own figures (`autonmi_sampled`: `summary.json`'s `agent_states_over_time.model_request`, sampled about
@@ -173,7 +220,8 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
     their `/v1/models` say serve the model (`served_by`, from `llm_service.served_models`): `vllm` for
     vLLM, `fusion-test-fixture` for the tests' fake server.
   - `rates_per_s.model_calls_all_agents` counts every agent's calls; `counts.llm_calls` and
-    `rates_per_s.model_calls` keep counting the outer loop's (today the same calls).
+    `rates_per_s.model_calls` keep counting the outer loop's (today the same calls: the Generator's refills
+    and the Coordinator's summary, each call's `role` in `llm_call_details`).
   Measured on a laptop (2026-11-23, hundredk shape, fixture, one population, emulated): at 2,000 campaigns
   with 2 s per call, 160.78 requests in flight on average by AUTONMI's agent-seconds, 160.78 by fusion's
   calls per second x time in flight, and 160.52 by calls per second x 2 s (each per second of the agent
@@ -190,7 +238,14 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
 - **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
   fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
   requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires, the
-  live line and the client's counts on the stub, and the model-service checks below. The model server is
+  live line and the client's counts on the stub, and the model-service checks below. It checks the three
+  agents per campaign (their rows, messages, exact per-role counts and the store at the end), the same
+  results in 1, 2 or 5 populations, with a cap of 1 or 7 campaigns or none, 1 or 4 workers, and with a slow
+  start-up with and without starting together (with it, every campaign begins after its population's last
+  agent starts), the refusals (populations that do not divide, a cap below one campaign, starting together
+  with a cap), the mailbox's own contract, that the ids seen outside the agents are the campaign's, and that
+  an injected Generator or Evaluator failure (`FUSION_AUTONMI_FAIL=<agent id>:<g>`, tests only) ends its
+  campaign alone, as one error line with every role's model calls. The model server is
   `tests/fake_vllm.py`, a FIXTURE (not a model) standing in for a vLLM server; `tests/test_decode_metric.py`
   checks the metric's arithmetic against brute-force recounts.
   Both layers' runs are also compared with references recorded from the LangGraph layer
@@ -361,7 +416,7 @@ One YAML file with six sections. A preset and any number of knob files are merge
 | Section | Knobs |
 |---|---|
 | `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`; sets OMP, OpenBLAS, MKL and torch threads) |
-| `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
+| `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer: generation 0 waits until every hosted agent of the population has started; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
 | `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server) |

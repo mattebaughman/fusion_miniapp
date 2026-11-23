@@ -1,8 +1,10 @@
 """What one campaign does: the IGNOS outer loop of the parent's run_evolutionary_loop, split into the
 parent's three roles (parent/evo_agents.py): a Coordinator, a Generator and an Evaluator.
 
-Both agent layers give every campaign these three agents, carry the same messages between them and
-call these functions; no agent framework is imported here. Every step of the loop is the parent's own
+Every agent layer gives every campaign these three agents, carries the same messages between them and
+calls these functions; no agent framework is imported here. (The AUTONMI layer hosts the three as
+separate agents, and splits the two lookups between the Coordinator and the Generator: LOOKUP_ROLE.)
+Every step of the loop is the parent's own
 function, unchanged: initialize_population, select_survivors, update_best_result, log_generation,
 repopulate, empty_best_result (parent/evolutionary_loop.py).
 
@@ -119,6 +121,22 @@ def expected(knobs: dict) -> dict:
     o = knobs["outer"]
     refills = o["generations"] - 1 if o["generator"] == "llm" and o["population"] > 1 else 0
     return {"sims": o["population"] * o["generations"], "llm_calls": refills + 1}
+
+
+# Who makes each lookup where the three roles are separate agents (the AUTONMI layer): the Coordinator keeps
+# the constraints, which it sends in its first message as today; the Generator, whose refill prompt reads
+# both, makes the abstract lookup itself. The other layers' Coordinator makes both.
+LOOKUP_ROLE = {"constraints": "coordinator", "abstract": "generator"}
+
+
+def expected_by_role(knobs: dict) -> dict:
+    """Per campaign, where the three roles are separate agents: each role's evaluations, model calls (the
+    Generator's at most: a refill with no slot to fill is not called) and lookups (their names, in order)."""
+    exp, mine = expected(knobs), lookups(knobs)
+    by = {role: [w for w in mine if LOOKUP_ROLE[w] == role] for role in ("coordinator", "generator")}
+    return {"coordinator": {"sims": 0, "llm_calls": 1, "lookups": by["coordinator"]},
+            "generator": {"sims": 0, "llm_calls": exp["llm_calls"] - 1, "lookups": by["generator"]},
+            "evaluator": {"sims": exp["sims"], "llm_calls": 0, "lookups": []}}
 
 
 # --- the random generator's state as a message ------------------------------------------------------

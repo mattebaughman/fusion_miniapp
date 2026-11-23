@@ -21,6 +21,8 @@ agents:
   first: 0                    # the first campaign's index and seed: campaigns a<first> .. a<first+count-1>
   per_process: 1000           # agents per agent process; each process also starts its own simulation workers
   max_live: null              # campaigns live at once in each agent process; null = all of them
+  start_together: false       # the AUTONMI layer: true = no campaign begins generation 0 until every
+                              # hosted agent of its population has started (needs max_live: null)
   cost_scale: 1.0             # multiplier on nodes_per_plane and fixed_point_cap; a list such as [0.5, 1, 4]
                               # gives agent i entry i % len (keep the list short: one context per value)
   thinking_budget: 64         # thinking tokens per LLM call
