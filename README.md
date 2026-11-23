@@ -135,8 +135,14 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   `app/`, `otel/`) and `summary.json` hold the run's telemetry, checked by workflow-mini-apps' `MiniApp`.
 - **How a run ends badly,** as with `run.py`: SIGTERM or Ctrl-C cancels the campaigns through the event
   loop and writes an `interrupted` record with those that finished (exit 143); a failed campaign is a
-  line with its error. It prints no live counts line; AUTONMI's telemetry has the agents' states over
-  time (`summary.json`).
+  line with its error. Locally, the populations shut down and report into the run before it is verified
+  (at most AUTONMI's `cancel_grace_s`, 60 s; untested under Dragon, where nothing waits for them).
+  AUTONMI's check `every_population_ran` then fails with the populations the signal cancelled, and the
+  record's `autonmi.telemetry` gives AUTONMI's `telemetry_complete` verdict with each population's task
+  counts: those the signal cut off are `abandoned`, which does not by itself make the telemetry
+  incomplete. At 10,000 campaigns on a laptop the run exited about 55 s after SIGTERM (measured; larger
+  runs not yet). It prints no live counts line; AUTONMI's telemetry has the agents' states over time
+  (`summary.json`).
 - **Its environment.** It needs the AUTONMI framework (the package `autonmi`) installed: it is not
   public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
   Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in

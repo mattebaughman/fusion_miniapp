@@ -231,6 +231,7 @@ class Fusion:
 
     def __init__(self, knobs: dict, sim: str, out: Path, work_root: str | None = None) -> None:
         self.knobs, self.sim, self.out, self.work_root = knobs, sim, Path(out), work_root
+        self.populations: dict[str, asyncio.Task] = {}   # p000...: the task running each population here (build)
 
     def agents(self):
         first = self.knobs["agents"]["first"]   # as the other layers: campaign a<i>, seed i
@@ -251,6 +252,9 @@ class Fusion:
         return s
 
     def build(self, pop) -> ScriptedAgent:
+        """Called in the task that runs the population (locally, a block of the run's engine), which is
+        kept so that an interrupted run can wait for the population to end (miniapp_workflow)."""
+        self.populations[f"p{pop.index:03d}"] = asyncio.current_task()
         return Script(self, pop).agent()
 
     def rows(self, pop) -> list[dict]:
@@ -540,6 +544,30 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
         await campaign.start_services()
         try:
             await campaign.run()
+        except asyncio.CancelledError:
+            # SIGTERM: the campaign cancels its populations, but neither waits for them nor records why, as it
+            # does for populations it cancels itself. Each still shuts its engine down and writes its
+            # telemetry and its report into the run's; wait for that (at most cancel_grace_s), so that the
+            # run's verify() sees every population, and asyncio.run does not cancel one again mid-write. A
+            # population cancelled before build (while its engine starts) is not waited for: it reports
+            # nothing, and the run's telemetry says so. Under Dragon, build runs in the populations' own
+            # processes and nothing is waited for here. Then the check the campaign records for its own
+            # cancels, every_population_ran, fails with the populations the signal cancelled (under Dragon,
+            # all of them: this process cannot tell which had ended).
+            pops, grace, t = definition.populations, campaign.config.cancel_grace_s, time.perf_counter()
+            names = [f"p{i:03d}" for i in range(campaign.config.populations)]
+            cancelled = [n for n in names if n not in pops or not pops[n].done()]
+            pending = [pops[n] for n in cancelled if n in pops]
+            if pending:
+                await asyncio.wait(pending, timeout=grace)
+            running = [n for n in cancelled if n in pops and not pops[n].done()]
+            if running:
+                print(f"[fusion/autonmi] warning: {running} still running {grace} s (cancel_grace_s) after the "
+                      "signal: their telemetry may be cut short", file=sys.stderr, flush=True)
+            app.check("every_population_ran", ok=False, detail={
+                "failed": {}, "cancelled": cancelled, "timed_out": [], "interrupted": True,
+                "waited_s": round(time.perf_counter() - t, 1), "cancel_grace_s": grace, "still_running": running})
+            raise
         finally:
             await campaign.stop_services()
         return campaign.check()
@@ -693,11 +721,29 @@ def autonmi_pin() -> dict:
     return got
 
 
+TASK_COUNTS = ("created", "completed", "failed", "canceled", "abandoned", "not_submitted")
+
+
+def telemetry_verdict(summary: dict) -> dict:
+    """AUTONMI's verdict on the run's telemetry (its check telemetry_complete, in summary.json) and the
+    task counts of the populations that reported into the run, each and summed. `abandoned`: tasks
+    submitted that never ended, as when SIGTERM stops a run; workflow-mini-apps reports them, and they do
+    not by themselves make the telemetry incomplete. `tasks` is None when no population reported."""
+    check = next((c for c in summary.get("checks", []) if c["name"] == "telemetry_complete"),
+                 {"ok": False, "detail": ["no telemetry_complete check in summary.json"]})
+    pops = {p["population"]: {"complete": p.get("telemetry_complete"), "tasks": p.get("tasks")}
+            for p in summary.get("per_population", [])}
+    tasks = {k: sum((p["tasks"] or {}).get(k, 0) for p in pops.values()) for k in TASK_COUNTS} if pops else None
+    return {"complete": bool(check.get("ok")), "reasons": check.get("detail", []), "tasks": tasks,
+            "populations": pops}
+
+
 def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, interrupted: bool, crashed: bool,
                  rc: int, loop_lag, device, threads, pin: dict | None = None) -> dict:
     """run_record.json and agents.jsonl by record.write, one part per population; then AUTONMI's verdict
-    (summary.json, by autonmi.assemble) and the framework's commit against its pin (`pin`, autonmi_pin) in
-    its `autonmi` section. A run whose AUTONMI checks fail fails."""
+    (summary.json, by autonmi.assemble), its telemetry check with the populations' task counts
+    (`telemetry_verdict`), and the framework's commit against its pin (`pin`, autonmi_pin) in its `autonmi`
+    section. A run whose AUTONMI checks fail fails."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -717,7 +763,8 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     rec["autonmi"] = {"ok": ok, "failed_checks": [c["name"] for c in summary.get("checks", []) if not c["ok"]],
                       "summary": "summary.json", "runtime": a.runtime, "populations": a.populations,
                       "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions(),
-                      "framework_commit": pin, "asyncflow_running_shim": RUNNING_SHIM}
+                      "framework_commit": pin, "asyncflow_running_shim": RUNNING_SHIM,
+                      "telemetry": telemetry_verdict(summary)}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     if rec["status"] == "pass" and not ok:
         rec["status"] = "fail"

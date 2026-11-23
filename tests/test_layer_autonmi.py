@@ -196,6 +196,9 @@ def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
     assert pin["pin"] == AUTONMI_COMMIT and isinstance(pin["matches_pin"], bool) and "path" not in pin, pin
     assert pin["commit"] or pin["from"] is None, pin
     assert a["autonmi"]["ok"] and a["autonmi"]["populations"] == 2, a["autonmi"]
+    tel = a["autonmi"]["telemetry"]   # every task ended, in both populations
+    assert (tel["complete"], tel["reasons"], sorted(tel["populations"])) == (True, [], ["p000", "p001"])
+    assert tel["tasks"]["abandoned"] == 0 and tel["tasks"]["created"] == tel["tasks"]["completed"] > 0
     assert a["autonmi"]["asyncflow_running_shim"] is True   # the run that agreed had the shim (on by default)
     assert 0 < a["counts"]["suspensions"] <= 20 * 2     # at most one per generation: the fan-out's barrier
     if knobs["outer"].get("logs", "per_agent") == "per_agent":
@@ -348,9 +351,12 @@ def test_a_campaign_whose_model_call_fails_is_an_error_line_in_both_layers(tmp_p
 def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(tmp_path):
     """SIGTERM (scancel, a time limit) while campaigns run, as test_lifecycle.py sends it to run.py: the run
     is cancelled through its event loop, its record says interrupted and keeps the campaigns that had
-    finished, and it exits 143."""
-    knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 10},
-             "outer": {"population": 4, "generations": 2, "parent_stdout": "drop", "logs": "none"}}
+    finished, and it exits 143. 50 live campaigns per population of 16 candidates keep hundreds of
+    evaluations queued when the first campaign finishes: the signal cuts them off, and the record gives
+    AUTONMI's telemetry verdict (complete: the populations are waited for) with every population's task
+    counts, those abandoned included, and AUTONMI's check every_population_ran failed."""
+    knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 50},
+             "outer": {"population": 16, "generations": 2, "parent_stdout": "drop", "logs": "none"}}
     out = tmp_path / "autonmi"
     with open(tmp_path / "stderr.txt", "w") as err:
         p = subprocess.Popen([sys.executable, "-m", ENTRY["autonmi"], "--preset", "smoke", "--sim", "fixture",
@@ -360,13 +366,32 @@ def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(t
         while not any(f.stat().st_size for f in out.glob("agents-p*.jsonl")):   # a campaign has finished
             assert p.poll() is None and time.time() < deadline, (tmp_path / "stderr.txt").read_text()[-3000:]
             time.sleep(0.2)
+        before = {json.loads(x)["agent_id"] for f in out.glob("agents-p*.jsonl")   # finished before SIGTERM
+                  for x in f.read_text().splitlines() if x.endswith("}")}
         t = time.time()
         p.send_signal(signal.SIGTERM)
         assert p.wait(timeout=90) == 143, (tmp_path / "stderr.txt").read_text()[-3000:]
     assert time.time() - t < 60
     rec = json.loads((out / "run_record.json").read_text())
-    assert rec["status"] == "interrupted" and 0 < rec["counts"]["agents"] < 400
+    rows = lines(tmp_path, "autonmi")
+    assert rec["status"] == "interrupted" and 0 < rec["counts"]["agents"] == len(rows) < 400
     assert rec["counts"]["agents_failed"] == 0   # a cancelled campaign is not a failed one
+    assert before <= {r["agent_id"] for r in rows}
+    exp = decide.expected(rec["knobs"])
+    assert all(r["n_sims"] == exp["sims"] and len(r["generations"]) == 2 for r in rows)   # each one whole
+    # each population reported into the run before it was verified, its telemetry written whole
+    tel = rec["autonmi"]["telemetry"]
+    assert (tel["complete"], tel["reasons"]) == (True, []), tel["reasons"]
+    assert {p: v["complete"] for p, v in tel["populations"].items()} == {"p000": True, "p001": True}
+    tasks = tel["tasks"]   # each population's counts add up by construction; this checks the record's sums
+    assert tasks["created"] == sum(tasks[k] for k in ("completed", "failed", "canceled", "abandoned", "not_submitted"))
+    assert tasks["abandoned"] > 0 and tasks["completed"] >= rec["counts"]["sims"]
+    # and AUTONMI's verdict says the run did not end: the check it records for populations it cancels
+    summary = json.loads((out / "summary.json").read_text())
+    assert (summary["ok"], summary["exit_hint"]) == (False, 4)   # 4: telemetry complete, a check failed
+    assert rec["autonmi"]["failed_checks"] == ["every_population_ran"] and not rec["autonmi"]["ok"]
+    ran = next(c["detail"] for c in summary["checks"] if c["name"] == "every_population_ran")
+    assert (ran["cancelled"], ran["still_running"], ran["interrupted"]) == (["p000", "p001"], [], True)
 
 
 def test_the_out_folder_holds_one_run(tmp_path):
