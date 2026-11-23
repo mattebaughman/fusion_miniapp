@@ -1,0 +1,28 @@
+# The AUTONMI layer's environment (layer_autonmi.py), until its parts are released. The LangGraph and
+# Academy layers run in it too: their tests pass on this Flowgentic.
+#
+# The AUTONMI framework (the package `autonmi`) is installed separately, into the same environment: it
+# is not public yet, and the RADICAL team can provide access. The rest, from this folder:
+#   git clone https://github.com/radical-cybertools/workflow-mini-apps ../workflow-mini-apps
+#   git -C ../workflow-mini-apps checkout d8056266d23b112b96b91ff42c48622f0b45f6ad
+#   uv venv --python 3.12 .venv-autonmi
+#   uv pip install --python .venv-autonmi/bin/python -r requirements-autonmi.txt -e ../workflow-mini-apps -e .
+# torch: as for the other layers (the CUDA or ROCm build first on a GPU machine).
+
+# Flowgentic 0.6.0, from its release tag (not on PyPI)
+flowgentic[langgraph,agents,asyncflow] @ git+https://github.com/stride-research/flowgentic@v0.6.0
+# the commits the AUTONMI framework runs on; RHAPSODY at the head of its native Dragon backend's PR
+# (radical-cybertools/rhapsody#121), which lets a population's process exit before shutdown
+mcp==2.3.0
+mcp-types==2.3.0
+rhapsody-py[telemetry] @ git+https://github.com/radical-cybertools/rhapsody@857e093b8d31f970fdf3bf915efe23481f951655
+radical.asyncflow @ git+https://github.com/radical-cybertools/radical.asyncflow@3f18cc86596aaafa6a7efff20b7fefb8e11e9fc9
+opentelemetry-sdk>=1.30
+cloudpickle>=3
+# the other two layers, and the tests
+langgraph
+langchain-openai
+academy-py>=1.0,<2
+openai
+aiohttp
+pytest

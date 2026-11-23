@@ -86,6 +86,54 @@ Both layers:
 - run real simulations in spawned worker processes, never on the agents' event loop;
 - print `agents working=<n> waiting=<n> model_requests=<n> done=<n>` to stderr once a second.
 
+## The third layer: AUTONMI
+
+`layer_autonmi.py` runs the same campaigns on AUTONMI's framework, as a workflow mini-app with an entry
+point of its own:
+
+```sh
+python -m fusion_miniapp.layer_autonmi --preset smoke --sim fixture --agents 100 --populations 2
+python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --populations 2 ...   # under Dragon
+```
+
+- **The same campaigns.** Each campaign is one AUTONMI scripted agent that drives `decide.py`'s three
+  roles with the same messages, in the same order. Its results are the other layers' results:
+  `results_sha256` is the same, and so are the parent's per-campaign files.
+- **A generation is one fan-out.** The Evaluator's P `evaluate` calls are submitted at once as
+  suspending task tools. The campaign is saved and dropped until all P end, as in the LangGraph layer.
+- **What runs the campaigns is AUTONMI's.** The campaigns are split into populations
+  (`--populations`; by default one per agent process of `run.py`), each an AsyncFlow node with an engine
+  of its own for its simulations.
+  - Locally the populations run in one process. Real simulations run in spawned workers
+    (`pool.ResilientProcessPool`, `--workers` per population; by default its share of
+    `workers.sim_workers`).
+  - Under Dragon (`--runtime dragon`), each population is a Dragon process, its simulations run on
+    RHAPSODY's native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not
+    place populations on nodes yet, and refuses more.
+- **Model calls** go through Flowgentic's fleet, with the request `llm.py` sends: the thinking budget per
+  call, `max_tokens` as budget plus reply, no temperature of its own. The Generator awaits its call
+  inside its step, as `decide.generator_step` is written. `--llm openai` reads the model job's servers
+  from `--endpoints-file` (base URLs without `/v1`, each answering `/health`) and its key from
+  `--api-key-file`, not from `llm.base_url_env`. A server that goes away is waited out for up to 30
+  minutes, instead of `llm.max_retries` retries.
+- **What it writes** is what `run.py` writes, with `agent_layer: autonmi`: `run_record.json` (its
+  status, counts, `llm_check`, touch check, `speed` and `results_sha256`, by `record.write`),
+  `agents.jsonl` and `campaigns/`. So `compare_records` compares it with the other layers' runs. The
+  record's `autonmi` section gives AUTONMI's own verdict; its run folders (`launcher/`, `populations/`,
+  `app/`, `otel/`) and `summary.json` hold the run's telemetry, checked by workflow-mini-apps' `MiniApp`.
+- **How a run ends badly,** as with `run.py`: SIGTERM or Ctrl-C cancels the campaigns through the event
+  loop and writes an `interrupted` record with those that finished (exit 143); a failed campaign is a
+  line with its error. It prints no live counts line; AUTONMI's telemetry has the agents' states over
+  time (`summary.json`).
+- **Its environment.** It needs the AUTONMI framework (the package `autonmi`) installed: it is not
+  public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
+  Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in
+  that environment.
+- **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
+  fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
+  requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires.
+  Without the AUTONMI framework it is skipped.
+
 ## Install
 
 Python 3.12. From this folder:
@@ -392,6 +440,7 @@ evaluated one candidate at a time, and its memory column is MiB ÷ 1000.
   workload correctly when passed in by hand, and the same goes for the RaDEX store. Choosing them from
   the command line and batch files is the next round. The places they go:
   `run.Services.open(backend=, store=, model=)` and `layer_langgraph.run_agents(store=, replicas=)`.
+  The AUTONMI layer (above) already runs under Dragon with RaDEX, through its own entry point.
 - **How GPUs are split between the model servers and the simulations** on a node. Today a job requests
   one GPU and every simulation worker uses it.
 - **The model server and model** for the first Perlmutter job.
