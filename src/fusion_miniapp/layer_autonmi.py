@@ -75,6 +75,65 @@ _POOLS: list = []   # this process's simulation pools, told to stop rebuilding o
 _OWN_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)   # the run's, not its engines' (run_until_signalled)
 
 
+class _RunningSet(set):
+    """AsyncFlow's set of running components, whose iteration yields only the members that have completed.
+
+    AsyncFlow's engine loop finds completions by checking every running component's future on every pass
+    (`for comp_uid in list(self.running)`, workflow_manager.py:1679-1684 at radical.asyncflow 3f18cc8): a cost
+    that grows with the square of a run's tasks (2,000 campaigns: 209.5 s, against 82 s with this set; 10,000:
+    2,039 s against 403 s; the same results). The loop iterates `running` only there, and only to find the
+    completed ones, so a set that records completions by done-callback gives it the same answer. Remove once
+    AsyncFlow tracks completions itself. FUSION_ASYNCFLOW_RUNNING_SHIM=0 turns it off."""
+
+    def __init__(self, engine, members=()) -> None:
+        super().__init__()
+        self._engine, self._done = engine, set()
+        for uid in members:
+            self.add(uid)
+
+    def add(self, uid) -> None:
+        super().add(uid)
+        self._engine.components[uid]["future"].add_done_callback(lambda _f, uid=uid: self._done.add(uid))
+
+    def discard(self, uid) -> None:
+        super().discard(uid)
+        self._done.discard(uid)
+
+    def clear(self) -> None:
+        super().clear()
+        self._done.clear()
+
+    def __iter__(self):
+        return iter([uid for uid in self._done if set.__contains__(self, uid)])
+
+
+def _install_running_shim() -> bool:
+    """Give every AsyncFlow engine of this process a _RunningSet (its `running` must be a plain set after
+    __init__, or the engine keeps it, with one warning). Idempotent: this file runs as __main__ and as MODULE."""
+    if os.environ.get("FUSION_ASYNCFLOW_RUNNING_SHIM", "1") == "0":
+        return False
+    engine_cls = WorkflowEngine
+    if getattr(engine_cls, "_fusion_running_shim", False):
+        return True
+    init, warned = engine_cls.__init__, []
+
+    def __init__(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        if type(getattr(self, "running", None)) is set and isinstance(getattr(self, "components", None), dict):
+            self.running = _RunningSet(self, self.running)
+        elif not warned:
+            warned.append(True)
+            print("[fusion/autonmi] AsyncFlow's engine has no plain `running` set: its scan is left as it is",
+                  file=sys.stderr, flush=True)
+
+    engine_cls.__init__ = __init__
+    engine_cls._fusion_running_shim = True
+    return True
+
+
+RUNNING_SHIM = _install_running_shim()   # recorded in the run record's `autonmi` section
+
+
 class EvaluateArgs(BaseModel):
     params: dict[str, float | str]     # the parent's full candidate, with its "model" and "kind" strings
     candidate_idx: int
@@ -610,7 +669,8 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     ok = rc == 0 and bool(summary.get("ok")) and not crashed
     rec["autonmi"] = {"ok": ok, "failed_checks": [c["name"] for c in summary.get("checks", []) if not c["ok"]],
                       "summary": "summary.json", "runtime": a.runtime, "populations": a.populations,
-                      "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions()}
+                      "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions(),
+                      "asyncflow_running_shim": RUNNING_SHIM}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     if rec["status"] == "pass" and not ok:
         rec["status"] = "fail"

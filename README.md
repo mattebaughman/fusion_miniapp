@@ -109,6 +109,14 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
     `workers.sim_workers`). Fixture simulations run on threads that each keep one event loop
     (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the
     process each time, and a run's time grew about with the square of its campaigns.
+  - AsyncFlow's engine loop finds finished tasks by checking every running one on every pass
+    (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
+    The layer gives each engine a set of running tasks that records completions as they happen
+    (`layer_autonmi._RunningSet`; `FUSION_ASYNCFLOW_RUNNING_SHIM=0` turns it off; the record's
+    `autonmi.asyncflow_running_shim` says whether it was on). Measured on a laptop, fixture simulations, one
+    population: 10,000 campaigns in 403 s instead of 2,039 s, the same results, throughput flat from 2,000 to
+    10,000 campaigns. 100,000 is not measured, and it has not run under Dragon yet. Remove it once AsyncFlow tracks
+    completions itself.
   - Under Dragon (`--runtime dragon`), each population is a Dragon process, its simulations run on
     RHAPSODY's native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not
     place populations on nodes yet, and refuses more.

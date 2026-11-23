@@ -94,6 +94,7 @@ def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
     assert (a["agent_layer"], a["status"], a["counts"]["agents"], a["counts"]["sims"]) == ("autonmi", "pass", 20, 160)
     assert agree(tmp_path, a, b) == []
     assert a["autonmi"]["ok"] and a["autonmi"]["populations"] == 2, a["autonmi"]
+    assert a["autonmi"]["asyncflow_running_shim"] is True   # the run that agreed had the shim (on by default)
     assert 0 < a["counts"]["suspensions"] <= 20 * 2     # at most one per generation: the fan-out's barrier
     if knobs["outer"].get("logs", "per_agent") == "per_agent":
         for f in ("config.json", "evolution_log.csv", "best_result.json"):   # the parent's per-campaign files
@@ -305,3 +306,36 @@ def test_autonmi_layer_has_the_mini_app_shape():
         sys.path.remove(str(script.parent))
     layer = Path(importlib.util.find_spec("fusion_miniapp.layer_autonmi").origin)
     assert module.check_example(layer) == []
+
+def test_asyncflow_running_set_yields_only_completed_components():
+    """AsyncFlow's engine loop checks every running component on each pass; the layer's set makes the loop's
+    scan visit only those that completed (membership, size and discard as a plain set)."""
+    import types
+
+    from radical.asyncflow import WorkflowEngine
+
+    from fusion_miniapp import layer_autonmi
+
+    assert layer_autonmi.RUNNING_SHIM and WorkflowEngine._fusion_running_shim
+
+    async def check():
+        loop = asyncio.get_running_loop()
+        engine = types.SimpleNamespace(components={u: {"future": loop.create_future()} for u in "abc"})
+        running = layer_autonmi._RunningSet(engine)
+        for u in "abc":
+            running.add(u)
+        assert list(running) == [] and "a" in running and len(running) == 3
+        engine.components["b"]["future"].set_result(None)
+        await asyncio.sleep(0)                           # the done-callback runs on the loop
+        assert list(running) == ["b"]
+        running.discard("b")
+        assert list(running) == [] and len(running) == 2 and "b" not in running
+    asyncio.run(check())
+
+
+def test_the_asyncflow_shim_can_be_turned_off():
+    code = ("from fusion_miniapp import layer_autonmi as m; from radical.asyncflow import WorkflowEngine as W; "
+            "print(m.RUNNING_SHIM, getattr(W, '_fusion_running_shim', False))")
+    proc = subprocess.run([sys.executable, "-c", code], env={**os.environ, "FUSION_ASYNCFLOW_RUNNING_SHIM": "0"},
+                          capture_output=True, text=True, timeout=300, check=False)
+    assert proc.stdout.split() == ["False", "False"], proc.stderr[-2000:]
