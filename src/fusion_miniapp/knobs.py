@@ -61,6 +61,9 @@ SCHEMA = {
         "max_retries": ("int", 0, None),
         "min_model_share": ("num", 0, 1),     # openai mode: fail the run if fewer refill slots came from the model
         "max_empty_share": ("num", 0, 1),     # openai mode: fail the run if more replies were empty
+        "stub_latency_s": ("num", 0, None),   # the stub's seconds per call (emulated: never a model's decoding)
+        "max_in_flight": ("int", 1, None),    # model requests admitted at once per model server (the AUTONMI layer)
+        "admission_tokens": ("int", 0, None),  # tokens admitted at once per model server (the AUTONMI layer; 0: none)
     },
     "workers": {
         "sim_workers": ("int", 1, None),

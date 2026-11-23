@@ -18,7 +18,7 @@ campaign's sha256, the exact counts, the sha256 of each campaign's parent files,
 (record.comparable, compared within a tolerance where another OS or BLAS build gives other last digits)
 and the model-server case's request bodies, sorted. `reference_sha256` is the sha256 of all but the
 header: two recordings of one commit must give the same. The model server is the tests' FIXTURE
-(ModelServer), not a model; all physics output is synthetic, and the fixture cases simulate nothing.
+(fake_vllm.FakeVllm), not a model; all physics output is synthetic, and the fixture cases simulate nothing.
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent))   # tests/: the cases, their comparisons and the model server stand-in
 
 import test_layer_autonmi as cases  # noqa: E402
+from fake_vllm import FakeVllm  # noqa: E402
 
 from fusion_miniapp import compare_records, record  # noqa: E402
 
@@ -69,7 +70,7 @@ def run_case(name: str, case: dict, work: Path, env: dict) -> tuple[dict, dict]:
     knobs_file.write_text(json.dumps(case["knobs"]))   # JSON is YAML
     out = folder / "langgraph"
     cmd = [sys.executable, "-m", "fusion_miniapp.run", *case["args"], "--knobs", str(knobs_file), "--out", str(out)]
-    with cases.ModelServer() if case.get("server") else contextlib.nullcontext() as server:
+    with FakeVllm() if case.get("server") else contextlib.nullcontext() as server:
         if server is not None:
             env = {**env, "OPENAI_BASE_URL": f"http://127.0.0.1:{server.port}/v1"}
         proc = subprocess.run(cmd, cwd=folder, env=env, capture_output=True, text=True, timeout=900, check=False)
@@ -91,7 +92,7 @@ def run_case(name: str, case: dict, work: Path, env: dict) -> tuple[dict, dict]:
     if server is not None:
         body["requests"] = [json.loads(b) for b in cases.request_bodies(sent)]
     shown = [("<knobs.yaml>" if c == str(knobs_file) else "<out>" if c == str(out) else c) for c in cmd[1:]]
-    env_shown = "OPENAI_BASE_URL=<the ModelServer fixture>/v1 " if server is not None else ""
+    env_shown = "OPENAI_BASE_URL=<the FakeVllm fixture>/v1 " if server is not None else ""
     command = env_shown + "python " + " ".join(shown)
     return body, {"command": command, "threads": rec.get("threads"),
                   "versions": rec.get("versions"), "miniapp_git": rec["run"]["miniapp_git"]}

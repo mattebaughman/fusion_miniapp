@@ -41,6 +41,10 @@ llm:
   max_retries: 2              # per model call, on connection errors and 5xx
   min_model_share: 0.5        # openai mode: the run fails if the model filled fewer refill slots than this share
   max_empty_share: 0.1        # openai mode: the run fails if more replies than this share were empty
+  stub_latency_s: 0.001       # the stub's seconds per call: emulates a model server's time, never its decoding
+  max_in_flight: 512          # model requests admitted at once per model server (the AUTONMI layer; run.py's
+                              # layers keep llm.MAX_IN_FLIGHT); tune per server
+  admission_tokens: 2000000   # tokens admitted at once per model server (the AUTONMI layer); 0: requests only
 
 workers:
   sim_workers: 2              # simulation worker processes in all; each agent process gets sim_workers // processes

@@ -1,5 +1,6 @@
 """The run record (<out>/run_record.json), the per-agent lines (<out>/agents.jsonl) and the live
-counts line both layers print to stderr: `agents working=<n> waiting=<n> model_requests=<n> done=<n>`.
+counts line both layers print to stderr: `agents working=<n> waiting=<n> model_requests=<n> done=<n>`
+(the AUTONMI layer prints its own, layer_autonmi.LiveLine).
 """
 from __future__ import annotations
 
@@ -138,22 +139,87 @@ def _pct(values) -> dict:
             "p95": round(float(q[1]), 4), "max": round(float(a.max()), 4)}
 
 
-def occupancy(starts, ends, t_lo: float, t_hi: float, n_ref: int | None = None) -> dict:
+PCTS = (50, 90, 95)   # the shares of each reference whose time at or above occupancy(refs=) reports
+
+
+def _held(held, dur, span: float, top, refs: dict | None, digits: int) -> dict:
+    """The maximum, the time-weighted mean of levels `held` for durations `dur` over `span` seconds, and with
+    refs ({name: n}) the seconds at or above 50, 90 and 95% of each n (None for an n that is unknown or 0)."""
+    out = {"max": top, "mean": round(float((held * dur).sum() / span), digits)}
+    if refs:
+        out["time_ge_pct_s"] = {name: {"of": n, **{str(p): round(float(dur[held >= p / 100 * n].sum()), 3)
+                                                  for p in PCTS}} if n else None for name, n in refs.items()}
+    return out
+
+
+def occupancy(starts, ends, t_lo: float, t_hi: float, n_ref: int | None = None, refs: dict | None = None,
+              digits: int = 2) -> dict:
     """How many intervals [start, end) are open at once in the window [t_lo, t_hi]: the maximum, the
-    time-weighted mean, and (with n_ref) the seconds with at least 95% of n_ref open. At equal times an
-    end counts before a start."""
+    time-weighted mean, with n_ref the seconds with at least 95% of n_ref open, and with refs ({name: n}, a
+    list of references) the seconds at or above 50, 90 and 95% of each (`time_ge_pct_s`). At equal times an
+    end counts before a start. The maximum too is within the window (of the levels held there for some time)."""
     starts, ends = np.asarray(starts, dtype=float), np.asarray(ends, dtype=float)
     if not starts.size or t_hi <= t_lo:
-        return {"max": 0, "mean": 0.0, **({"time_ge_95pct_s": 0.0} if n_ref else {})}
+        out = {"max": 0, "mean": 0.0, **({"time_ge_95pct_s": 0.0} if n_ref else {})}
+        if refs:
+            out["time_ge_pct_s"] = {name: {"of": n, **{str(p): 0.0 for p in PCTS}} if n else None
+                                    for name, n in refs.items()}
+        return out
     t = np.concatenate([starts, ends])
     d = np.concatenate([np.ones(starts.size), -np.ones(ends.size)])
     order = np.lexsort((d, t))
     t, level = t[order], np.cumsum(d[order])
     dur = np.diff(np.clip(t, t_lo, t_hi))
-    out = {"max": int(level.max()), "mean": round(float((level[:-1] * dur).sum() / (t_hi - t_lo)), 2)}
+    inside = level[:-1][dur > 0]
+    out = _held(level[:-1], dur, t_hi - t_lo, int(inside.max()) if inside.size else 0, refs, digits)
     if n_ref:
         out["time_ge_95pct_s"] = round(float(dur[level[:-1] >= 0.95 * n_ref].sum()), 3)
     return out
+
+
+def sampled(t, values, t_lo: float, t_hi: float, refs: dict | None = None, digits: int = 4) -> dict | None:
+    """occupancy() for a sampled count: each sample holds until the next one (the last until t_hi), within
+    the window [t_lo, t_hi]. The maximum is over every sample. None without samples."""
+    t, v = np.asarray(t, dtype=float), np.asarray(values, dtype=float)
+    if not t.size or t_hi <= t_lo:
+        return None
+    dur = np.diff(np.clip(np.append(t, max(t_hi, t[-1])), t_lo, t_hi))
+    top = float(v.max())
+    return {"samples": int(t.size), **_held(v, dur, t_hi - t_lo, int(top) if top.is_integer() else round(top, 4),
+                                            refs, digits)}
+
+
+def summed(series: list[tuple[list, list]], hold_s: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Several sampled counts (one (times, values) per source, such as a model server) summed into one: at
+    every time any source was sampled, each source's latest value (a missing value as 0). With hold_s a
+    value counts for at most hold_s seconds, until the source's next sample if that comes sooner: a source
+    that stopped answering counts 0 from hold_s after its last answer (the series then has a time there), not
+    its last value to the end."""
+    series = [(np.asarray(t, dtype=float), np.asarray([0.0 if x is None else x for x in v], dtype=float))
+              for t, v in series if len(t)]
+    cuts = [t for t, _ in series]
+    if hold_s is not None:   # where a value stops counting before the source's next sample
+        cuts += [(t + hold_s)[np.append(np.diff(t), np.inf) > hold_s] for t, _ in series]
+    times = np.unique(np.concatenate(cuts)) if cuts else np.array([])
+    total = np.zeros(times.size)
+    for t, v in series:
+        i = np.searchsorted(t, times, side="right") - 1
+        counted = i >= 0
+        if hold_s is not None:   # (as the cuts are computed: their own time is not counted)
+            counted &= times < t[np.maximum(i, 0)] + hold_s
+        total += np.where(counted, v[np.maximum(i, 0)], 0.0)
+    return times, total
+
+
+def unheld_s(t, t_lo: float, t_hi: float, hold_s: float) -> float:
+    """The seconds of [t_lo, t_hi] in which a source sampled at times t had no value counted by
+    summed(hold_s=): before its first sample, and more than hold_s after a sample with no next one yet."""
+    t = np.asarray(t, dtype=float)
+    if not t.size or t_hi <= t_lo:
+        return round(max(0.0, t_hi - t_lo), 3)
+    until = np.minimum(np.append(t[1:], np.inf), t + hold_s)
+    held = np.clip(until, t_lo, t_hi) - np.clip(t, t_lo, t_hi)
+    return round(float(t_hi - t_lo - held.sum()), 3)
 
 
 class LoopLag:
@@ -228,11 +294,22 @@ def llm_check(knobs: dict, refill: dict, service: dict) -> dict:
     return out
 
 
+def model_requests(starts, ends, lo: float, hi: float, refs: dict | None, **extra) -> dict:
+    """Model requests open at once, from each call's interval (`model_requests_in_flight`, `_queued`): the
+    maximum, the time-weighted mean over the campaigns' phase [lo, hi], the seconds at or above 50, 90 and
+    95% of each reference, and the time each call spent so (`time_s`)."""
+    spans = np.asarray(ends, dtype=float) - np.asarray(starts, dtype=float)
+    return {**extra, **occupancy(starts, ends, lo, hi, refs=refs, digits=4), "time_s": _pct(spans)}
+
+
 def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wall_s: float,
-          failed: list[int] = (), interrupted: bool = False, t_run: float | None = None) -> dict:
+          failed: list[int] = (), interrupted: bool = False, t_run: float | None = None,
+          model_refs: dict | None = None) -> dict:
     """Merge the campaign lines of this run's agent processes (`parts`, those that wrote their counts) into
     agents.jsonl and write run_record.json. `failed`: agent processes that wrote none; their campaigns are
-    missing. `t_run`: when the run started (epoch). Other files in `out` are never read.
+    missing. `t_run`: when the run started (epoch). `model_refs`: the references ({name: n}) of the model
+    requests open at once, which the record gives when the calls' details carry their times (t_end,
+    service_s, wait_s, recovery_s: the AUTONMI layer's). Other files in `out` are never read.
 
     The merge streams: each line is copied to agents.jsonl.tmp and counted as it passes, the file is
     renamed into place, and only then are the per-process files removed. Fixture evaluations make no
@@ -244,6 +321,9 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
     rows, n_lines = [], 0                            # each campaign's comparable hash, for the digest
     c_start, c_end, e_sub, e_start, e_end = (array("d") for _ in range(5))
     sim_s, wait_s, gen_s, worker_rss = array("d"), array("d"), array("d"), []
+    # every model call, of every campaign: those whose details carry their times, as intervals at the client
+    # (in flight: admitted and sent, its reply not back; queued: waiting for admission before that)
+    m_start, m_end, q_start, q_end, calls = array("d"), array("d"), array("d"), array("d"), Counter()
     tmp = out / "agents.jsonl.tmp"
     with tmp.open("w") as merged:
         for part in parts:
@@ -257,6 +337,17 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
                     r = json.loads(line)
                     rows.append(hashlib.sha256(json.dumps(comparable(r), sort_keys=True, default=str)
                                                .encode()).hexdigest())
+                    for d in r.get("llm_call_details") or ():
+                        calls["all"] += 1
+                        if d.get("t_end") is None or d.get("service_s") is None:
+                            continue
+                        sent = d["t_end"] - d["service_s"]
+                        asked = sent - (d.get("recovery_s") or 0.0)   # a retried call: approximate
+                        m_start.append(sent)
+                        m_end.append(d["t_end"])
+                        q_start.append(asked - (d.get("wait_s") or 0.0))
+                        q_end.append(asked)
+                        calls["retried"] += bool(d.get("recovery_s"))
                     if "error" in r:
                         errors[r["error"].split(":", 1)[0]] += 1
                         continue
@@ -317,7 +408,9 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
         "agent_phase_s": round(phase, 3) if timed else None,
         "startup_s": round(max(0.0, lo - t_run), 3) if t_run and timed else None,
         "shutdown_s": round(max(0.0, t_end_run - hi), 3) if timed else None,
+        # model_calls: the outer loop's (counts.llm_calls); model_calls_all_agents: every call in the details
         "rates_per_s": {"evaluations": rate(len(sim_s)), "model_calls": rate(c["llm_calls"]),
+                        "model_calls_all_agents": rate(calls["all"]),
                         "generations": rate(c["generations"]), "campaigns": rate(len(c_start))},
         "sims_in_flight": occupancy(e_sub, e_end, lo, hi) if timed else None,     # submitted, not yet returned
         "sims_executing": occupancy(e_start, e_end, lo, hi) if timed else None,   # on a simulation worker
@@ -329,6 +422,18 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
         # the run took no longer than its simulations had to
         "sim_bound_ratio": round(sum(sim_s) / workers / phase, 4) if workers and phase > 0 else None,
     }
+    timed_calls = len(m_start)
+    emulated = knobs["llm"]["mode"] == "stub"
+    speed["model_requests_in_flight"] = model_requests(
+        m_start, m_end, lo, hi, model_refs, side="client",
+        what="model requests admitted and sent whose reply is not back (time queued inside a server included)",
+        source="each call's [t_end - service_s, t_end] (its call record)", emulated=emulated,
+        calls_timed=timed_calls, calls_untimed=calls["all"] - timed_calls,
+        calls_retried=calls["retried"]) if timed_calls and timed else None
+    speed["model_requests_queued"] = model_requests(
+        q_start, q_end, lo, hi, model_refs, side="client",
+        what="model requests waiting for the client's admission caps (llm.max_in_flight, llm.admission_tokens)",
+        source="each call's wait_s before its time in flight", emulated=emulated) if timed_calls and timed else None
     rec = {
         "status": None, "agent_layer": layer, "sim": sim, "llm": knobs["llm"]["mode"],
         "emulated": True, "method": "miniapp_standin",
@@ -395,4 +500,13 @@ def speed_line(rec: dict) -> str:
          "wait_p95_s": s["queue_wait_s"].get("p95"), "gen_p95_s": s["generation_s"].get("p95"),
          "llm_p95_s": s["model_latency_s"].get("p95"), "lag_p95_ms": max(lag) if lag else None,
          "sim_bound": s["sim_bound_ratio"]}
+    # the decoding metric's counts, in the records that have them (the AUTONMI layer's)
+    if "agents_live" in s or s.get("model_requests_in_flight"):
+        opened, queued, live, dec = (s.get(k) or {} for k in ("model_requests_in_flight", "model_requests_queued",
+                                                              "agents_live", "decoding_at_servers"))
+        running = dec.get("running") or {}
+        f.update({"llm_all_per_s": s["rates_per_s"].get("model_calls_all_agents"), "agents_live_max": live.get("max"),
+                  "requests_open_max": opened.get("max"), "requests_open_mean": opened.get("mean"),
+                  "queued_max": queued.get("max"), "decoding_max": running.get("max"),
+                  "decoding_mean": running.get("mean"), "emulated": opened.get("emulated")})
     return "speed: " + " ".join(f"{k}={v}" for k, v in f.items())

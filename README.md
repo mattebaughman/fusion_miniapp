@@ -141,8 +141,45 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   record's `autonmi.telemetry` gives AUTONMI's `telemetry_complete` verdict with each population's task
   counts: those the signal cut off are `abandoned`, which does not by itself make the telemetry
   incomplete. At 10,000 campaigns on a laptop the run exited about 55 s after SIGTERM (measured; larger
-  runs not yet). It prints no live counts line; AUTONMI's telemetry has the agents' states over time
-  (`summary.json`).
+  runs not yet).
+- **The live line.** About once a second the head process prints to stderr
+  `agents live=<n> model_requests_open=<n> queued=<n> decoding_at_servers=<n> done=<n>`: hosted agents
+  started and not ended; model requests admitted and sent whose reply is not back, and requests waiting for
+  the client's admission caps (both client side, Flowgentic's agent states); sequences in the model
+  servers' running batches, summed (the vLLM sampler's latest reading of each server that answered within
+  2.5 sampling intervals; `-` with the stub); agents ended. The record keeps the same rows
+  (`speed.live.series`). The line waits a second after the last one, so an event-loop stall stretches a
+  gap (up to about 2.2 s at 2,000 campaigns on a laptop, measured). Under Dragon only the servers' count is seen in
+  the head process (the populations run elsewhere; untested).
+- **The decoding metric** (`speed` in the record). For each count: the maximum, the time-weighted mean,
+  and the seconds at or above 50, 90 and 95% of each reference: the hosted agents (one per campaign) and
+  the admission capacity (`llm.max_in_flight` x servers, split over the populations).
+  - `agents_live`: from AUTONMI's rows (`app/agents-p*.jsonl`, each agent's `t_start` to `t_end`).
+  - `model_requests_in_flight` (client side): exact, from each call's `[t_end - service_s, t_end]`
+    (kept in `llm_call_details` with the call's `role`, `wait_s` and `recovery_s`); beside it AUTONMI's
+    own figures (`autonmi_sampled`: `summary.json`'s `agent_states_over_time.model_request`, sampled about
+    every 10 s, and `agent_seconds_by_state.model_request` per second of the agent phase), Little's law three
+    ways (each per second of the agent phase; AUTONMI's agent-seconds per second of wall time beside them),
+    and the event loop's lag, flagged `high` when its 95th percentile is at least 10% of the mean time in
+    flight (the lag lands inside the call intervals).
+  - `model_requests_queued`: each call's wait for admission (Flowgentic's MODEL_QUEUED).
+  - `decoding_at_servers`: the vLLM servers' `num_requests_running`, summed, with their waiting requests
+    and KV-cache use (`vllm/vllm.json`); null with the stub. It includes prompt processing: vLLM has no
+    decode-only count. A server's reading counts until its next one, for at most 2.5 sampling intervals: a
+    server that stopped answering `/metrics` counts 0 from then on, and its seconds without a reading are in
+    `stale_s`. A gauge a server never gave (an older vLLM's name) is null, named in `gauges_missing`.
+  - `headline`: the servers' running count where there are servers, else the client-side count. With the
+    stub it is labelled emulated (`llm.stub_latency_s` per call), never decoding. With servers it names who
+    their `/v1/models` say serve the model (`served_by`, from `llm_service.served_models`): `vllm` for
+    vLLM, `fusion-test-fixture` for the tests' fake server.
+  - `rates_per_s.model_calls_all_agents` counts every agent's calls; `counts.llm_calls` and
+    `rates_per_s.model_calls` keep counting the outer loop's (today the same calls).
+  Measured on a laptop (2026-11-23, hundredk shape, fixture, one population, emulated): at 2,000 campaigns
+  with 2 s per call, 160.78 requests in flight on average by AUTONMI's agent-seconds, 160.78 by fusion's
+  calls per second x time in flight, and 160.52 by calls per second x 2 s (each per second of the agent
+  phase; AUTONMI's per second of wall time, 154.1). With 30 s per call the client's count reached the 512
+  cap: 94 s at it, in the summary wave, and 210 s at or above 95% of it. In the refill wave (about 10 s to
+  124 s) the 2,000,000-token cap held it near 498. Up to 1,502 requests were queued.
 - **Its environment.** It needs the AUTONMI framework (the package `autonmi`) installed: it is not
   public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
   Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in
@@ -152,12 +189,63 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   another commit, unknown, or has changed files.
 - **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
   fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
-  requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires.
+  requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires, the
+  live line and the client's counts on the stub, and the model-service checks below. The model server is
+  `tests/fake_vllm.py`, a FIXTURE (not a model) standing in for a vLLM server; `tests/test_decode_metric.py`
+  checks the metric's arithmetic against brute-force recounts.
   Both layers' runs are also compared with references recorded from the LangGraph layer
   (`tests/references/*.json`: results_sha256, each campaign's hash, counts, parent files and model
   requests, with the commit, command and date that made them). `python tests/references/record_references.py`
   records them again from a commit (default HEAD, exported with `git archive`). The parent oracle
   (above) runs through it too. Without the AUTONMI framework these are skipped.
+
+## The model service
+
+What the AUTONMI layer's `--llm openai` needs of the model servers. Tested against `tests/fake_vllm.py`
+only (a FIXTURE); real vLLM is unverified until a machine.
+- **Endpoints file** (`--endpoints-file`): one base URL per line, without `/v1` (for example
+  `http://nid001234:8000`). Each server must answer `/health` without a key; the run waits up to
+  `--model-wait` seconds (default 1,800) for all of them, re-reading the file. The key, if the servers have
+  one, is in the file `--api-key-file`, never in a knob file or the record.
+- **The served model's name is `llm.model`.** Before any campaign, every server's `/v1/models` must list it
+  (vLLM's `--served-model-name`); otherwise the run is refused with `run refused: <url> serves [...], not
+  llm.model '<name>'` and exits 1.
+- **Chat completions** (`/v1/chat/completions`, OpenAI-compatible): each request has the messages, the
+  model, `max_tokens` = thinking budget + reply allowance, no temperature (the server's default), and
+  vLLM's per-request `thinking_token_budget`. That field needs the server started with a reasoning parser
+  (`vllm serve --reasoning-parser`, for example `qwen3`); without one, set `llm.send_thinking_budget:
+  false`. The replies' `usage` token counts are recorded.
+- **`/metrics` reachable from the head process**, in vLLM's Prometheus format. The layer samples each
+  server's `vllm:num_requests_running`, `vllm:num_requests_waiting`, `vllm:kv_cache_usage_perc` and token and
+  request counters every 2 s (every 5 s past 50 servers), with AUTONMI's `VllmSampler`, into
+  `vllm/vllm.json`. AUTONMI then checks that the servers' counters never went down (`verify_vllm`) and that
+  the fleets' tokens and successful requests equal the servers' exactly (`tokens_match_the_servers`). These
+  checks fail the run (status fail, exit 1) when a server restarts during it (its counters reset), when a
+  requeued model job moves the servers (the sampler keeps reading the old addresses), when the client gave
+  up on a request the server still finished (a timeout), or when the servers also serve another run. Where
+  any of these is expected, give `--no-vllm-metrics`: no sampling, no decoding counts, none of those checks.
+  A server without vLLM's `/metrics` still serves the run: one warning, and `decoding_at_servers` is null.
+  The first reading of each server's `/metrics` gets three tries, 2 s apart; if any server fails them, no
+  server is sampled (AUTONMI compares the servers' counters with all of the fleets' calls).
+- **Admission knobs:** `llm.max_in_flight` (512) requests and `llm.admission_tokens` (2,000,000; 0 = no token
+  cap) per server, at once, split over the populations. They are the client's caps: above what a server can
+  run, they raise the client count, not decoding, and the extra requests wait in the server's queue
+  (`num_requests_waiting`). Whichever cap is reached first binds. At the hundredk shape a refill reserves
+  about 4,000 tokens (inferred: 2,000,000 / 498, the count the token cap held at 30 s per call), so the
+  token cap binds near 500 refills per server, below 512. Raising `llm.max_in_flight` alone does not raise
+  refill concurrency; raise `llm.admission_tokens` with it. AUTONMI's own defaults are 96 requests and
+  235,000 tokens per server (`PopulationConfig`). Measure them on each machine. `run.py`'s layers keep
+  `llm.MAX_IN_FLIGHT`.
+- **Outages:** a server that goes away is waited out for up to 30 minutes (AUTONMI's `ServerRecovery`),
+  which re-reads the endpoints and key files, as after a requeued model job. The campaigns survive it,
+  but with `/metrics` sampled the run then fails AUTONMI's checks against the servers' counters (above);
+  give `--no-vllm-metrics` where outages are expected.
+- **Reference launcher:** AUTONMI's `jobs/model.sh` starts one `vllm serve` per GPU (or per `RASCAL_TP`
+  GPUs), served as `RASCAL_MODEL_NAME`, with the reasoning parser `RASCAL_REASONING`, and writes
+  `endpoints` and `api-key` into its folder once every server answers `/health`; it restarts a server that
+  dies. Wiring it into `launch/` is not done yet.
+- **Not built (asks):** per-role models or servers (every role's calls go to one fleet); token streaming;
+  time to first token (the record has each call's whole time only).
 
 ## Install
 
@@ -276,7 +364,7 @@ One YAML file with six sections. A preset and any number of knob files are merge
 | `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
 | `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
-| `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share` |
+| `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server) |
 | `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one) |
 
 | Preset | Campaigns | P | G | Simulations per campaign | Simulations in all | Notes |

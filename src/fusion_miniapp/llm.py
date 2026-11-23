@@ -19,7 +19,7 @@ from fusion_miniapp.decide import ranges
 
 REPLY_TOKENS = 256   # room for the visible reply on top of the thinking budget
 MAX_IN_FLIGHT = 512  # requests in flight per model server, over all agent processes (both layers admit
-                     # their share in each process); tune per model server
+                     # their share in each process); tune per model server (the AUTONMI layer: llm.max_in_flight)
 
 
 class _Recorder:
@@ -260,7 +260,7 @@ class OpenAIChat(_Recorder):
 def make(llm_knobs: dict):
     """The LLM service the `llm` knob section asks for."""
     if llm_knobs["mode"] == "stub":
-        return StubLLM()
+        return StubLLM(latency_s=llm_knobs.get("stub_latency_s", 0.001))
     return OpenAIChat(
         llm_knobs["base_url_env"],
         llm_knobs["api_key_env"],

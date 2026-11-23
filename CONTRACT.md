@@ -24,7 +24,7 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
 sim:      {nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap, model_width, checkpoint_mb, device, cold_start_fraction, keep_artifacts, work_root, threads_per_worker}
 agents:   {count, first, per_process, max_live, cost_scale (number or list), thinking_budget, budget_scales_with_cost}
 tools:    {constraints_lookup, abstract_lookup, latency_ms}
-llm:      {mode: stub|openai, base_url_env, api_key_env, model, send_thinking_budget, timeout_s, max_retries, min_model_share, max_empty_share}
+llm:      {mode: stub|openai, base_url_env, api_key_env, model, send_thinking_budget, timeout_s, max_retries, min_model_share, max_empty_share, stub_latency_s, max_in_flight, admission_tokens}
 workers:  {sim_workers}
 outer:    {population, generations, generator: llm|mutation, rng: shared|per_agent, logs: per_agent|none, wall_weight, noise, parent_stdout: keep|drop}
 ```
@@ -88,3 +88,6 @@ class Services(Protocol):
 2. `tests/test_parent_oracle.py` also runs its cases through `python -m fusion_miniapp.layer_autonmi` (one campaign, `agents.first` = the seed); skipped without the AUTONMI framework.
 3. `tests/references/*.json`, recorded from the LangGraph layer by `tests/references/record_references.py` at a named commit: `tests/test_layer_autonmi.py` compares both layers' runs with them, besides comparing the two layers with each other. A campaign's config.json is compared without `git` and `constraints_path`, which name the checkout.
 4. `layer_autonmi.AUTONMI_COMMIT` pins the AUTONMI framework's commit; the run record's `autonmi.framework_commit` names the commit imported, and a run on another one warns once on stderr.
+5. Knobs `llm.stub_latency_s` (0.001, the stub's seconds per call, in every layer through `llm.make`), `llm.max_in_flight` (512) and `llm.admission_tokens` (2,000,000), the AUTONMI layer's admission caps per model server (`run.py`'s layers keep `llm.MAX_IN_FLIGHT`), in every preset. None changes results; `compare_records` treats them as the model service's, not the problem's.
+6. The AUTONMI layer prints `agents live=<n> model_requests_open=<n> queued=<n> decoding_at_servers=<n|-> done=<n>` to stderr once per interval, and its record's `speed` gains `agents_live`, `model_requests_in_flight` and `model_requests_queued` (client side), `decoding_at_servers` (vLLM's running count; null with the stub), `headline`, `live` (the line's series) and `rates_per_s.model_calls_all_agents` (also in the other layers' records, with null client counts: their call details carry no times). `counts.llm_calls` keeps its meaning. `llm_call_details` gain `role`, `t_end`, `service_s` and `recovery_s` (outside the digest).
+7. `--llm openai` on the AUTONMI layer refuses a run whose servers' `/v1/models` do not list `llm.model`, before any campaign, and samples the servers' `/metrics` into `vllm/vllm.json` (not with `--no-vllm-metrics`, which also drops AUTONMI's checks against the servers' counters). README "The model service" states the contract.

@@ -3,7 +3,7 @@
 Each run is a process of its own, as in production (OpenTelemetry's providers are set once per process),
 started in the test's own folder (AsyncFlow leaves a folder for every engine in the working directory).
 Two runs agree when compare_records says so, as for two runs on two machines. The model server is a
-FIXTURE (not a model): an OpenAI-compatible stand-in on 127.0.0.1, on a thread of the test.
+FIXTURE (not a model): a stand-in for a vLLM server on 127.0.0.1, on a thread of the test (fake_vllm.py).
 
 Each AUTONMI run is also compared with a reference recorded from the LangGraph layer
 (tests/references/<name>.json, written by tests/references/record_references.py, which runs these
@@ -18,16 +18,15 @@ import hashlib
 import importlib.util
 import json
 import os
-import random
 import re
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
 import pytest
+from fake_vllm import FakeVllm
 
 from fusion_miniapp import compare_records, decide, knobs as knob_files, record
 
@@ -239,65 +238,7 @@ def test_real_evaluate_through_the_autonmi_layer_on_cpu(tmp_path):
         assert against_reference(tmp_path / layer, rec, ref) == [], layer
 
 
-class ModelServer:
-    """A FIXTURE, not a model: an OpenAI-compatible server on 127.0.0.1 that answers /health, and each
-    chat completion from the request's last line only (as the stub LLM does), so both layers get the same
-    replies. It keeps every request's body; `fail(body)` true answers that request with HTTP 400."""
-
-    def __init__(self, fail=None) -> None:
-        self.fail, self.bodies = fail or (lambda body: False), []
-        self._loop = asyncio.new_event_loop()
-
-    async def _chat(self, request):
-        from aiohttp import web
-        body = await request.json()
-        self.bodies.append(body)
-        if self.fail(body):
-            return web.json_response({"error": {"message": "rejected by the test"}}, status=400)
-        last = body["messages"][-1]["content"].splitlines()[-1]
-        many = re.search(r"JSON list of (\d+)", last)
-        if many:
-            rng = random.Random(last)
-            text = json.dumps([{k: round(rng.uniform(lo, hi), 6) for k, (lo, hi) in decide.ranges().items()}
-                               for _ in range(int(many.group(1)))])
-        else:
-            text = "Summary: " + body["messages"][-1]["content"].splitlines()[0]
-        return web.json_response({"id": "c", "object": "chat.completion", "created": 0, "model": body["model"],
-                                  "choices": [{"index": 0, "finish_reason": "stop",
-                                               "message": {"role": "assistant", "content": text}}],
-                                  "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}})
-
-    def __enter__(self) -> "ModelServer":
-        from aiohttp import web
-
-        async def start():
-            app = web.Application()
-            app.router.add_post("/v1/chat/completions", self._chat)
-            app.router.add_get("/health", lambda request: web.Response(text="ok"))
-            runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, "127.0.0.1", 0)
-            await site.start()
-            return runner, site._server.sockets[0].getsockname()[1]
-
-        self._runner, self.port = self._loop.run_until_complete(start())
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
-        self._loop.run_until_complete(self._runner.cleanup())
-        self._loop.close()
-
-    def take(self) -> list[dict]:
-        """The requests so far, and forget them."""
-        out, self.bodies = self.bodies, []
-        return out
-
-
-def run_both_on_a_model_server(tmp_path, server: ModelServer, code: int = 0):
+def run_both_on_a_model_server(tmp_path, server: FakeVllm, code: int = 0):
     """Both layers with --llm openai on the server: AUTONMI's from the model job's endpoints file, the
     LangGraph layer's from OPENAI_BASE_URL. Their records and their requests."""
     common = (*SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS))
@@ -314,7 +255,7 @@ def test_both_layers_send_the_model_the_same_requests(tmp_path):
     """--llm openai: the same requests (messages, the served model's name, max_tokens = thinking budget +
     reply allowance, vLLM's thinking_token_budget; AUTONMI's transports' own temperature withdrawn, so the
     server's default applies to both), the same replies, the same results; and as recorded."""
-    with ModelServer() as server:
+    with FakeVllm() as server:
         a, b, sent_a, sent_b = run_both_on_a_model_server(tmp_path, server)
     assert agree(tmp_path, a, b) == []
     assert a["llm_check"]["fail"] == [] and a["llm_check"]["model_share"] == 1.0
@@ -336,7 +277,7 @@ def test_a_campaign_whose_model_call_fails_is_an_error_line_in_both_layers(tmp_p
     def fail(body):
         text = body["messages"][-1]["content"]
         return text.endswith("found.") and int(hashlib.sha256(text.encode()).hexdigest(), 16) % 3 == 0
-    with ModelServer(fail) as server:
+    with FakeVllm(fail) as server:
         a, b, _, _ = run_both_on_a_model_server(tmp_path, server, code=1)
     failed = {layer: sorted(r["agent_id"] for r in lines(tmp_path, layer) if "error" in r) for layer in ENTRY}
     assert failed["autonmi"] and failed["autonmi"] == failed["langgraph"]
@@ -346,6 +287,155 @@ def test_a_campaign_whose_model_call_fails_is_an_error_line_in_both_layers(tmp_p
         if "error" in r:
             assert r["llm_call_details"][-1]["error"] and r["llm_call_details"][-1]["empty"] is None
     assert not a["autonmi"]["ok"]   # every_campaign_reports
+
+
+LIVE_LINE = re.compile(r"^agents live=(\S+) model_requests_open=(\S+) queued=(\S+) decoding_at_servers=(\S+) "
+                       r"done=(\S+)$")
+
+
+def run_logged(tmp_path, *args, code=0) -> tuple[dict, str]:
+    """One AUTONMI run in tmp_path/autonmi: its run record and its stderr."""
+    proc = subprocess.run([sys.executable, "-m", ENTRY["autonmi"], *args, "--out", str(tmp_path / "autonmi")],
+                          cwd=tmp_path, check=False, timeout=900, capture_output=True, text=True)
+    assert proc.returncode == code, proc.stderr[-3000:]
+    return json.loads((tmp_path / "autonmi" / "run_record.json").read_text()), proc.stderr
+
+
+def live_lines(stderr: str) -> list[list[str]]:
+    return [list(m.groups()) for m in map(LIVE_LINE.match, stderr.splitlines()) if m]
+
+
+def as_printed(series: list[list]) -> list[list[str]]:
+    return [["-" if v is None else str(v) for v in row[1:]] for row in series]
+
+
+def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
+    """20 fixture campaigns in one population, each model call 1 s at the stub (emulated) and 4 admitted at once
+    (llm.max_in_flight): the client's in-flight maximum is that cap, with calls queued behind it, in the record
+    and in the live line; the live line comes about once per interval (record.ticker sleeps an interval after each
+    line, so an event-loop stall stretches a gap: up to about 2.2 s at 2,000 campaigns, measured), as the record's
+    series, and ends with every hosted agent done; Little's law holds three ways within 10% (AUTONMI's agent-seconds in model requests per second,
+    fusion's calls per second x their mean time in flight, calls per second x 1 s); and the results are the
+    20-campaign reference's (neither knob changes them)."""
+    knobs = fixture_knobs("llm refills, one random stream, all live")
+    knobs["llm"] = {"stub_latency_s": 1.0, "max_in_flight": 4}
+    rec, err = run_logged(tmp_path, *FIXTURE_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "1")
+    ref = json.loads((REFERENCES_DIR / "fixture_llm_refills.json").read_text())   # the case's, with two knobs more
+    assert rec["results_sha256"] == ref["results_sha256"]
+    s = rec["speed"]
+    opened, queued = s["model_requests_in_flight"], s["model_requests_queued"]
+    assert opened["side"] == "client" and opened["emulated"]
+    assert opened["calls_timed"] == rec["counts"]["llm_calls"] == 40
+    cap = opened["time_ge_pct_s"]["admission_capacity"]
+    assert opened["max"] == cap["of"] == 4 and cap["95"] > 0 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 20
+    assert queued["max"] > 0 and queued["time_s"]["max"] > 0 and queued["autonmi_built_in"]["agent_seconds"] > 0
+    little = opened["littles_law"]
+    figures = [little[k] for k in ("autonmi_agent_seconds_per_s", "fusion_calls_per_s_x_mean_time_in_flight",
+                                   "calls_per_s_x_stub_latency_s")]
+    assert min(figures) > 0 and max(figures) <= 1.1 * min(figures), little
+    assert opened["loop_lag"] is not None and isinstance(opened["loop_lag"]["high"], bool)
+    assert s["rates_per_s"]["model_calls_all_agents"] == s["rates_per_s"]["model_calls"]   # one agent per campaign
+    assert s["agents_live"]["max"] == 20 and s["agents_live"]["hosted_agents"] == 20
+    assert s["decoding_at_servers"] is None and s["decoding_at_servers_why_not"].startswith("the stub")
+    assert s["headline"]["figure"] == "model_requests_in_flight" and s["headline"]["emulated"]
+    assert "emulated" in s["headline"]["label"] and "decoding" not in s["headline"]["label"]
+    series = s["live"]["series"]
+    assert live_lines(err) == as_printed(series) and len(series) >= 5
+    assert series[-1][1:] == [0, 0, 0, None, 20]                    # at the end: none live, every agent done
+    gaps = [b[0] - a[0] for a, b in zip(series[:-2], series[1:-1])]  # every interval (the last line: at the end)
+    assert all(0.95 <= g <= 2.0 for g in gaps), gaps
+    assert max(row[2] for row in series) <= 4 and max(row[3] for row in series) > 0   # never past the cap; queued
+    assert all(row[4] is None for row in series)                     # no model servers: "-"
+    speed = dict(kv.split("=", 1) for kv in record.speed_line(rec)[len("speed: "):].split())
+    assert (speed["requests_open_max"], speed["decoding_max"], speed["emulated"]) == ("4", "None", "True")
+
+
+def test_the_token_cap_reaches_the_fleet(tmp_path):
+    """llm.admission_tokens: 1 admits one model request at a time (each is larger than the cap, which Flowgentic
+    admits alone), so the client's in-flight maximum is 1, with the rest queued; the results are unchanged."""
+    knobs = fixture_knobs("llm refills, one random stream, all live")
+    knobs["llm"] = {"stub_latency_s": 0.2, "admission_tokens": 1}
+    rec, _ = run_logged(tmp_path, *FIXTURE_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "1")
+    ref = json.loads((REFERENCES_DIR / "fixture_llm_refills.json").read_text())
+    assert rec["results_sha256"] == ref["results_sha256"]
+    opened, queued = rec["speed"]["model_requests_in_flight"], rec["speed"]["model_requests_queued"]
+    assert opened["max"] == 1 and opened["calls_timed"] == 40 and queued["max"] > 0
+
+
+def test_an_openai_run_over_two_model_servers_records_their_decoding_counts(tmp_path):
+    """--llm openai over two fake vLLM servers (FIXTURES, not models; each call 2.2 s, 2 at once per server, so the
+    sampler's 2 s readings see every call, and requests wait at the servers), with a key as AUTONMI's jobs/model.sh
+    sets one: both servers are sampled into vllm/vllm.json and the record's decoding_at_servers, the headline,
+    which names who the servers say serve the model (here the fixture); AUTONMI's check that the fleets' tokens and
+    requests equal the servers' passes; the key is in no record; the results and requests are the model-server
+    reference's."""
+    key = "the-servers-key-7f3a"
+    (tmp_path / "api-key").write_text(key + "\n")
+    with FakeVllm(latency_s=2.2, batch=2, api_key=key) as one, FakeVllm(latency_s=2.2, batch=2, api_key=key) as two:
+        (tmp_path / "endpoints").write_text(f"{one.url}\n{two.url}\n")
+        rec, err = run_logged(tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS),
+                              "--populations", "2", "--endpoints-file", str(tmp_path / "endpoints"),
+                              "--api-key-file", str(tmp_path / "api-key"))
+        sent = (one.take(), two.take())
+        peaks = [(x.running_max, x.waiting_max) for x in (one, two)]
+    assert all(sent) and all(r == 2 and w > 0 for r, w in peaks), peaks   # both served, each its batch, with waits
+    ref = reference("model_server")
+    assert against_reference(tmp_path / "autonmi", rec, ref) == []
+    assert request_bodies(sent[0] + sent[1]) == [json.dumps(body, sort_keys=True) for body in ref["requests"]]
+    summary = json.loads((tmp_path / "autonmi" / "summary.json").read_text())
+    tokens = next(c for c in summary["checks"] if c["name"] == "tokens_match_the_servers")
+    assert tokens["ok"] and summary["model_servers"]["servers"] == 2 and rec["autonmi"]["ok"], tokens
+    d = rec["speed"]["decoding_at_servers"]
+    assert (d["servers"], d["sample_errors"], d["interval_s"]) == (2, 0, 2.0) and d["running"]["samples"] >= 4
+    assert 1 <= d["running"]["max"] <= 4 and d["waiting"]["max"] >= 1 and 0 < d["kv_cache_usage"]["max"] < 1
+    assert d["running"]["time_ge_pct_s"]["admission_capacity"]["of"] == 2 * 512   # 2 servers, 512 each by default
+    assert d["stale_s"] == [0.0, 0.0] and d["gauges_missing"] is None   # both answered every reading
+    headline = rec["speed"]["headline"]
+    assert headline["figure"] == "decoding_at_servers" and not headline["emulated"]
+    assert headline["served_by"] == ["fusion-test-fixture"]
+    assert rec["llm_service"]["served_models"] == [{"id": "stand-in", "owned_by": "fusion-test-fixture"}]
+    assert not [f for f in (tmp_path / "autonmi").rglob("*") if f.is_file() and key.encode() in f.read_bytes()]
+    assert not rec["speed"]["model_requests_in_flight"]["emulated"]
+    series = rec["speed"]["live"]["series"]
+    assert live_lines(err) == as_printed(series) and max(row[4] for row in series) >= 1
+
+
+@pytest.mark.parametrize("why", ("another model", "a wrong key"))
+def test_a_server_that_does_not_serve_llm_model_is_refused_before_any_campaign(tmp_path, why):
+    """The start-up check: a server whose /v1/models does not list llm.model, or does not answer it (a key the
+    server refuses: 401), refuses the run, with a clear message, before any model request; the record fails with
+    no campaign."""
+    server, said = ((FakeVllm(model="another-model"), "['another-model'], not llm.model 'stand-in'")
+                    if why == "another model" else
+                    (FakeVllm(api_key="the-servers-key"), "/v1/models did not answer: HTTPError: HTTP Error 401"))
+    (tmp_path / "api-key").write_text("a-wrong-key\n")
+    with server:
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        rec, err = run_logged(tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS),
+                              "--endpoints-file", str(tmp_path / "endpoints"), "--api-key-file",
+                              str(tmp_path / "api-key"), code=1)
+        sent = server.take()
+    assert sent == [] and rec["status"] == "fail" and rec["counts"]["agents"] == 0
+    refused = [x for x in err.splitlines() if "run refused" in x]
+    assert len(refused) == 1 and said in refused[0], err[-2000:]
+
+
+@pytest.mark.parametrize("how", ("a server without /metrics", "--no-vllm-metrics"))
+def test_a_server_without_vllms_metrics_runs_without_decoding_counts(tmp_path, how):
+    """An OpenAI-compatible server without vLLM's /metrics (a FIXTURE), or a vLLM one with --no-vllm-metrics: the
+    run passes, without the servers' counts (and so without AUTONMI's checks against them), warns once when the
+    servers have no /metrics, and its headline is the client-side count (not emulated)."""
+    flag = ("--no-vllm-metrics",) if how == "--no-vllm-metrics" else ()
+    with FakeVllm(metrics=bool(flag)) as server:   # with the flag, a server that has /metrics
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        rec, err = run_logged(tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS),
+                              "--endpoints-file", str(tmp_path / "endpoints"), *flag)
+    assert rec["status"] == "pass" and rec["speed"]["decoding_at_servers"] is None
+    why = rec["speed"]["decoding_at_servers_why_not"]
+    assert ("--no-vllm-metrics" if flag else "/metrics") in why and not (tmp_path / "autonmi" / "vllm").exists()
+    assert len([x for x in err.splitlines() if "decoding counts are not recorded" in x]) == (0 if flag else 1)
+    assert rec["speed"]["headline"] == {**rec["speed"]["headline"], "figure": "model_requests_in_flight",
+                                        "label": "client side", "emulated": False}
 
 
 def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(tmp_path):
