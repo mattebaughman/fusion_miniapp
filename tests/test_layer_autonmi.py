@@ -5,9 +5,10 @@ started in the test's own folder (AsyncFlow leaves a folder for every engine in 
 Two runs agree when compare_records says so, as for two runs on two machines. The model server is a
 FIXTURE (not a model): a stand-in for a vLLM server on 127.0.0.1, on a thread of the test (fake_vllm.py).
 
-On the AUTONMI layer each campaign is three hosted agents (a<i>/coordinator, a<i>/generator, a<i>/evaluator)
-that talk through messages; the tests also check their rows, messages and per-role counts, and that the results
-do not depend on how the campaigns are laid out (populations, caps, workers, starting together).
+On the AUTONMI layer each campaign is 3 + campaign.slots hosted agents (a<i>/coordinator, a<i>/generator,
+a<i>/evaluator and the Monitor slots a<i>/monitor0, ...) that talk through messages and the campaign's candidate
+queue; the tests also check their rows, messages and per-role counts, and that the results do not depend on how
+the campaigns are laid out (populations, caps, workers, starting together, Monitor slots).
 
 Each AUTONMI run is also compared with a reference recorded from the LangGraph layer
 (tests/references/<name>.json, written by tests/references/record_references.py, which runs these
@@ -18,6 +19,7 @@ Needs the AUTONMI framework (the package `autonmi`, installed separately) and Fl
 (requirements-autonmi.txt); skipped without them.
 """
 import asyncio
+import csv
 import hashlib
 import importlib.util
 import json
@@ -56,7 +58,12 @@ except ImportError:
     pytest.skip(f"needs Flowgentic 0.6: {WHY}", allow_module_level=True)
 
 ENTRY = {"autonmi": "fusion_miniapp.layer_autonmi", "langgraph": "fusion_miniapp.run"}
-ROLES = ("coordinator", "generator", "evaluator")   # each campaign's hosted agents on the AUTONMI layer
+ROLES = ("coordinator", "generator", "evaluator", "monitor")   # each campaign's roles on the AUTONMI layer
+
+
+def names(slots: int = 2) -> list[str]:
+    """A campaign's hosted agents, in order: the three outer-loop roles, then the Monitor slots."""
+    return ["coordinator", "generator", "evaluator", *(f"monitor{k}" for k in range(slots))]
 
 
 def knob_file(tmp_path, knobs: dict) -> str:
@@ -206,8 +213,8 @@ def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
     assert a["autonmi"]["asyncflow_running_shim"] is True   # the run that agreed had the shim (on by default)
     assert a["autonmi"]["gc"] == {"automatic_full_collections": False,   # and no automatic full collections
                                   "thresholds": [700, 10, FULL_GC_THRESHOLD]}, a["autonmi"]["gc"]
-    assert 0 < a["counts"]["suspensions"] <= 20 * 2     # at most one per generation: the fan-out's barrier
-    assert_three_agents_per_campaign(tmp_path / "autonmi", a)
+    assert 0 < a["counts"]["suspensions"] <= 160        # at most one per evaluation: a Monitor's wait for it
+    assert_agents_per_campaign(tmp_path / "autonmi", a)
     if knobs["outer"].get("logs", "per_agent") == "per_agent":
         for f in ("config.json", "evolution_log.csv", "best_result.json"):   # the parent's per-campaign files
             for c in ("a0", "a19"):
@@ -221,43 +228,54 @@ def app_rows(out: Path) -> list[dict]:
     return [json.loads(x) for f in sorted((out / "app").glob("agents-p*.jsonl")) for x in f.read_text().splitlines()]
 
 
-def assert_three_agents_per_campaign(out: Path, rec: dict) -> None:
-    """Each campaign is three hosted agents (a<i>/coordinator, generator, evaluator), consecutive and in one
-    population, each ended normally (finished); every message sent was received once, the count computed from
-    G and the roles, with none left; each role's model calls exactly as its campaign counted them (the
-    Coordinator's summary, the Generator's refills, none by the Evaluator) and its lookups as decision 4(b)
-    splits them; only the Evaluator suspends; the lookups are AUTONMI's count; the store holds no saved state
-    at the end, and each campaign's memory under campaign/a<i>."""
+def assert_agents_per_campaign(out: Path, rec: dict) -> None:
+    """Each campaign is 3 + campaign.slots hosted agents (a<i>/coordinator, generator, evaluator, monitor0, ...),
+    consecutive and in one population, each ended normally (finished); every message sent was received once, the
+    count computed from P, G, the slots and the roles, with none left (the queue's included); each role's model
+    calls exactly as its campaign counted them (the Coordinator's summary, the Generator's refills, none by the
+    Evaluator or the Monitors) and its lookups as decision 4(b) splits them; the campaign's P x G evaluations are
+    its Monitors', each with its trace (monitor.capture) and exactly one report; only the Monitors suspend; the
+    lookups are AUTONMI's count; the store holds no saved state at the end, and each campaign's memory under
+    campaign/a<i>."""
     knobs, n = rec["knobs"], rec["counts"]["agents"]
-    G, lines = knobs["outer"]["generations"], {r["agent_id"]: r for r in lines_of(out)}
+    G, P, S = knobs["outer"]["generations"], knobs["outer"]["population"], knobs["campaign"]["slots"]
+    lines = {r["agent_id"]: r for r in lines_of(out)}
     rows = app_rows(out)
-    assert [r["agent_id"] for r in rows] == [f"{c}/{role}" for c in sorted(lines, key=lambda c: int(c[1:]))
-                                            for role in ROLES]
+    assert [r["agent_id"] for r in rows] == [f"{c}/{name}" for c in sorted(lines, key=lambda c: int(c[1:]))
+                                            for name in names(S)]
     assert len({(r["campaign"], r["population"]) for r in rows}) == n   # never split over populations
     assert all(r["finished"] and r["status"] == "done" and r["messages_left"] == r["messages_dropped"] == 0
                for r in rows)
     sent = {role: sum(r["messages_sent"] for r in rows if r["role"] == role) for role in ROLES}
     received = {role: sum(r["messages_received"] for r in rows if r["role"] == role) for role in ROLES}
-    assert sent == {"coordinator": n * (2 * G + 2), "generator": n * G, "evaluator": n * G}
-    assert sum(sent.values()) == sum(received.values()) == n * (4 * G + 2)   # each delivered once, none left
+    assert sent == {"coordinator": n * (G + 2), "generator": n * (G + P * G + S), "evaluator": n * G,
+                    "monitor": n * P * G}
+    assert received == {"coordinator": n * 2 * G, "generator": n * (G + 1), "evaluator": n * (P * G + 1),
+                        "monitor": n * (P * G + S)}
+    assert sum(sent.values()) == sum(received.values()) == n * (3 * G + 2 + 2 * P * G + S)   # each once, none left
     for r in rows:
         line = lines[r["campaign"]]
-        calls = {"coordinator": 1, "generator": line["n_llm_calls"] - 1, "evaluator": 0}[r["role"]]
+        calls = {"coordinator": 1, "generator": line["n_llm_calls"] - 1, "evaluator": 0, "monitor": 0}[r["role"]]
         roles_calls = [c for c in line["llm_call_details"] if c["role"] == r["role"]]
         assert r["model_calls"] == calls == len(roles_calls), r
-        assert r["lookups"] == {"coordinator": 1, "generator": 1, "evaluator": 0}[r["role"]], r
-        assert r["simulations"] == (r["role"] == "evaluator") * knobs["outer"]["population"] * G, r
-        assert r["suspensions"] == 0 or r["role"] == "evaluator", r
-        if r["role"] == "evaluator":   # the inner-loop traces it kept, one per evaluation (monitor.capture)
+        assert r["lookups"] == {"coordinator": 1, "generator": 1, "evaluator": 0, "monitor": 0}[r["role"]], r
+        assert r["suspensions"] == 0 or r["role"] == "monitor", r
+        if r["role"] == "monitor":   # one evaluation, one trace (monitor.capture) and one report per candidate taken
+            assert r["simulations"] == r["reports"] == r["messages_received"] - 1, r
             assert r["traces"] == knobs["monitor"]["capture"] * r["simulations"], r
+        else:
+            assert r["simulations"] == 0, r
+    for c in lines:   # a campaign's Monitors evaluate its P x G candidates between them
+        assert sum(r["simulations"] for r in rows if r["campaign"] == c and r["role"] == "monitor") == P * G, c
     by = rec["counts"]["by_role"]
     assert {role: by[role]["model_calls"] for role in ROLES} == {
-        "coordinator": n, "generator": rec["counts"]["llm_calls"] - n, "evaluator": 0}
-    assert by["evaluator"]["suspensions"] == rec["counts"]["suspensions"]
-    assert by["evaluator"]["traces"] == knobs["monitor"]["capture"] * rec["counts"]["sims"]
-    assert by["coordinator"]["traces"] == by["generator"]["traces"] == 0
+        "coordinator": n, "generator": rec["counts"]["llm_calls"] - n, "evaluator": 0, "monitor": 0}
+    assert by["monitor"]["suspensions"] == rec["counts"]["suspensions"]
+    assert by["monitor"]["simulations"] == by["monitor"]["reports"] == rec["counts"]["sims"]   # a report per inner loop
+    assert by["monitor"]["traces"] == knobs["monitor"]["capture"] * rec["counts"]["sims"]
+    assert all(by[role][k] == 0 for role in ROLES[:3] for k in ("traces", "reports", "simulations"))
     assert (rec["counts"]["campaigns"], rec["counts"]["hosted_agents"], rec["counts"]["agents_per_campaign"]) == \
-        (n, 3 * n, 3)
+        (n, (3 + S) * n, 3 + S)
     checks = {c["name"]: c for c in json.loads((out / "app" / "checks.json").read_text())}
     assert {k: c["ok"] for k, c in checks.items()} == dict.fromkeys((
         "every_campaign_reports", "every_agent_finishes", "evaluations_and_model_calls_as_planned",
@@ -296,9 +314,118 @@ def test_the_trace_changes_no_result(tmp_path, monitor):
     rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs))
     assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
     assert against_reference(tmp_path / "autonmi", rec, reference("fixture_llm_refills")) == []
-    assert_three_agents_per_campaign(tmp_path / "autonmi", rec)
-    assert rec["counts"]["by_role"]["evaluator"]["traces"] == (160 if monitor.get("capture", True) else 0)
+    assert_agents_per_campaign(tmp_path / "autonmi", rec)
+    assert rec["counts"]["by_role"]["monitor"]["traces"] == (160 if monitor.get("capture", True) else 0)
     assert '"trace"' not in (tmp_path / "autonmi" / "agents.jsonl").read_text()
+
+
+@pytest.mark.parametrize("slots", (1, 16))
+@pytest.mark.parametrize("case", CASES)
+def test_the_results_do_not_depend_on_the_monitor_slots(tmp_path, case, slots):
+    """campaign.slots 1 (one candidate at a time) and 16 (more slots than the 4 candidates of a generation): the
+    reference's results and parent files, with 3 + slots agents per campaign, as at the default 2."""
+    knobs = {**fixture_knobs(case), "campaign": {"slots": slots}}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs))
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    assert against_reference(tmp_path / "autonmi", rec, reference(REFERENCE_OF[case])) == []
+    assert_agents_per_campaign(tmp_path / "autonmi", rec)
+    assert rec["counts"]["hosted_agents"] == 20 * (3 + slots)
+
+
+@pytest.mark.parametrize("extras", (False, True))
+def test_the_monitors_numbers_are_written_only_with_the_record_toggle(tmp_path, extras):
+    """record.extras off (the default): the record has the Monitor's counts (one report per inner loop) and no
+    per-candidate numbers; on: each campaign's line also has every candidate's numbers (its generation and
+    candidate, q, the Monitor's m, left_at, back_at and split_at, and its label: from the trace's end values,
+    synthetic, on the fixture), outside the digest, which stays the reference's."""
+    knobs = {**fixture_knobs("llm refills, one random stream, all live"), "record": {"extras": extras}}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs))
+    assert rec["status"] == "pass" and against_reference(tmp_path / "autonmi", rec, reference("fixture_llm_refills")) == []
+    assert rec["counts"]["by_role"]["monitor"]["reports"] == rec["counts"]["sims"] == 160
+    rows = lines_of(tmp_path / "autonmi")
+    if not extras:
+        assert not any("monitor" in r for r in rows)
+        return
+    for r in rows:
+        got = r["monitor"]
+        assert [(x["generation"], x["candidate_idx"]) for x in got] == [(g, i) for g in range(2) for i in range(4)]
+        assert all(set(x) == {"generation", "candidate_idx", "q", "m", "left_at", "back_at", "split_at", "label",
+                              "label_from"} for x in got), got[0]
+        assert {x["label_from"] for x in got} == {"trace_end_synthetic"} and {x["label"] for x in got} <= {"good", "bad"}
+        assert sorted(x["q"] for x in got if x["generation"] == 0) == [0.0, 0.333333, 0.666667, 1.0]
+        assert all(x["m"] == 0.0 for x in got)   # smoke's 4 candidates a generation never reach warm-up (4 a side)
+
+
+SPLIT_KNOBS = {"outer": {"logs": "per_agent"}, "record": {"extras": True}}   # logs: each candidate's a1_Te
+
+
+def test_the_monitors_score_after_warm_up_and_find_the_planted_split(tmp_path):
+    """The hundredk shape (16 candidates a generation, 2 generations; fixture, smooth synthetic trace) in campaigns
+    a0 and a1, with record.extras. Generation 0 is scored before warm-up (m 0, no steps); at its barrier 8 traces
+    join each side (labelled from their end values, synthetic), so every candidate of generation 1 is scored:
+    split_at at the planted step (rollout_steps + 1 + fixed_point_cap // 2), and m of its branch's sign for every
+    candidate more than 0.05 of a1_Te's range from the middle (positive on the low branch, whose wall is cooler
+    at the end: labelled good). With 16 slots (the whole generation at once) the results and every Monitor
+    number are those of 2 slots: both read one campaign's statistics, which change only at the barrier.
+    FIXTURE data. (Campaigns a0 and a1 are not among the few seeds whose sides are apart before the planted
+    step: see the package's evidence.)"""
+    got = {}
+    for slots in (2, 16):
+        d = tmp_path / f"slots{slots}"
+        d.mkdir()
+        knobs = {**SPLIT_KNOBS, "campaign": {"slots": slots}}
+        rec = run("autonmi", d, "--preset", "hundredk", "--sim", "fixture", "--agents", "2",
+                  "--knobs", knob_file(d, knobs))
+        assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+        assert rec["counts"]["by_role"]["monitor"]["reports"] == rec["counts"]["sims"] == 64
+        assert_agents_per_campaign(d / "autonmi", rec)
+        got[slots] = (rec, lines_of(d / "autonmi"))
+    (rec, rows), (rec16, rows16) = got[2], got[16]
+    assert rec16["results_sha256"] == rec["results_sha256"]
+    # by campaign: agents.jsonl has its lines in the order the campaigns end
+    assert {r["agent_id"]: r["monitor"] for r in rows16} == {r["agent_id"]: r["monitor"] for r in rows}
+    s = rec["knobs"]["sim"]
+    planted, (lo, hi) = s["rollout_steps"] + 1 + s["fixed_point_cap"] // 2, decide.ranges()["a1_Te"]
+    clear = 0
+    for r in rows:
+        with (tmp_path / "slots2" / "autonmi" / "campaigns" / r["agent_id"] / "evolution_log.csv").open() as f:
+            u = {(int(x["generation"]), int(x["candidate_idx"])): (float(x["param_a1_Te"]) - lo) / (hi - lo)
+                 for x in csv.DictReader(f)}
+        g0, g1 = ([x for x in r["monitor"] if x["generation"] == g] for g in (0, 1))
+        assert all(x["m"] == 0.0 and x["split_at"] is None for x in g0), r["agent_id"]
+        assert [x["label"] for x in g0].count("good") == 8 and {x["label_from"] for x in r["monitor"]} == {
+            "trace_end_synthetic"}
+        assert all(x["split_at"] == planted for x in g1), (r["agent_id"], [x["split_at"] for x in g1])
+        for x in g1:
+            side = u[1, x["candidate_idx"]]
+            if abs(side - 0.5) > 0.05:
+                clear += 1
+                assert (x["m"] > 0) == (side < 0.5), (r["agent_id"], side, x)
+    assert clear >= 16, clear
+
+
+def test_the_barrier_labels_a_real_trace_by_its_keep_probability():
+    """At a generation's barrier (Script._label) each held trace that is not synthetic (a real inner loop's)
+    joins the good side when q, the parent's keep-probability of its result in the generation, is 0.5 or more,
+    else the bad side; a synthetic one is labelled from its own end values. With record.extras each candidate's
+    q, label and label_from are kept for its campaign's line."""
+    import numpy as np
+
+    from fusion_miniapp import monitor
+    from fusion_miniapp.layer_autonmi import Script
+
+    sc = Script.__new__(Script)   # only what _label reads
+    sc.knobs, sc.extras, sc.stats, sc.numbers = {"outer": {"wall_weight": 0.7}}, True, {}, {}
+    stats = sc.stats["a0"] = monitor.Rolling(warmup=1, window=16)
+    xs = [np.full((3, 4), float(i)) for i in range(4)]
+    for i, x in enumerate(xs):   # candidate 3's trace is synthetic: its label is its end values' (alone: good)
+        stats.hold(0, i, x, synthetic=i == 3)
+    results = [{"candidate_idx": i, "is_good": True, "te_core_metric": t} for i, t in enumerate((900, 700, 800, 600))]
+    sc._label("a0", 0, results, [dict(monitor.NONE)] * 4)
+    assert [(x["q"], x["label"], x["label_from"]) for x in sc.numbers["a0"]] == [
+        (1.0, "good", "q"), (0.333333, "bad", "q"), (0.666667, "good", "q"), (0.0, "good", "trace_end_synthetic")]
+    assert (stats.good.traces, stats.bad.traces) == (3, 1) and stats.held == {}
+    assert np.allclose(stats.good.mean, 5 / 3) and np.allclose(stats.bad.mean, 1.0)
 
 
 @pytest.mark.skipif(bool(_missing("torch")), reason="needs torch")
@@ -307,7 +434,7 @@ def test_real_evaluate_through_the_autonmi_layer_on_cpu(tmp_path):
     a = run("autonmi", tmp_path, *common)
     b = run("langgraph", tmp_path, *common)
     assert a["touch_check"] == {"evaluations": 12, "fixture": 0, "pass": 12, "fail": {}}
-    assert a["counts"]["by_role"]["evaluator"]["traces"] == 12   # the real inner loop's, across processes
+    assert a["counts"]["by_role"]["monitor"]["traces"] == 12   # the real inner loop's, across processes
     assert a["device_probe"]["torch"]                     # taken in a spawned process, where simulations run
     assert (a["sim_pool"], a["sim_workers_total"]) == ("process", 2)
     assert agree(tmp_path, a, b) == []
@@ -350,7 +477,7 @@ def test_both_layers_send_the_model_the_same_requests(tmp_path):
     # each call made by its own role's agent: the Generator's refills, the Coordinator's summary
     roles = [c["role"] for c in details]
     assert (roles.count("coordinator"), roles.count("generator")) == (12, len(details) - 12)
-    assert_three_agents_per_campaign(tmp_path / "autonmi", a)
+    assert_agents_per_campaign(tmp_path / "autonmi", a)
 
 
 def test_a_campaign_whose_model_call_fails_is_an_error_line_in_both_layers(tmp_path):
@@ -402,7 +529,7 @@ def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
     (llm.max_in_flight): the client's in-flight maximum is that cap, with calls queued behind it, in the record
     and in the live line; the live line comes about once per interval (record.ticker sleeps an interval after each
     line, so an event-loop stall stretches a gap: up to about 2.2 s at 2,000 campaigns, measured), as the record's
-    series, and ends with every hosted agent done (three per campaign); Little's law holds three ways within 10%
+    series, and ends with every hosted agent done (five per campaign); Little's law holds three ways within 10%
     (AUTONMI's agent-seconds in model requests per second,
     fusion's calls per second x their mean time in flight, calls per second x 1 s); and the results are the
     20-campaign reference's (neither knob changes them)."""
@@ -416,7 +543,7 @@ def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
     assert opened["side"] == "client" and opened["emulated"]
     assert opened["calls_timed"] == rec["counts"]["llm_calls"] == 40
     cap = opened["time_ge_pct_s"]["admission_capacity"]
-    assert opened["max"] == cap["of"] == 4 and cap["95"] > 0 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 60
+    assert opened["max"] == cap["of"] == 4 and cap["95"] > 0 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 100
     assert queued["max"] > 0 and queued["time_s"]["max"] > 0 and queued["autonmi_built_in"]["agent_seconds"] > 0
     little = opened["littles_law"]
     figures = [little[k] for k in ("autonmi_agent_seconds_per_s", "fusion_calls_per_s_x_mean_time_in_flight",
@@ -425,14 +552,15 @@ def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
     assert opened["loop_lag"] is not None and isinstance(opened["loop_lag"]["high"], bool)
     # the outer loop's calls are every agent's calls until the new roles make their own (decision 14)
     assert s["rates_per_s"]["model_calls_all_agents"] == s["rates_per_s"]["model_calls"]
-    assert s["agents_live"]["max"] == 60 and s["agents_live"]["hosted_agents"] == 60   # three per campaign
-    assert {r: x["max"] for r, x in s["agents_live"]["by_role"].items()} == dict.fromkeys(ROLES, 20)
+    assert s["agents_live"]["max"] == 100 and s["agents_live"]["hosted_agents"] == 100   # five per campaign
+    assert {r: x["max"] for r, x in s["agents_live"]["by_role"].items()} == {**dict.fromkeys(ROLES, 20), "monitor": 40}
+    assert s["agents_live"]["by_role"]["monitor"]["time_ge_pct_s"]["hosted_agents"]["of"] == 40   # 2 per campaign
     assert s["decoding_at_servers"] is None and s["decoding_at_servers_why_not"].startswith("the stub")
     assert s["headline"]["figure"] == "model_requests_in_flight" and s["headline"]["emulated"]
     assert "emulated" in s["headline"]["label"] and "decoding" not in s["headline"]["label"]
     series = s["live"]["series"]
     assert live_lines(err) == as_printed(series) and len(series) >= 5
-    assert series[-1][1:] == [0, 0, 0, None, 60]                    # at the end: none live, every agent done
+    assert series[-1][1:] == [0, 0, 0, None, 100]                   # at the end: none live, every agent done
     gaps = [b[0] - a[0] for a, b in zip(series[:-2], series[1:-1])]  # every interval (the last line: at the end)
     assert all(0.95 <= g <= 2.0 for g in gaps), gaps
     assert max(row[2] for row in series) <= 4 and max(row[3] for row in series) > 0   # never past the cap; queued
@@ -596,7 +724,7 @@ def test_populations_and_workers_follow_run_py():
 
 
 def test_populations_divide_the_campaigns():
-    """A campaign's three agents stay in one population: AUTONMI cuts the agent list into equal contiguous blocks,
+    """A campaign's agents stay in one population: AUTONMI cuts the agent list into equal contiguous blocks,
     so the populations must divide the campaigns. By default the smallest count that does from run.py's agent
     processes up to twice that; otherwise refused, naming nearby campaign counts that work; a --populations that
     does not divide is refused."""
@@ -615,14 +743,15 @@ def test_populations_divide_the_campaigns():
 
 
 def test_a_cap_below_one_campaign_and_starting_together_with_a_cap_are_refused(tmp_path):
-    """agents.max_live counts campaigns, three agents each for AUTONMI's cap: a cap below one campaign is refused
+    """agents.max_live counts campaigns, five agents each for AUTONMI's cap: a cap below one campaign is refused
     (the knob's own check, and the layer's), and so is agents.start_together with any cap (the agents past it
     would start only as others end, and every agent waits for all to start), before anything starts."""
     from fusion_miniapp.layer_autonmi import agents_live
     k = knob_files.base()
-    assert agents_live(k) is None and agents_live({"agents": {**k["agents"], "max_live": 7}}) == 21
+    assert agents_live(k) is None and agents_live({**k, "agents": {**k["agents"], "max_live": 7}}) == 35
+    assert agents_live({**k, "agents": {**k["agents"], "max_live": 7}, "campaign": {**k["campaign"], "slots": 16}}) == 133
     with pytest.raises(knob_files.KnobError, match="must hold one campaign"):
-        agents_live({"agents": {**k["agents"], "max_live": 0}})
+        agents_live({**k, "agents": {**k["agents"], "max_live": 0}})
     for over, said in (({"max_live": 0}, "agents.max_live must be in [1"),
                        ({"max_live": 7, "start_together": True}, "agents.start_together needs agents.max_live: null")):
         out = tmp_path / f"out-{len(said)}"
@@ -632,7 +761,7 @@ def test_a_cap_below_one_campaign_and_starting_together_with_a_cap_are_refused(t
         assert proc.returncode != 0 and said in proc.stderr and not out.exists(), proc.stderr[-2000:]
 
 
-SLOW_START = ("--stagger-batch", "1", "--stagger-interval", "0.2")   # one campaign (3 agents) per batch, 0.2 s apart
+SLOW_START = ("--stagger-batch", "1", "--stagger-interval", "0.2")   # one campaign (5 agents) per batch, 0.2 s apart
 LAYOUTS = {   # each gives the 20-campaign reference's results; the cap of one campaign leaves one partly started
     "1 population": ("--populations", "1"), "5 populations": ("--populations", "5"),
     "a cap of 1 campaign": ("--populations", "1", "--knobs", {"agents": {"max_live": 1}}),
@@ -650,12 +779,12 @@ LAYOUTS = {   # each gives the 20-campaign reference's results; the cap of one c
 def test_the_campaigns_results_do_not_depend_on_their_layout(tmp_path, layout):
     """The 20-campaign llm-refill case in 1, 2 or 5 populations, with a cap of 1 or 7 campaigns or none, with 1 or 4
     simulation workers, and starting together or not: the same results and parent files as the reference, each
-    campaign three agents that all end, every message received once.
+    campaign five agents that all end, every message received once.
 
     With a slow start (one campaign per start-up batch, 0.2 s apart, so about 1.8 s until a population's last agent
     starts). Starting together, every Coordinator begins its campaign after the last agent of its population
-    started, so all 60 agents are live at once, and a campaign's three agents start in one batch (the stagger's
-    batch is three agents per campaign; without the knob a Coordinator's first step, before its peers' tasks run,
+    started, so all 100 agents are live at once, and a campaign's five agents start in one batch (the stagger's
+    batch is five agents per campaign; without the knob a Coordinator's first step, before its peers' tasks run,
     can stretch that). Without the knob the first campaigns begin, and end, before the last agents start."""
     knobs = next((x for x in LAYOUTS[layout] if isinstance(x, dict)), {})
     args = [knob_file(tmp_path, {**fixture_knobs("llm refills, one random stream, all live"), **x})
@@ -665,12 +794,12 @@ def test_the_campaigns_results_do_not_depend_on_their_layout(tmp_path, layout):
     rec = run("autonmi", tmp_path, *FIXTURE_ARGS, *args)
     assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
     assert against_reference(tmp_path / "autonmi", rec, reference("fixture_llm_refills")) == []
-    assert_three_agents_per_campaign(tmp_path / "autonmi", rec)
+    assert_agents_per_campaign(tmp_path / "autonmi", rec)
     live = rec["speed"]["agents_live"]
     if "--workers" in args:
         assert rec["autonmi"]["workers_per_population"] == int(args[args.index("--workers") + 1])
     if "max_live" in knobs.get("agents", {}):
-        cap = 3 * knobs["agents"]["max_live"] * int(args[1])   # per population
+        cap = 5 * knobs["agents"]["max_live"] * int(args[1])   # per population
         assert live["max"] <= cap and live["all_live_s"] == 0.0, live
     if "--stagger-batch" in args:
         assert live["ramp_up_s"] >= 1.5, live     # one campaign per batch: 9 intervals per population
@@ -679,40 +808,46 @@ def test_the_campaigns_results_do_not_depend_on_their_layout(tmp_path, layout):
         if together["on"]:
             assert together["begin_margin_s"] >= 0 and together["coordinator_wait_s"]["n"] == 20, together
             rows = app_rows(tmp_path / "autonmi")
-            for c in {r["campaign"] for r in rows}:   # a batch is a campaign's three agents, not one
+            for c in {r["campaign"] for r in rows}:   # a batch is a campaign's five agents, not one
                 t = [r["t_start"] for r in rows if r["campaign"] == c]
                 assert max(t) - min(t) < 0.1, (c, t)
-            assert live["max"] == 60 and live["all_live_s"] > 0, live
+            assert live["max"] == 100 and live["all_live_s"] > 0, live
         else:
             assert together["begin_margin_s"] < -1 and together["coordinator_wait_s"]["n"] == 0, together
-            assert live["max"] < 60 and live["all_live_s"] == 0.0, live
+            assert live["max"] < 100 and live["all_live_s"] == 0.0, live
 
 
-@pytest.mark.parametrize("role", ("generator", "evaluator"))
+@pytest.mark.parametrize("role", ("generator", "evaluator", "monitor"))
 def test_an_agent_that_fails_ends_its_campaign_alone(tmp_path, role):
-    """A Generator that fails at its second population, after its refill call, or an Evaluator that fails before
-    its second results (the test hook FUSION_AUTONMI_FAIL): its campaign is one error line, written once, with the
-    failing role and every role's model calls (by then the Generator's refill, whichever role failed); the other
-    two end with an error instead of waiting, and the 19 other campaigns end as in the reference. The run ends on
-    its own (no hang) and fails, as a run with a failed campaign does."""
-    env = {**os.environ, "FUSION_AUTONMI_FAIL": f"a3/{role}:1"}
-    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs",
-              knob_file(tmp_path, fixture_knobs("llm refills, one random stream, all live")), env=env, code=1)
+    """A Generator that fails at its second population, after its refill call, an Evaluator that fails before
+    its second results, or a Monitor, the campaign's only slot, that fails before its report of generation 1's
+    first candidate, with its other candidates still on the queue (the test hook FUSION_AUTONMI_FAIL; a Monitor
+    is named by its call id): its campaign is one error line, written once, with the failing role and every
+    role's model calls (by then the Generator's refill, whichever role failed); the others end with an error
+    instead of waiting, and the 19 other campaigns end as in the reference. The run ends on its own (no hang)
+    and fails, as a run with a failed campaign does."""
+    slots, agent, at = (1, "monitor0", "g1c0") if role == "monitor" else (2, role, "1")
+    env = {**os.environ, "FUSION_AUTONMI_FAIL": f"a3/{agent}:{at}"}
+    knobs = {**fixture_knobs("llm refills, one random stream, all live"), "campaign": {"slots": slots}}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs),
+              env=env, code=1)
     out, ref = tmp_path / "autonmi", reference("fixture_llm_refills")
     errors = [r for r in lines_of(out) if "error" in r]
     assert [(r["agent_id"], r["role"]) for r in errors] == [("a3", role)]
-    assert "InjectedFailure" in errors[0]["error"] and f"a3/{role}" in errors[0]["error"]
+    assert "InjectedFailure" in errors[0]["error"] and f"a3/{agent}" in errors[0]["error"]
     assert [c["role"] for c in errors[0]["llm_call_details"]] == ["generator"]   # the refill; no summary yet
     assert (rec["status"], rec["counts"]["agents"], rec["counts"]["agents_failed"]) == ("fail", 20, 1)
     assert campaign_hashes(out) == {**{k: v for k, v in ref["campaign_sha256"].items() if k != "a3"},
                                     "a3": campaign_hashes(out)["a3"]}
     rows = {r["agent_id"]: r for r in app_rows(out)}
-    assert [rows[f"a3/{x}"]["status"] for x in ROLES] == ["failed"] * 3
-    assert all("CampaignFailed" in rows[f"a3/{x}"]["error"] for x in ROLES if x != role)
-    assert all(r["finished"] for a, r in rows.items() if not a.startswith("a3/")) and len(rows) == 60
+    assert [rows[f"a3/{x}"]["status"] for x in names(slots)] == ["failed"] * (3 + slots)
+    assert all("CampaignFailed" in rows[f"a3/{x}"]["error"] for x in names(slots) if x != agent)
+    assert all(r["finished"] for a, r in rows.items() if not a.startswith("a3/")) and len(rows) == 20 * (3 + slots)
     assert not any(r["messages_left"] for r in rows.values())
-    a3 = [rows[f"a3/{x}"] for x in ROLES]   # each message a3 sent was received or dropped when it failed
+    a3 = [rows[f"a3/{x}"] for x in names(slots)]   # each message a3 sent was received or dropped (the queue's too)
     assert sum(r["messages_sent"] for r in a3) == sum(r["messages_received"] + r["messages_dropped"] for r in a3)
+    if role == "monitor":   # generation 0's 4 and g1c0 ran; generation 1's 3 others, never taken, are its drops
+        assert (rows["a3/monitor0"]["simulations"], rows["a3/monitor0"]["messages_dropped"]) == (5, 3)
     assert rec["autonmi"]["failed_checks"] == ["every_campaign_reports", "every_agent_finishes"]
 
 
@@ -756,6 +891,52 @@ def test_the_mailbox_delivers_each_message_once():
     asyncio.run(check())
 
 
+def test_the_candidate_queue_gives_each_item_to_the_next_taker():
+    """The queue beside the exact keys: a taker that asks first is woken by the put; items wait in order for
+    takers; each item goes to one taker, whichever asks; a taker cancelled while it waits is passed over; the queue
+    is kept only while it holds items or takers; fail(a1) fails a1's takers, now and later, and counts its items not
+    taken as dropped under the queue's key, as left() counts them before."""
+    from fusion_miniapp.layer_autonmi import CampaignFailed, Mailbox
+
+    async def check():
+        box = Mailbox(agents=5)
+        first = asyncio.ensure_future(box.take("a1/monitor0", "candidates"))
+        cancelled = asyncio.ensure_future(box.take("a1/monitor1", "candidates"))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.sleep(0)
+        box.put("a1/generator", "candidates", {"id": "g0c0"})
+        assert await first == {"id": "g0c0"}
+        for i in (1, 2, 3):
+            box.put("a1/generator", "candidates", {"id": f"g0c{i}"})
+        assert box.left() == {"a1/candidates": 3}
+        assert [await box.take(f"a1/monitor{k}", "candidates") for k in (1, 0)] == [{"id": "g0c1"}, {"id": "g0c2"}]
+        box.put("a10/generator", "candidates", None)
+        waiting = asyncio.ensure_future(box.take("a1/monitor1", "candidates"))
+        await asyncio.sleep(0)
+        assert await waiting == {"id": "g0c3"}
+        waiting = asyncio.ensure_future(box.take("a1/monitor1", "candidates"))
+        await asyncio.sleep(0)
+        box.put("a1/generator", "candidates", None)
+        assert await waiting is None
+        box.put("a1/generator", "candidates", {"id": "g1c0"})
+        waiting = asyncio.ensure_future(box.take("a2/monitor0", "candidates"))   # another campaign's queue
+        await asyncio.sleep(0)
+        box.fail("a1", "a1/evaluator failed")
+        box.fail("a2", "a2/evaluator failed")
+        with pytest.raises(CampaignFailed):
+            await waiting
+        with pytest.raises(CampaignFailed):
+            await box.take("a1/monitor0", "candidates")
+        with pytest.raises(CampaignFailed):
+            box.put("a1/generator", "candidates", {})
+        assert box.dropped == {"a1/candidates": 1} and box.left() == {"a10/candidates": 1}
+        assert await box.take("a10/monitor0", "candidates") is None and box.left() == {} and box.queues == {}
+        assert box.sent == {"a1/generator": 6, "a10/generator": 1}
+        assert box.received == {"a1/monitor0": 2, "a1/monitor1": 3, "a10/monitor0": 1}
+    asyncio.run(check())
+
+
 def test_every_id_seen_outside_the_agents_is_the_campaigns(tmp_path):
     """Whichever of campaign a4's agents asks, the evaluate task's agent_id (cold starts, work folders), the
     lookups (the abstract differs for a4 and a4/generator) and the store key of its memory are a4's."""
@@ -766,11 +947,11 @@ def test_every_id_seen_outside_the_agents_is_the_campaigns(tmp_path):
     from fusion_miniapp import tools
     from fusion_miniapp.layer_autonmi import Fusion, Script
 
-    pop = types.SimpleNamespace(index=0, agent_ids=[f"a4/{role}" for role in ROLES], state={}, store=MemoryStore())
+    pop = types.SimpleNamespace(index=0, agent_ids=[f"a4/{name}" for name in names()], state={}, store=MemoryStore())
     script = Script(Fusion(knob_files.base(), "fixture", tmp_path), pop)
     try:
         args = {"params": {}, "candidate_idx": 0, "generation": 0, "seed": 4}
-        assert script.evaluate.prepare("a4/evaluator", "c0", args)["agent_id"] == "a4"
+        assert script.evaluate.prepare("a4/monitor1", "g0c0", args)["agent_id"] == "a4"
         script.remember("a4/coordinator", {"generation": 0})
         assert pop.store.keys() == ["campaign/a4"]
         async def lookups():

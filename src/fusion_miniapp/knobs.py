@@ -1,8 +1,9 @@
 """Knob files: load, validate, presets.
 
-A knob file is YAML with seven sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
+A knob file is YAML with nine sections (see CONTRACT.md). `knobs/smoke.yaml` at the project
 root is the complete base: a preset, then any knob files in order, are merged over it, so a file
-only needs the keys it changes (a machine file under knobs/machines/ sets only the machine's keys). Unknown sections or keys, wrong types and out-of-range values raise KnobError
+only needs the keys it changes (a machine file under knobs/machines/ sets only the machine's keys; the
+hundredk and ignos_shape presets take the knobs newer than them from smoke). Unknown sections or keys, wrong types and out-of-range values raise KnobError
 with the dotted name of the offending knob. This module imports no torch.
 """
 from __future__ import annotations
@@ -82,6 +83,15 @@ SCHEMA = {
     "monitor": {                              # the inner-loop trace (trace.py): added instrumentation, not in IGNOS
         "capture": ("bool",),                 # each evaluation's record carries `trace` (the AUTONMI layer)
         "fixture_trace": ("choice", ("smooth", "hash")),   # --sim fixture: its synthetic trace
+        "weight": ("num", 0, 1),              # the Monitor's m in a result's score (the asynchronous mode, not built yet)
+    },
+    "campaign": {                             # the AUTONMI layer: each campaign's Monitor slots and candidate queue
+        "slots": ("int", 1, None),            # Monitor agents per campaign, so 3 + slots hosted agents
+        "mode": ("choice", ("generations",)),  # generations: the parent's generation barrier, as IGNOS
+        "warmup": ("int", 1, None),           # traces the good and the bad side each hold before m is not 0
+    },
+    "record": {
+        "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers); false: counts only
     },
 }
 

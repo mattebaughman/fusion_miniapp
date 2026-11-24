@@ -3,15 +3,17 @@
     python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json [--tol 0.25]
 
 Results must agree: the counts and the knobs other than the machine's own (sim.device, sim.work_root,
-sim.threads_per_worker, workers.sim_workers; agents.per_process, max_live and start_together: the layout) and
-the model service's (llm.stub_latency_s, llm.max_in_flight, llm.admission_tokens) and the Monitor's trace
-(monitor.capture, monitor.fixture_trace: no result reads it), and the campaigns. A record
-older than a knob ran with the value ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
+sim.threads_per_worker, workers.sim_workers; agents.per_process, max_live and start_together, and
+campaign.slots: the layout) and the model service's (llm.stub_latency_s, llm.max_in_flight,
+llm.admission_tokens) and the Monitor's trace (monitor.capture, monitor.fixture_trace: no result reads it)
+and record.extras (what the record writes), and the campaigns. A record older than a knob ran with the value
+ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
 once. Otherwise each campaign in the two neighbouring agents.jsonl files is compared by agent_id: ids,
 booleans, strings (selection basis) and integers (generations, counts, candidate numbers) exactly, floats
 within --rtol/--atol (macOS and Linux, or CPU and GPU, differ in the last digits). Without the agents files,
 unlike digests are unverifiable and fail. Suspensions are compared only between runs of the same layer
-(Academy has none). Speed numbers are compared within --tol and reported, never failed on.
+(Academy has none), and on the AUTONMI layer not between a record from before its Monitor slots and one
+from after (same_suspensions). Speed numbers are compared within --tol and reported, never failed on.
 Exit 0 when the results agree.
 """
 from __future__ import annotations
@@ -24,10 +26,13 @@ from pathlib import Path
 
 MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_worker"), ("workers", "sim_workers"),
                  ("agents", "per_process"), ("agents", "max_live"), ("agents", "start_together"),   # the layout
+                 ("campaign", "slots"),   # the layout too: in the generations mode the Monitor slots change no result
                  ("llm", "stub_latency_s"), ("llm", "max_in_flight"), ("llm", "admission_tokens"),   # the model's
-                 ("monitor", "capture"), ("monitor", "fixture_trace")}   # the trace, which no result reads
+                 ("monitor", "capture"), ("monitor", "fixture_trace"),   # the trace, which no result reads
+                 ("record", "extras")}   # what the record writes
 # knobs newer than some records, with the value those records ran with
-ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False}
+ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False, ("campaign", "mode"): "generations",
+               ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25}
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",
                 "candidates_by_source", "refill_slots", "sim_tasks", "memory_writes", "reports", "feasible_agents")
 SPEED = (("campaigns_live", "max"), ("campaigns_live", "mean"), ("agent_phase_s",), ("rates_per_s", "evaluations"),
@@ -100,6 +105,14 @@ def _verify(rec: dict, lines) -> list[str]:
     return out
 
 
+def same_suspensions(a: dict, b: dict) -> bool:
+    """Whether two runs suspend alike: the same layer and, on the AUTONMI layer, both from before the Monitor
+    slots or both from after (2026-11-24: one suspension per generation before, one per inner loop after; a
+    record from before has no `campaign` knobs)."""
+    return a.get("agent_layer") == b.get("agent_layer") and (
+        a.get("agent_layer") != "autonmi" or ("campaign" in a["knobs"]) == ("campaign" in b["knobs"]))
+
+
 def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, rtol: float = 1e-6,
             atol: float = 1e-9) -> dict:
     """{"results": [differences that fail], "speed": [measurements apart by more than tol]}. agents_a/b:
@@ -117,7 +130,7 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
                     (("first", a, agents_a), ("second", b, agents_b)) for p in _verify(rec, lines)]
         bad += [f"results_sha256 differs and {p}: unverifiable" for p in problems] or \
             compare_campaigns(agents_a, agents_b, rtol, atol)
-    if a.get("agent_layer") == b.get("agent_layer") and a["counts"].get("suspensions") != b["counts"].get("suspensions"):
+    if same_suspensions(a, b) and a["counts"].get("suspensions") != b["counts"].get("suspensions"):
         bad.append(f"counts.suspensions: {a['counts'].get('suspensions')} != {b['counts'].get('suspensions')}")
     for k in EXACT_COUNTS:
         if a["counts"].get(k) != b["counts"].get(k):

@@ -6,20 +6,24 @@
     python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --populations 2 --workers 16 ...
 
 Every campaign is the same three roles as in the other two layers (decide.py's Coordinator, Generator
-and Evaluator), with the same messages in the same order, so its result is the same: `results_sha256`
-equals the other layers' for the same knobs. What runs them is AUTONMI's:
+and Evaluator), with Monitor slots that run the Evaluator's inner loops, and the parent's whole-generation
+selection on the inner loop's numbers alone, so its result is the same: `results_sha256` equals the other
+layers' for the same knobs, at any campaign.slots. What runs them is AUTONMI's:
 - The mini-app is an AsyncFlow application. Its campaigns are split into populations (`--populations`;
   by default one per agent process of run.py, or the next count up that divides the campaigns: layout),
   each an AsyncFlow node with an engine of its own for its simulations, a fleet for its model calls, and
   Flowgentic's agent host. Locally the populations run in this process; under Dragon (`--runtime dragon`)
   each is a Dragon process, its simulations run on RHAPSODY's native Dragon backend, and the store is RaDEX.
-- A campaign is three AUTONMI scripted agents (`Script`), a<i>/coordinator, a<i>/generator and
-  a<i>/evaluator, each with its own state, model calls, lookups and row, talking only through messages
-  (`Mailbox`, one per population). The Evaluator's P evaluations are one fan-out of suspending `evaluate`
-  task tools: it is saved and dropped until all P end, the parent's generation barrier, as in the LangGraph
-  layer. The Generator's model call is awaited inside its step, as decide.generator_step is written. All
-  three stay live until their campaign ends; with agents.start_together none begins generation 0 until
-  every agent of its population has started. Every id seen outside the agents is the campaign's, a<i>.
+- A campaign is 3 + campaign.slots AUTONMI scripted agents (`Script`): a<i>/coordinator, a<i>/generator,
+  a<i>/evaluator and the Monitor slots a<i>/monitor0, a<i>/monitor1, ..., each with its own state, model
+  calls, lookups and row, talking only through messages (`Mailbox`, one per population). The Generator puts
+  each generation's candidates on the campaign's candidate queue; a free Monitor takes the next one, runs
+  its inner loop as one suspending `evaluate` task tool (saved and dropped until it ends), scores its trace
+  (monitor.py) and reports to the Evaluator, which passes the generation's results on in candidate order:
+  the parent's generation barrier, as in the LangGraph layer. The Generator's model call is awaited inside
+  its step, as decide.generator_step is written. All stay live until their campaign ends; with
+  agents.start_together none begins generation 0 until every agent of its population has started. Every id
+  seen outside the agents is the campaign's, a<i>.
 - Model calls go through Flowgentic's fleet: fusion's stub LLM as a transport, or (`--llm openai`) one
   Flowgentic `HTTPTransport` per server of the model job (`--endpoints-file`), which waits out a server
   that goes away instead of retrying (`llm.max_retries` does not apply). The fleet admits at most
@@ -61,14 +65,14 @@ import threading
 import time
 import traceback
 import urllib.request
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from importlib import metadata
 from pathlib import Path
 
 from autonmi import AgentSpec, Campaign, CampaignConfig, Check
 from autonmi.population import PopulationConfig
-from autonmi.scripted import Done, Lookup, Remember, Report, ScriptedAgent, Simulate, SimulateAll
+from autonmi.scripted import Done, Lookup, Remember, Report, ScriptedAgent, Simulate
 from flowgentic.fleet import Reply, Usage
 from flowgentic.host import AgentState, activity, current_agent
 from flowgentic.tools import task_tool
@@ -77,7 +81,7 @@ from radical.asyncflow import WorkflowEngine
 from rhapsody.backends import ConcurrentExecutionBackend
 from wfMiniAPI.api import MiniApp
 
-from fusion_miniapp import decide, knobs as knob_files, record, run, tools, trace
+from fusion_miniapp import decide, knobs as knob_files, monitor, record, run, tools, trace
 from fusion_miniapp.llm import REPLY_TOKENS, StubLLM
 
 # The AUTONMI framework's commit this layer is tested on: origin/MTU-188-framework (its PR #16). An editable
@@ -172,9 +176,20 @@ def bound_full_collections() -> tuple[int, int, int]:
         gc.set_threshold(t[0], t[1], FULL_GC_THRESHOLD)
     return gc.get_threshold()
 
-ROLES = ("coordinator", "generator", "evaluator")   # a campaign's hosted agents, a<i>/<role>, in this order
-AGENTS_PER_CAMPAIGN = len(ROLES)
+ROLES = ("coordinator", "generator", "evaluator", "monitor")   # a campaign's roles; agent_names gives its agents
 FAIL_ENV = "FUSION_AUTONMI_FAIL"   # tests only: "<agent id>:<g>" fails that agent before its generation-g message
+                                   # (a Monitor's g is its candidate's call id, g<g>c<i>: before that report)
+QUEUE = "candidates"   # each campaign's candidate queue: the Generator puts, a free Monitor takes the next
+
+
+def agent_names(knobs: dict) -> list[str]:
+    """A campaign's hosted agents, a<i>/<name>, in this order: its three outer-loop roles, then its Monitor
+    slots monitor0 .. monitor<slots - 1>."""
+    return [*ROLES[:3], *(f"monitor{k}" for k in range(knobs["campaign"]["slots"]))]
+
+
+def agents_per_campaign(knobs: dict) -> int:
+    return 3 + knobs["campaign"]["slots"]
 
 
 def campaign_of(agent_id: str) -> str:
@@ -182,13 +197,22 @@ def campaign_of(agent_id: str) -> str:
     return agent_id.partition("/")[0]
 
 
+def role_of(agent_id: str) -> str:
+    """A hosted agent's role (a3/monitor1 -> monitor)."""
+    return agent_id.rpartition("/")[2].rstrip("0123456789")
+
+
 def messages(knobs: dict) -> dict:
-    """The messages each role sends and receives in one campaign of G generations: each generation the
-    Coordinator sends make/g and evaluate/g, the Generator population/g and the Evaluator results/g; at the
-    end the Coordinator sends done to the other two. 4G + 2 in all."""
-    G = knobs["outer"]["generations"]
-    return {"coordinator": {"sent": 2 * G + 2, "received": 2 * G}, "generator": {"sent": G, "received": G + 1},
-            "evaluator": {"sent": G, "received": G + 1}}
+    """The messages each role sends and receives in one campaign of G generations of P candidates, with S
+    Monitor slots (the Monitors' together): each generation the Coordinator sends make/g, the Generator
+    population/g and the generation's P candidates on the campaign's queue, each Monitor that takes one a
+    report, and the Evaluator results/g; at the end the Coordinator sends done to the Generator and the
+    Evaluator, and the Generator puts one stop on the queue for each Monitor. 3G + 2 + 2PG + S in all."""
+    G, P, S = knobs["outer"]["generations"], knobs["outer"]["population"], knobs["campaign"]["slots"]
+    return {"coordinator": {"sent": G + 2, "received": 2 * G},
+            "generator": {"sent": G + P * G + S, "received": G + 1},
+            "evaluator": {"sent": G, "received": P * G + 1},
+            "monitor": {"sent": P * G, "received": P * G + S}}
 
 
 class CampaignFailed(RuntimeError):
@@ -199,23 +223,36 @@ class InjectedFailure(RuntimeError):
     """FAIL_ENV's failure (tests only)."""
 
 
+class _Queue:
+    """A campaign's queue: its items in the order put, and its takers waiting, in the order they asked."""
+
+    __slots__ = ("items", "waiting")
+
+    def __init__(self) -> None:
+        self.items: deque[str] = deque()
+        self.waiting: deque[asyncio.Future] = deque()
+
+
 class Mailbox:
     """The messages between one population's agents (locally every population runs in one process, so one
     per population, in pop.state). A message is a JSON copy, as between processes, kept under its exact key
     <campaign>/<to>/<kind>/<g> in an asyncio future: `send` resolves it (making it, when the receiver has not
     asked yet), `receive` awaits it and deletes it. A second send of a key not yet received raises (a send
-    after its receipt would stay in the box, which rows() reports). A waiting agent awaits inside its own
-    step, counted by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken once, never polled.
-    `fail(campaign)` fails that campaign's waits, now and later, and drops its messages not yet received
-    (counted per receiver in `dropped`). With agents.start_together, `all_started` is set when every agent
-    of the population has started."""
+    after its receipt would stay in the box, which rows() reports). Beside the exact keys, each campaign has
+    queues <campaign>/<kind>: `put` adds an item, `take` gives the next one to whichever agent asks (the
+    first that waits), so the sender addresses no one. A waiting agent awaits inside its own step, counted
+    by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken once, never polled. `fail(campaign)` fails
+    that campaign's waits, now and later, and drops its messages not yet received (counted per receiver in
+    `dropped`, a queue's under its own key). With agents.start_together, `all_started` is set when every
+    agent of the population has started."""
 
     def __init__(self, agents: int) -> None:
         self.agents, self.started, self.all_started = agents, 0, asyncio.Event()
         self.box: dict[str, asyncio.Future] = {}
+        self.queues: dict[str, _Queue] = {}   # <campaign>/<kind>, while it holds items or takers
         self.failed: dict[str, str] = {}   # campaign -> why
         self.sent, self.received, self.waited = Counter(), Counter(), Counter()   # per agent; waited: seconds
-        self.dropped = Counter()   # per receiving agent: messages sent but not received when its campaign failed
+        self.dropped = Counter()   # per receiving agent (or queue): messages not received when its campaign failed
 
     def start(self) -> None:
         self.started += 1
@@ -253,6 +290,45 @@ class Mailbox:
         self.received[me] += 1
         return json.loads(text)
 
+    def put(self, sender: str, kind: str, value) -> None:
+        """An item on the sender's campaign's queue <campaign>/<kind>: to its first waiting taker, else kept."""
+        campaign = campaign_of(sender)
+        if campaign in self.failed:
+            raise CampaignFailed(self.failed[campaign])
+        key = f"{campaign}/{kind}"
+        q = self.queues.get(key) or self.queues.setdefault(key, _Queue())
+        text = json.dumps(value, default=str)
+        while q.waiting:
+            f = q.waiting.popleft()
+            if not f.done():   # (one cancelled, as when the run is interrupted, is passed over)
+                f.set_result(text)
+                break
+        else:
+            q.items.append(text)
+        self.sent[sender] += 1
+
+    async def take(self, me: str, kind: str):
+        """The next item of my campaign's queue <campaign>/<kind>, waiting for one if there is none."""
+        campaign = campaign_of(me)
+        if campaign in self.failed:
+            raise CampaignFailed(self.failed[campaign])
+        key, t = f"{campaign}/{kind}", time.perf_counter()
+        q = self.queues.get(key) or self.queues.setdefault(key, _Queue())
+        try:
+            if q.items:
+                text = q.items.popleft()
+            else:
+                f = asyncio.get_running_loop().create_future()
+                q.waiting.append(f)
+                with activity(AgentState.TOOL_WAIT):
+                    text = await f
+        finally:
+            self.waited[me] += time.perf_counter() - t
+        if not q.items and not q.waiting and self.queues.get(key) is q:   # empty: kept only while in use
+            del self.queues[key]
+        self.received[me] += 1
+        return json.loads(text)
+
     def fail(self, campaign: str, why: str) -> None:
         if campaign in self.failed:
             return
@@ -263,10 +339,19 @@ class Mailbox:
                 f.set_exception(CampaignFailed(why))
             else:              # sent, never received
                 self.dropped[key.rsplit("/", 2)[0]] += 1
+        for key in [k for k in self.queues if k.startswith(campaign + "/")]:
+            q = self.queues.pop(key)
+            for f in q.waiting:
+                if not f.done():
+                    f.set_exception(CampaignFailed(why))
+            if q.items:
+                self.dropped[key] += len(q.items)
 
     def left(self) -> Counter:
-        """Messages never received, per receiving agent."""
-        return Counter(key.rsplit("/", 2)[0] for key in self.box)
+        """Messages never received, per receiving agent; a queue's items never taken under the queue's key."""
+        out = Counter(key.rsplit("/", 2)[0] for key in self.box)
+        out.update({key: len(q.items) for key, q in self.queues.items() if q.items})
+        return out
 
 
 class EvaluateArgs(BaseModel):
@@ -368,12 +453,12 @@ class Fusion:
         self.live: Counter = Counter()   # agents started and ended in this process (LiveLine)
 
     def agents(self):
-        """Each campaign's three agents, one after another (AUTONMI cuts this list into contiguous
+        """Each campaign's agents (agent_names), one after another (AUTONMI cuts this list into contiguous
         populations, which layout() keeps on campaign boundaries)."""
-        first = self.knobs["agents"]["first"]   # as the other layers: campaign a<i>, seed i
+        first, names = self.knobs["agents"]["first"], agent_names(self.knobs)   # as the other layers: a<i>, seed i
         for i in range(first, first + self.knobs["agents"]["count"]):
-            for role in ROLES:
-                yield AgentSpec(f"a{i}/{role}", {"seed": i})
+            for name in names:
+                yield AgentSpec(f"a{i}/{name}", {"seed": i})
 
     def services(self, run_dir: Path, servers: int = 1) -> tuple[list, list[str]]:
         return [], []   # no MCP servers: the lookups run in the campaign's process (tools.lookup)
@@ -399,10 +484,12 @@ class Fusion:
     def rows(self, pop) -> list[dict]:
         """At the population's end, in its process: one row per hosted agent, with its role and campaign,
         whether it ended normally (`finished`; a Coordinator only once its campaign reported), the evaluations
-        it submitted (the Evaluator's, all of which end before it goes on: AUTONMI checks them against the
+        it submitted (a Monitor's, each of which ends before it goes on: AUTONMI checks them against the
         tasks its engine completed), its lookups, its messages sent, received, left unreceived and dropped
         when its campaign failed, and its seconds waiting for messages; the Coordinator's also its wait for
-        every agent to start and when it began its campaign (`t_begin`, after that wait)."""
+        every agent to start and when it began its campaign (`t_begin`, after that wait); a Monitor's also
+        its slot, the inner-loop traces it got (monitor.capture) and the reports it sent. The campaign's
+        candidate queue is its Monitors' inbox: what is left on it, or dropped, counts as its first slot's."""
         sc = pop.state.get("script")
         if sc is None:   # the population ended before its agents were built
             return [{"agent_id": a, "finished": False, "simulations": 0, "population": pop.index}
@@ -410,7 +497,7 @@ class Fusion:
         sc.lines.close()
         mail, left, out = sc.mail, sc.mail.left(), []
         for a in pop.agent_ids:
-            campaign, role = campaign_of(a), a.rpartition("/")[2]
+            campaign, role = campaign_of(a), role_of(a)
             row = {"agent_id": a, "campaign": campaign, "role": role, "finished": a in sc.finished,
                    "simulations": sc.sims.get(a, 0), "population": pop.index, "lookups": sc.lookups_made[a],
                    "messages_sent": mail.sent[a], "messages_received": mail.received[a], "messages_left": left[a],
@@ -418,23 +505,34 @@ class Fusion:
             if role == "coordinator":   # the campaign's model calls by its own count (decide.finish)
                 row.update(llm_calls=sc.llm_calls.get(campaign), start_wait_s=sc.start_wait.get(a),
                            t_begin=sc.began.get(a))
-            elif role == "evaluator":   # the inner-loop traces it kept (monitor.capture)
-                row["traces"] = sc.traced[a]
+            elif role == "monitor":
+                slot = int(a.rpartition("/")[2][len(role):])
+                row.update(slot=slot, traces=sc.traced[a], reports=sc.reports[a])
+                if slot == 0:
+                    queue = f"{campaign}/{QUEUE}"
+                    row["messages_left"] += left[queue]
+                    row["messages_dropped"] += mail.dropped[queue]
             out.append(row)
         return out
 
     def verify(self, rows: list[dict], store) -> list[Check]:
         """AUTONMI's checks of the campaigns' agents; the run record checks their results (touches, the model).
         Per role, exactly: evaluations, model calls (AUTONMI's count of each agent's calls: the Coordinator's
-        summary, the Generator's refills as many as its campaign counted, none by the Evaluator), lookups and
-        messages; every message received (none left); the lookups against AUTONMI's own count; and the store
-        at the end: no agent's saved state (ScriptRunner's script/p<index>/<agent>, kept while it is
+        summary, the Generator's refills as many as its campaign counted, none by the Evaluator or the
+        Monitors), lookups and messages, the Monitors' together per campaign (which slot takes which candidate
+        is the queue's), and each Monitor one evaluation, one report and one message sent per candidate it
+        took; every message received (none left); the lookups against AUTONMI's own count; and the store at
+        the end: no agent's saved state (ScriptRunner's script/p<index>/<agent>, kept while it is
         suspended), and each reported campaign's memory under its campaign id, campaign/a<i>."""
         n, exp, msgs = self.knobs["agents"]["count"], decide.expected_by_role(self.knobs), messages(self.knobs)
         coordinators = {r["campaign"]: r for r in rows if r.get("role") == "coordinator"}
+        slots = self.knobs["campaign"]["slots"]
 
         def planned(r: dict) -> bool:
             e, m = exp[r["role"]], msgs[r["role"]]
+            if r["role"] == "monitor":   # its share, whichever candidates it took
+                return (r["simulations"] == r["reports"] == r["messages_sent"] == r["messages_received"] - 1
+                        and r["model_calls"] == r["lookups"] == 0)
             calls = {"coordinator": 1, "evaluator": 0,
                      "generator": (coordinators[r["campaign"]].get("llm_calls") or 0) - 1}[r["role"]]
             return (r["simulations"] == e["sims"] and r["model_calls"] == calls <= e["llm_calls"]
@@ -442,6 +540,15 @@ class Fusion:
                     (m["sent"], m["received"]))
         done = [r for r in rows if r["finished"]]
         off = [r["agent_id"] for r in done if not planned(r)]
+        monitors: dict[str, list] = {}
+        for r in done:
+            if r["role"] == "monitor":
+                monitors.setdefault(r["campaign"], []).append(r)
+        e, m = exp["monitor"], msgs["monitor"]
+        for rs in monitors.values():   # a campaign whose Monitors all finished: together, its P x G candidates
+            total = [sum(r[k] for r in rs) for k in ("simulations", "messages_sent", "messages_received")]
+            if len(rs) == slots and total != [e["sims"], m["sent"], m["received"]]:
+                off += [r["agent_id"] for r in rs]
         finished = {role: sum(r["finished"] for r in rows if r.get("role") == role) for role in ROLES}
         runners = [Path(self.out) / "populations" / f"p{i:03d}" / "population.json"
                    for i in sorted({r["population"] for r in rows})]
@@ -453,8 +560,8 @@ class Fusion:
         memories = sum(store.contains(f"campaign/{c}") for c in reported)
         return [Check("every_campaign_reports", finished["coordinator"] == n,
                       {"reported": finished["coordinator"], "campaigns": n}),
-                Check("every_agent_finishes", sum(finished.values()) == AGENTS_PER_CAMPAIGN * n,
-                      {"finished": finished, "per_role": n}),
+                Check("every_agent_finishes", sum(finished.values()) == agents_per_campaign(self.knobs) * n,
+                      {"finished": finished, "campaigns": n, "agents_per_campaign": agents_per_campaign(self.knobs)}),
                 Check("evaluations_and_model_calls_as_planned", not off,
                       {"per_campaign": exp, "messages": msgs, "not_as_planned": off[:10]}),
                 Check("every_message_received", not any(r.get("messages_left") for r in rows),
@@ -465,50 +572,62 @@ class Fusion:
 
 
 class Script:
-    """One population's campaigns as AUTONMI scripted agents (autonmi.scripted), three per campaign:
-    decide.py's Coordinator, Generator and Evaluator, each a hosted agent of its own (a<i>/<role>) with its
-    own state, model calls (under its own id) and lookups, which talks to the other two only through the
-    population's Mailbox. One generation g:
+    """One population's campaigns as AUTONMI scripted agents (autonmi.scripted), 3 + campaign.slots per
+    campaign: decide.py's Coordinator, Generator and Evaluator, and the Monitor slots, each a hosted agent of
+    its own (a<i>/<name>: agent_names) with its own state, model calls (under its own id) and lookups, which
+    talks to the others only through the population's Mailbox. One generation g (campaign.mode generations):
 
         Coordinator -> Generator    make/g        initialize (g = 0, with the constraints lookup) or repopulate
         Generator -> Coordinator    population/g  decide.generator_step: in llm mode, its refill call
-        Coordinator -> Evaluator    evaluate/g
-        Evaluator                   the P evaluations at once (SimulateAll): suspended until all end
-        Evaluator -> Coordinator    results/g     the Coordinator's selection, best-so-far and log; its memory
+        Generator -> the queue      P candidates  decide.evaluation_calls, on the campaign's candidate queue
+        Monitor (each free slot)    the next candidate: its inner loop as one evaluation, suspended until it
+                                    ends; its trace scored (monitor.py)
+        Monitor -> Evaluator        report/<call> the result and the Monitor's numbers
+        Evaluator -> Coordinator    results/g     the P results in candidate order, once all have arrived (the
+                                    barrier): the Coordinator's selection, best-so-far and log; its memory
 
-    then make/g+1, or after the last generation the Coordinator's summary call, done/G to the other two,
-    and its Report. The Generator makes the abstract lookup when it starts (decide.LOOKUP_ROLE); the
-    Coordinator makes the constraints lookup, after waiting (agents.start_together) for every agent of the
-    population to start. The others end on done, so all three stay live until their campaign ends.
+    then make/g+1, or after the last generation the Coordinator's summary call, done/G to the Generator and
+    the Evaluator, and its Report; the Generator then puts one stop on the queue for each Monitor. The
+    Generator makes the abstract lookup when it starts (decide.LOOKUP_ROLE); the Coordinator makes the
+    constraints lookup, after waiting (agents.start_together) for every agent of the population to start.
+    The others end on done or their stop, so all stay live until their campaign ends. The Generator never
+    addresses a Monitor, and no candidate passes through the Coordinator.
 
     Every id seen outside the agents is the campaign's, a<i>: the stub's key, the evaluations' agent_id
     (their cold starts and work folders), the lookups, the store key, the campaign's folder and its line
     (its result, or its error), which goes to the population's agents-p<index>.jsonl.
 
-    With monitor.capture each evaluation's record carries its inner-loop trace (trace.py). The Evaluator
-    takes the traces out of the results before it sends them, so decide.py (whose collect refuses a trace),
-    the parent's files and the campaign's line never see one. `traces` (campaign -> generation -> the P
-    traces, in candidate order) indexes them for the Monitor until the campaign's Evaluator ends. Popping it
-    frees no memory: AsyncFlow and RHAPSODY keep each evaluate task's returned record, and RHAPSODY a text
-    copy of it (its `stdout`), until the population ends, so the traces are held per population."""
+    With monitor.capture each evaluation's record carries its inner-loop trace (trace.py). The Monitor
+    takes it out of the result before it reports, so decide.py (whose collect refuses a trace), the parent's
+    files and the campaign's line never see one. `stats` holds each live campaign's trace statistics
+    (monitor.Rolling), which its Monitors score against and hold their traces in; at the barrier the
+    Evaluator labels the generation's traces good or bad and adds them (`_label`). The Monitor's numbers
+    change no result in this mode:
+    selection is the parent's, on the inner loop's numbers alone. AsyncFlow and RHAPSODY keep each evaluate
+    task's returned record, trace included, and RHAPSODY a text copy of it (its `stdout`), until the
+    population ends, so the traces are held per population."""
 
     def __init__(self, definition: Fusion, pop) -> None:
         self.knobs, self.sim, self.out, self.pop = definition.knobs, definition.sim, definition.out, pop
         self.live = definition.live
         self.send_budget = self.knobs["llm"].get("send_thinking_budget", True)
         self.G, self.roles = self.knobs["outer"]["generations"], decide.expected_by_role(self.knobs)
+        self.P, self.slots = self.knobs["outer"]["population"], self.knobs["campaign"]["slots"]
+        self.extras = self.knobs["record"]["extras"]
         self.together = self.knobs["agents"]["start_together"]
         self.mail = Mailbox(len(pop.agent_ids))
         self.calls: dict[str, list] = {}    # each campaign's model calls, until its line is written
-        self.sims: Counter = Counter()      # the evaluations each Evaluator submitted
+        self.sims: Counter = Counter()      # the evaluations each Monitor submitted
         self.lookups_made: Counter = Counter()
         self.reported: set[str] = set()     # campaigns
         self.finished: set[str] = set()     # agents that ended normally
         self.llm_calls: dict[str, int] = {}   # each reported campaign's n_llm_calls
         self.start_wait: dict[str, float] = {}   # each Coordinator's wait for every agent to start
         self.began: dict[str, float] = {}        # when each Coordinator began its campaign (time.time())
-        self.traces: dict[str, dict[int, list]] = {}   # each live campaign's traces, by generation
-        self.traced: Counter = Counter()         # the traces each Evaluator kept
+        self.stats: dict[str, monitor.Rolling] = {}   # each live campaign's trace statistics
+        self.numbers: dict[str, list] = {}       # each campaign's per-candidate Monitor numbers (record.extras)
+        self.traced: Counter = Counter()         # the traces each Monitor got
+        self.reports: Counter = Counter()        # the reports each Monitor sent
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
@@ -520,7 +639,7 @@ class Script:
                                                      "agent_id": campaign_of(agent_id)})
 
     def agent(self) -> ScriptedAgent:
-        """One definition for all three roles (AUTONMI has one per population), so one model-call limit: the
+        """One definition for all the roles (AUTONMI has one per population), so one model-call limit: the
         largest role's. verify() checks each role's exact count."""
         return ScriptedAgent(start=self.start, step=self.step, simulate=self.evaluate, lookup=self.lookup,
                              remember=self.remember, report=self.report, on_call=self.on_call,
@@ -532,16 +651,16 @@ class Script:
         """An agent's first state, when the host starts it."""
         self.live["started"] += 1
         self.mail.start()
-        role = agent_id.rpartition("/")[2]
+        role = role_of(agent_id)
         s = {"agent_id": agent_id, "campaign": campaign_of(agent_id), "role": role, "seed": spec["seed"]}
-        if role == "evaluator":
-            return {**s, "phase": "waiting", "g": 0}
+        if role in ("evaluator", "monitor"):
+            return {**s, "phase": "waiting"}
         return {**s, "phase": "start" if role == "coordinator" else "look", "t_start": time.time(),
                 "todo": self.roles[role]["lookups"], "ctx": {}}
 
     async def step(self, s: dict, event, ask):
         return await {"coordinator": self._coordinator, "generator": self._generator,
-                      "evaluator": self._evaluator}[s["role"]](s, event, ask)
+                      "evaluator": self._evaluator, "monitor": self._monitor}[s["role"]](s, event, ask)
 
     async def _coordinator(self, s: dict, event, ask):
         me, campaign, phase = s["agent_id"], s["campaign"], s["phase"]
@@ -582,14 +701,15 @@ class Script:
         self._send(me, "generator", "make", g, msg)
         reply = await self.mail.receive(me, "population", g)
         cst = {**cst, "n_tool_calls": cst["n_tool_calls"] + reply.get("lookups", 0)}
-        cst, msg = decide.on_population(cst, reply)
-        self._send(me, "evaluator", "evaluate", g, msg)
+        cst, _ = decide.on_population(cst, reply)   # its candidates go to the Monitors from the Generator
         results = await self.mail.receive(me, "results", g)
         cst, nxt = decide.on_evaluated(cst, results, self.knobs, run_dir)
         return _state(s, "remembering", cst=cst, next=nxt), Remember(decide.memory(cst))
 
     async def _generator(self, s: dict, event, ask):
-        """Its lookups, then each generation's population on make/g (decide.generator_step), then done."""
+        """Its lookups, then each generation's population on make/g (decide.generator_step), to the
+        Coordinator, and its candidates on the campaign's queue (`t0`: when they were put there); on done,
+        one stop on the queue for each Monitor slot."""
         me, campaign, todo, ctx = s["agent_id"], s["campaign"], s["todo"], s["ctx"]
         if event is not None:
             todo, ctx = todo[1:], {**ctx, todo[0]: event}
@@ -603,31 +723,83 @@ class Script:
                 msg = {**msg, "context": {**msg.get("context", {}), **ctx}}
             gst, reply = await decide.generator_step(gst, msg, self.knobs, ask_model)
             self._send(me, "coordinator", "population", g, {**reply, "lookups": len(ctx)} if g == 0 else reply)
+            t0 = time.time()
+            for call in decide.evaluation_calls(reply["population"], g):
+                self.mail.put(me, QUEUE, {**call, "t0": t0})
+        await self.mail.receive(me, "done", self.G)
+        for _ in range(self.slots):
+            self.mail.put(me, QUEUE, None)
+        return s, Done()
+
+    async def _monitor(self, s: dict, event, ask):
+        """A Monitor slot: the next candidate on its campaign's queue, its inner loop as one evaluation (the
+        call decide.evaluation_calls names, as the Evaluator submitted it before: the same results),
+        suspended until it ends; then its trace, taken out of the result, scored against the campaign's
+        statistics and held there for the barrier's label; its report (the result, `t0` and the numbers) to
+        the Evaluator; then the next candidate, until its stop."""
+        me, campaign = s["agent_id"], s["campaign"]
+        if s["phase"] == "running":   # resumed: its candidate's inner loop ended
+            if campaign in self.mail.failed:
+                raise CampaignFailed(self.mail.failed[campaign])
+            call = s["call"]
+            (result,), (tr,) = trace.split([event])
+            numbers = None
+            if tr is not None:
+                self.traced[me] += 1
+                stats = self.stats.get(campaign) or self.stats.setdefault(
+                    campaign, monitor.Rolling(self.knobs["campaign"]["warmup"], self.P))
+                x = monitor.steps(tr)
+                stats.hold(call["generation"], call["candidate_idx"], x, bool(tr["synthetic"]))
+                numbers = stats.score(x)
+            self._send(me, "evaluator", "report", call["id"], {"result": result, "t0": call["t0"], "numbers": numbers})
+            self.reports[me] += 1
+        call = await self.mail.take(me, QUEUE)
+        if campaign in self.mail.failed:   # it failed after the item reached me: start no inner loop for it
+            raise CampaignFailed(self.mail.failed[campaign])
+        if call is None:   # its stop: the campaign has ended
+            return _state(s, "done"), Done()
+        self.sims[me] += 1
+        return _state(s, "running", call={k: call[k] for k in ("id", "generation", "candidate_idx", "t0")}), \
+            Simulate({"params": call["params"], "candidate_idx": call["candidate_idx"],
+                      "generation": call["generation"], "seed": s["seed"]}, call_id=call["id"])
+
+    async def _evaluator(self, s: dict, event, ask):
+        """Each generation's P reports, gathered in candidate order (the barrier); the labels of their traces
+        (`_label`); their results, in candidate order, to the Coordinator (`t0`: when the Generator put them
+        on the queue); after the last generation, done."""
+        me, campaign = s["agent_id"], s["campaign"]
+        for g in range(self.G):
+            reports = [await self.mail.receive(me, "report", f"g{g}c{i}") for i in range(self.P)]
+            results, t0 = [r["result"] for r in reports], min(r["t0"] for r in reports)
+            self._label(campaign, g, results, [r["numbers"] for r in reports])
+            self._send(me, "coordinator", "results", g, {"results": results, "t0": t0, "elapsed_s": time.time() - t0})
         await self.mail.receive(me, "done", self.G)
         return s, Done()
 
-    async def _evaluator(self, s: dict, event, ask):
-        """On evaluate/g, the generation's P evaluations at once, suspended until all end; their results, in
-        candidate order, to the Coordinator; after the last generation, done."""
-        me, g = s["agent_id"], s["g"]
-        if s["phase"] == "evaluating":   # resumed: the generation's evaluations, all ended
-            results, traces = trace.split(event)   # the traces stay here, out of decide's way
-            kept = sum(t is not None for t in traces)
-            if kept:
-                self.traces.setdefault(s["campaign"], {})[g] = traces
-                self.traced[me] += kept
-            self._send(me, "coordinator", "results", g,
-                       {"results": results, "t0": s["t0"], "elapsed_s": time.time() - s["t0"]})
-            g += 1
-        if g == self.G:
-            await self.mail.receive(me, "done", self.G)
-            return s, Done()
-        msg = await self.mail.receive(me, "evaluate", g)
-        calls = decide.evaluation_calls(msg["population"], msg["generation"])
-        self.sims[me] += len(calls)
-        batch = tuple(Simulate({"params": c["params"], "candidate_idx": c["candidate_idx"],
-                                "generation": c["generation"], "seed": s["seed"]}, call_id=c["id"]) for c in calls)
-        return {**s, "phase": "evaluating", "g": g, "t0": time.time()}, SimulateAll(batch)
+    def _label(self, campaign: str, g: int, results: list[dict], numbers: list) -> None:
+        """At generation g's barrier: each held trace joins the campaign's good side when its keep-probability
+        q is 0.5 or more, else the bad side, in candidate order. q is the parent's (decide.keep_probabilities,
+        the generation as select_survivors takes it); for a synthetic trace (the fixture, whose results follow
+        a hash unrelated to the trace) it comes from the trace's own end values (monitor.end_keep), marked
+        synthetic. With record.extras, each candidate's numbers, q and label, for its campaign's line."""
+        stats = self.stats.get(campaign)
+        held = stats.take(g) if stats is not None else {}
+        if not held and not self.extras:
+            return
+        q = decide.keep_probabilities([decide.native(r) for r in results], self.knobs["outer"]["wall_weight"])
+        order = sorted(held)
+        synthetic = [i for i in order if held[i][1]]
+        label_q = dict(zip(synthetic, monitor.end_keep([held[i][0] for i in synthetic])))
+        label = {}
+        for i in order:
+            label[i] = label_q.get(i, q[i]) >= 0.5
+            stats.add(held[i][0], label[i])
+        if self.extras:
+            self.numbers.setdefault(campaign, []).extend(
+                {"generation": g, "candidate_idx": i, "q": round(q[i], 6), **(numbers[i] or {}),
+                 "label": None if i not in label else "good" if label[i] else "bad",
+                 "label_from": None if i not in label else "trace_end_synthetic" if i in label_q else "q"}
+                for i in range(len(results)))
 
     def _send(self, me: str, to: str, kind: str, g: int, value) -> None:
         if self.fail_at == f"{me}:{g}":   # the tests' injected failure (FAIL_ENV)
@@ -672,7 +844,8 @@ class Script:
         campaign = campaign_of(agent_id)
         self.reported.add(campaign)
         self.llm_calls[campaign] = result["n_llm_calls"]
-        self._line({**result, "llm_call_details": self.calls.pop(campaign, [])})
+        extras = {"monitor": self.numbers.pop(campaign, [])} if self.extras else {}   # record.extras: outside the digest
+        self._line({**result, "llm_call_details": self.calls.pop(campaign, []), **extras})
 
     def on_call(self, rec, reply: Reply) -> None:
         """A model call that returned: its details, as run.Services keeps them for the campaign's line, with
@@ -690,18 +863,19 @@ class Script:
     def on_done(self, result, output) -> None:
         """An agent that ended normally is finished. The first of a campaign's agents to fail writes the
         campaign's line, with its error, its role and every role's model calls, as the other layers write a
-        failed campaign; the other two then end with an error (CampaignFailed) instead of waiting. One
+        failed campaign; the others then end with an error (CampaignFailed) instead of waiting. One
         cancelled (the run was interrupted) writes nothing."""
         self.live["ended"] += 1
         campaign = campaign_of(result.id)
-        if result.id.rpartition("/")[2] == "evaluator":   # its campaign's index of traces ends with it
-            self.traces.pop(campaign, None)
+        if role_of(result.id) == "evaluator":   # its campaign's statistics end with it: no trace comes after
+            self.stats.pop(campaign, None)
         if result.status == "done":
             self.finished.add(result.id)
         elif result.status == "failed":
             if campaign not in self.reported and campaign not in self.mail.failed:
                 self._line({"agent_id": campaign, "error": result.error or result.status,
-                            "role": result.id.rpartition("/")[2], "llm_call_details": self.calls.pop(campaign, [])})
+                            "role": role_of(result.id), "llm_call_details": self.calls.pop(campaign, [])})
+                self.numbers.pop(campaign, None)
             self.mail.fail(campaign, f"{result.id} failed: {result.error}")
 
     def _line(self, line: dict) -> None:
@@ -928,13 +1102,13 @@ def _divides(n: int, lo: int, hi: int) -> int | None:
 
 def layout(knobs: dict, sim: str, populations: int | None = None, workers: int | None = None) -> tuple[int, int]:
     """Populations, and simulation workers in each. AUTONMI cuts the agent list into contiguous equal blocks
-    (divmod), so a campaign's three agents stay in one population only when the populations divide the
+    (divmod), so a campaign's agents stay in one population only when the populations divide the
     campaigns: by default (None or 0) the smallest count that does from run.py's agent processes
     (agents.per_process campaigns each) up to twice that, else refused with nearby campaign counts that have
     one; a --populations that does not divide is refused. Workers: by default the population's share of
     workers.sim_workers, which with --sim real must give each one, as run.py requires."""
     n, w = knobs["agents"]["count"], knobs["workers"]["sim_workers"]
-    whole = "a campaign's three agents must stay in one population, and AUTONMI splits the agents into equal blocks"
+    whole = "a campaign's agents must stay in one population, and AUTONMI splits the agents into equal blocks"
     if populations:
         populations = min(populations, n)
         if populations < 1 or n % populations:
@@ -960,7 +1134,7 @@ def layout(knobs: dict, sim: str, populations: int | None = None, workers: int |
 
 def agents_live(knobs: dict) -> int | None:
     """AUTONMI's cap on the hosted agents live at once per population (None: all): agents.max_live keeps its
-    meaning, campaigns, so three agents each. The host starts agents in order and the next only when one ends,
+    meaning, campaigns, so 3 + campaign.slots agents each. The host starts agents in order and the next only when one ends,
     so a cap below one campaign would leave a campaign's first agents waiting for good on peers that cannot
     start, and agents.start_together on any cap would leave every agent waiting for those past it: both are
     refused. With whole campaigns at most one is partly started, and its other agents start as others end."""
@@ -972,9 +1146,9 @@ def agents_live(knobs: dict) -> int | None:
                                    "agent waits until all have started, and with a cap those past it start only as "
                                    "others end")
     if a["max_live"] < 1:
-        raise knob_files.KnobError(f"agents.max_live must hold one campaign ({AGENTS_PER_CAMPAIGN} agents) at least, "
-                                   f"not {a['max_live']}")
-    return AGENTS_PER_CAMPAIGN * a["max_live"]
+        raise knob_files.KnobError(f"agents.max_live must hold one campaign ({agents_per_campaign(knobs)} agents) at "
+                                   f"least, not {a['max_live']}")
+    return agents_per_campaign(knobs) * a["max_live"]
 
 
 def own(out: Path) -> None:
@@ -1053,7 +1227,7 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
             run_dir=str(out), populations=a.populations, runtime=a.runtime,
             population=PopulationConfig(
                 # a campaign's agents start together, so campaigns start as fast as one agent each did
-                workers=a.workers, stagger_batch=AGENTS_PER_CAMPAIGN * a.stagger_batch,
+                workers=a.workers, stagger_batch=agents_per_campaign(knobs) * a.stagger_batch,
                 stagger_interval_s=a.stagger_interval, cap_tokens=k["admission_tokens"],
                 cap_requests=k["max_in_flight"], max_live=agents_live(knobs),
                 executor=executor, model=model),
@@ -1261,11 +1435,11 @@ def telemetry_verdict(summary: dict) -> dict:
 
 
 def references(a, knobs: dict, live: LiveLine | None) -> dict:
-    """What the counts of agents and model requests are measured against: the hosted agents (three per
-    campaign), and the admission capacity, the requests the fleets admit at once (llm.max_in_flight per
+    """What the counts of agents and model requests are measured against: the hosted agents (3 +
+    campaign.slots per campaign), and the admission capacity, the requests the fleets admit at once (llm.max_in_flight per
     server, split over the populations as Flowgentic splits it; None when the servers are unknown)."""
     n, cap, servers = a.populations, knobs["llm"]["max_in_flight"], live.servers if live is not None else None
-    return {"hosted_agents": AGENTS_PER_CAMPAIGN * knobs["agents"]["count"],
+    return {"hosted_agents": agents_per_campaign(knobs) * knobs["agents"]["count"],
             "admission_capacity": n * max(1, int(cap * (1.0 / n))) * servers if servers else None}
 
 
@@ -1278,9 +1452,10 @@ def _rows(out: Path) -> list[dict]:
 def by_role(rows: list[dict]) -> dict:
     """counts.by_role, from AUTONMI's rows: each role's agents, those that ended normally, their model calls
     (the fleets' count), lookups, messages sent, received and dropped (a failed campaign's), suspensions
-    (AUTONMI's: the Evaluator's, one per generation unless every evaluation had ended when it asked), the
-    inner-loop traces the Evaluators kept (monitor.capture), and each agent's seconds waiting for messages
-    (their sum, and n, mean, median, 95th percentile and maximum over the agents)."""
+    (AUTONMI's: the Monitors', one per evaluation unless it had ended when the Monitor asked), the
+    evaluations the Monitors submitted, the inner-loop traces they got (monitor.capture) and the reports they
+    sent, and each agent's seconds waiting for messages (their sum, and n, mean, median, 95th percentile and
+    maximum over the agents)."""
     out = {}
     for role in ROLES:
         rs = [r for r in rows if r.get("role") == role]
@@ -1288,7 +1463,8 @@ def by_role(rows: list[dict]) -> dict:
         out[role] = {"agents": len(rs), "finished": sum(bool(r.get("finished")) for r in rs),
                      **{k: sum(r.get(k) or 0 for r in rs) for k in ("model_calls", "lookups", "messages_sent",
                                                                      "messages_received", "messages_dropped",
-                                                                     "suspensions", "traces")},
+                                                                     "suspensions", "simulations", "traces",
+                                                                     "reports")},
                      "message_wait_s": {"sum": round(sum(waits), 3), **record._pct(waits)}}
     return out
 
@@ -1333,13 +1509,14 @@ def decoding_metric(knobs: dict, out: Path, rec: dict, summary: dict, refs: dict
                   # every hosted agent live at once: from the last start to the first end
                   "all_live_s": round(max(0.0, min(ends) - max(starts)), 3) if len(timed) == n else 0.0}
         roles = [role for role in ROLES if any(r.get("role") == role for r in timed)]
-        if roles:   # per role, against its own agents (one per campaign)
+        if roles:   # per role, against its own agents (one per campaign; the Monitors campaign.slots)
             agents["by_role"] = {}
             for role in roles:
                 rs = [r for r in timed if r.get("role") == role]
                 b, e = [r["t_start"] for r in rs], [r["t_end"] for r in rs]
+                own = knobs["agents"]["count"] * (knobs["campaign"]["slots"] if role == "monitor" else 1)
                 agents["by_role"][role] = {
-                    "timed": len(rs), **record.occupancy(b, e, lo, hi, refs={"hosted_agents": n // len(ROLES)}),
+                    "timed": len(rs), **record.occupancy(b, e, lo, hi, refs={"hosted_agents": own}),
                     "ramp_up_s": round(max(b) - min(b), 3)}
     phase, secs = s["agent_phase_s"], summary.get("agent_seconds_by_state") or {}
 
@@ -1460,8 +1637,9 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                       "telemetry": telemetry_verdict(summary)}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     rows, n = _rows(out), knobs["agents"]["count"]
-    # counts.agents keeps meaning campaigns (as in the other layers' records); the hosted agents are 3 per campaign
-    rec["counts"].update(campaigns=n, hosted_agents=AGENTS_PER_CAMPAIGN * n, agents_per_campaign=AGENTS_PER_CAMPAIGN,
+    # counts.agents keeps meaning campaigns (as in the other layers' records); the hosted agents are 3 + slots each
+    per = agents_per_campaign(knobs)
+    rec["counts"].update(campaigns=n, hosted_agents=per * n, agents_per_campaign=per,
                          roles=list(ROLES), by_role=by_role(rows),
                          expected_by_role={role: {**e, "lookups": len(e["lookups"]), **messages(knobs)[role]}
                                            for role, e in decide.expected_by_role(knobs).items()})

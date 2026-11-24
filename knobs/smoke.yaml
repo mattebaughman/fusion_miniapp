@@ -66,3 +66,16 @@ monitor:                      # the inner-loop trace for the Monitor: added inst
                               # Academy layers never ask for one). It changes no result
   fixture_trace: smooth       # --sim fixture, which has no inner loop: smooth (a function of the parameters with
                               # one planted split) or hash (random, ending at the record's values); synthetic
+  weight: 0.25                # the Monitor's m in a result's score in the asynchronous mode (not built yet); the
+                              # generation-by-generation mode selects on the inner loop's numbers alone
+
+campaign:                     # the AUTONMI layer: each campaign's Monitor slots and its candidate queue
+  slots: 2                    # Monitor agents per campaign (3 + slots hosted agents): each takes the next
+                              # candidate from its campaign's queue, runs its inner loop and scores its trace
+  mode: generations           # generations: the parent's generation barrier, as IGNOS; results equal IGNOS's
+                              # at any slot count
+  warmup: 4                   # traces the good side and the bad side each hold before the Monitor's m is not 0
+
+record:
+  extras: false               # true: each candidate's Monitor numbers in its campaign's line (agents.jsonl);
+                              # false: counts only

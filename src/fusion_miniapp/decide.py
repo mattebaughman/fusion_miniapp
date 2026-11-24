@@ -3,7 +3,8 @@ parent's three roles (parent/evo_agents.py): a Coordinator, a Generator and an E
 
 Every agent layer gives every campaign these three agents, carries the same messages between them and
 calls these functions; no agent framework is imported here. (The AUTONMI layer hosts the three as
-separate agents, and splits the two lookups between the Coordinator and the Generator: LOOKUP_ROLE.)
+separate agents, with Monitor agents that run the Evaluator's inner loops, and splits the two lookups
+between the Coordinator and the Generator: LOOKUP_ROLE.)
 Every step of the loop is the parent's own
 function, unchanged: initialize_population, select_survivors, update_best_result, log_generation,
 repopulate, empty_best_result (parent/evolutionary_loop.py).
@@ -130,13 +131,15 @@ LOOKUP_ROLE = {"constraints": "coordinator", "abstract": "generator"}
 
 
 def expected_by_role(knobs: dict) -> dict:
-    """Per campaign, where the three roles are separate agents: each role's evaluations, model calls (the
-    Generator's at most: a refill with no slot to fill is not called) and lookups (their names, in order)."""
+    """Per campaign, where the roles are separate agents (the AUTONMI layer, whose Monitor slots run the
+    inner loops): each role's evaluations (the Monitors' together), model calls (the Generator's at most: a
+    refill with no slot to fill is not called) and lookups (their names, in order)."""
     exp, mine = expected(knobs), lookups(knobs)
     by = {role: [w for w in mine if LOOKUP_ROLE[w] == role] for role in ("coordinator", "generator")}
     return {"coordinator": {"sims": 0, "llm_calls": 1, "lookups": by["coordinator"]},
             "generator": {"sims": 0, "llm_calls": exp["llm_calls"] - 1, "lookups": by["generator"]},
-            "evaluator": {"sims": exp["sims"], "llm_calls": 0, "lookups": []}}
+            "evaluator": {"sims": 0, "llm_calls": 0, "lookups": []},
+            "monitor": {"sims": exp["sims"], "llm_calls": 0, "lookups": []}}
 
 
 # --- the random generator's state as a message ------------------------------------------------------
@@ -388,6 +391,12 @@ def on_population(cst: dict, reply: dict) -> tuple[dict, dict]:
     return cst, {"population": cst["population"], "generation": cst["generation"]}
 
 
+def native(result: dict) -> dict:
+    """A result as the parent's evaluator returns it: NaN where the parent has a float and the JSON round
+    trip left None."""
+    return {k: float("nan") if v is None and k in FLOAT_KEYS else v for k, v in result.items()}
+
+
 def collect(population: list[dict], results: list[dict]) -> list[dict]:
     """The generation as the parent's evaluator returns it: in candidate order, each result's params the
     submitted candidate, and NaN where the parent has a float and the JSON round trip left None. A result
@@ -402,8 +411,25 @@ def collect(population: list[dict], results: list[dict]) -> list[dict]:
             raise RuntimeError(f"candidate {r['candidate_idx']}: the result's params are not the submitted ones")
         if "trace" in r:
             raise RuntimeError(f"candidate {r['candidate_idx']}: the result holds its inner-loop trace")
-        out.append({k: float("nan") if v is None and k in FLOAT_KEYS else v for k, v in r.items()})
+        out.append(native(r))
     return out
+
+
+def keep_probabilities(evaluated: list[dict], wall_weight: float) -> list[float]:
+    """For each result of a set (as the parent's selection takes a generation: native values, in order), the
+    probability that the parent's select_survivors keeps it, ranked as it ranks them: when any meets the
+    constraints (is_good), those alone by te_core_metric (its own sort), else all by its _rank_infeasible.
+    The best 1, the worst 0, the others 1 - rank / (n - 1); one it does not rank 0. It draws nothing."""
+    evo = parent()
+    good = [e for e in evaluated if e["is_good"]]
+    if good:
+        ranked = sorted(good, key=lambda e: e["te_core_metric"], reverse=True)
+    else:
+        ranked = evo._rank_infeasible(evaluated, wall_weight) if evaluated else []
+    n, at, q = len(ranked), {id(e): i for i, e in enumerate(evaluated)}, [0.0] * len(evaluated)
+    for rank, e in enumerate(ranked):
+        q[at[id(e)]] = 1.0 if rank == 0 or n <= 1 else 1.0 - rank / (n - 1)
+    return q
 
 
 def on_evaluated(cst: dict, reply: dict, knobs: dict, run_dir) -> tuple[dict, dict | None]:
@@ -440,7 +466,8 @@ def on_evaluated(cst: dict, reply: dict, knobs: dict, run_dir) -> tuple[dict, di
            "touches": touches, "devices": devices, "touch_checks": checks,
            "fixture": cst["fixture"] + sum(bool(e.get("fixture")) for e in evaluated),
            "sim_s": cst["sim_s"] + [round(float(e.get("elapsed_seconds") or 0.0), 6) for e in evaluated],
-           # queue wait: from the Evaluator's submission of the generation to the evaluation's start
+           # queue wait: from the generation's submission (on the AUTONMI layer, when the Generator put it on the
+           # candidate queue, so with the wait for a free Monitor slot) to the evaluation's start
            "wait_s": cst["wait_s"] + [round(max(0.0, float(e.get("t_start") or t0) - t0), 6) for e in evaluated],
            "worker_peak_rss_mb": rss}
     if g == o["generations"] - 1:

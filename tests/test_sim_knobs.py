@@ -6,10 +6,17 @@ from fusion_miniapp import knobs
 from fusion_miniapp.knobs import KnobError
 
 
+# knobs added after the hundredk and ignos_shape presets, which take them from smoke (hundredk.yaml is kept as it is)
+NEWER = {"monitor.weight", "campaign.slots", "campaign.mode", "campaign.warmup", "record.extras"}
+
+
 @pytest.mark.parametrize("name", knobs.PRESETS)
 def test_presets_are_complete_and_valid(name):
+    """smoke sets every knob; the other presets every knob but the newer ones, which they take from smoke."""
     raw = yaml.safe_load((knobs.PRESETS_DIR / f"{name}.yaml").read_text())
-    assert {s: set(v) for s, v in raw.items()} == {s: set(v) for s, v in knobs.SCHEMA.items()}
+    have = {f"{s}.{k}" for s, v in raw.items() for k in v}
+    every = {f"{s}.{k}" for s, v in knobs.SCHEMA.items() for k in v}
+    assert have <= every and every - have == (set() if name == "smoke" else NEWER)
     assert knobs.load(preset=name) == knobs.validate(raw)
 
 
@@ -40,6 +47,11 @@ def test_partial_file_merges_over_smoke(tmp_path):
     ({"workers": {"gpus_for_sim": 1}}, "unknown knob workers.gpus_for_sim"),
     ({"monitor": {"capture": "yes"}}, "monitor.capture must be true or false"),
     ({"monitor": {"fixture_trace": "random"}}, "monitor.fixture_trace must be one of"),
+    ({"monitor": {"weight": 1.5}}, "monitor.weight must be in [0, 1]"),
+    ({"campaign": {"slots": 0}}, "campaign.slots must be in [1, inf]"),
+    ({"campaign": {"mode": "async"}}, "campaign.mode must be one of ['generations']"),
+    ({"campaign": {"warmup": 0}}, "campaign.warmup must be in [1, inf]"),
+    ({"record": {"extras": "yes"}}, "record.extras must be true or false"),
 ])
 def test_validation_errors_name_the_knob(bad, message):
     with pytest.raises(KnobError) as info:
@@ -58,7 +70,10 @@ def test_load_errors(tmp_path):
     with pytest.raises(KnobError, match="'sim' section as a dict"):
         knobs.sim_section([1, 2])
     assert knobs.monitor_section(None) is None                   # evaluate records no trace
-    assert knobs.monitor_section({}) == knobs.base()["monitor"] == {"capture": True, "fixture_trace": "smooth"}
-    assert knobs.monitor_section({"capture": False}) == {"capture": False, "fixture_trace": "smooth"}
+    assert knobs.monitor_section({}) == knobs.base()["monitor"] == {"capture": True, "fixture_trace": "smooth",
+                                                                      "weight": 0.25}
+    assert knobs.monitor_section({"capture": False}) == {"capture": False, "fixture_trace": "smooth", "weight": 0.25}
+    base = knobs.base()   # the new knobs' defaults: today's results and requests
+    assert (base["campaign"], base["record"]) == ({"slots": 2, "mode": "generations", "warmup": 4}, {"extras": False})
     with pytest.raises(KnobError, match="'monitor' section as a dict"):
         knobs.monitor_section([1, 2])

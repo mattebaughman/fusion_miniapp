@@ -5,8 +5,8 @@ evo_agents' three Academy agents for outer.rng: per_agent) and one mini-app camp
 (generator: mutation) must write identical evolution_log.csv, evolution_log.jsonl (timestamps aside) and
 best_result.json. The CSV holds every generation's candidates (all parameters), their results and which
 survived, so this also checks the candidates and the survivors. The AUTONMI layer runs the same cases
-through its own entry point, one campaign a<seed> (agents.first = seed); without the AUTONMI framework
-those cases are skipped.
+through its own entry point, one campaign a<seed> (agents.first = seed), with 1, 2 (the default) and 16
+Monitor slots (campaign.slots); without the AUTONMI framework those cases are skipped.
 
 Seeds 0-2 only ever take the parent's all-infeasible branch; fixture seed 99 also reaches a feasible
 candidate (feasible_core), as Codex found.
@@ -51,11 +51,12 @@ def miniapp_files(tmp: Path, layer: str, mode: str, seed: int, knobs: dict) -> d
     return read(out / "campaigns" / f"a{seed}")
 
 
-def autonmi_files(tmp: Path, mode: str, seed: int, knobs: dict) -> dict:
-    """One campaign, a<seed> with seed `seed`, through python -m fusion_miniapp.layer_autonmi: a process of
-    its own, started in tmp (AsyncFlow leaves a folder there)."""
+def autonmi_files(tmp: Path, mode: str, seed: int, knobs: dict, slots: int = 2) -> dict:
+    """One campaign, a<seed> with seed `seed`, through python -m fusion_miniapp.layer_autonmi with `slots`
+    Monitor slots: a process of its own, started in tmp (AsyncFlow leaves a folder there)."""
     path = tmp / f"knobs-{mode}-{seed}.yaml"
-    path.write_text(json.dumps({**knobs, "agents": {**knobs["agents"], "first": seed}}))   # JSON is YAML
+    path.write_text(json.dumps({**knobs, "agents": {**knobs["agents"], "first": seed},   # JSON is YAML
+                                "campaign": {**knobs["campaign"], "slots": slots}}))
     out = tmp / f"autonmi-{mode}-{seed}"
     proc = subprocess.run([sys.executable, "-m", "fusion_miniapp.layer_autonmi", "--knobs", str(path), "--sim", mode,
                            "--out", str(out)], cwd=tmp, capture_output=True, text=True, timeout=600, check=False)
@@ -118,13 +119,14 @@ def test_campaign_is_the_parent_loop(tmp_path, parent_run, mode, seed, rng):
         assert got["best"] == want["best"], layer
 
 
+@pytest.mark.parametrize("slots", (1, 2, 16))
 @pytest.mark.parametrize("mode,seed,rng", CASES)
-def test_campaign_on_autonmi_is_the_parent_loop(tmp_path, parent_run, mode, seed, rng):
+def test_campaign_on_autonmi_is_the_parent_loop(tmp_path, parent_run, mode, seed, rng, slots):
     missing = autonmi_missing()
     if missing:
         pytest.skip(f"needs the AUTONMI layer's environment (requirements-autonmi.txt): {missing}")
     want = parent_run(mode, seed, rng)
-    got = autonmi_files(tmp_path, mode, seed, oracle_knobs(rng))
+    got = autonmi_files(tmp_path, mode, seed, oracle_knobs(rng), slots)
     assert got["csv"] == want["csv"]
     assert got["jsonl"] == want["jsonl"]
     assert got["best"] == want["best"]

@@ -94,6 +94,21 @@ def test_compare_records_across_layers(tmp_path):
     assert compare_records.compare(a, b)["results"] == ["knobs.agents.first: 0 != 5"]
 
 
+def test_compare_records_skips_suspensions_across_the_monitor_slots():
+    """On the AUTONMI layer a record from before the Monitor slots (no `campaign` knobs: one suspension per
+    generation) and one from after (one per inner loop) agree when their results do; two records from after, or
+    two from another layer, must still suspend alike."""
+    new = {"status": "pass", "agent_layer": "autonmi", "results_sha256": "x", "counts": {"suspensions": 16000},
+           "knobs": {"outer": {"population": 16}, "campaign": {"slots": 2, "mode": "generations", "warmup": 4}}}
+    old = {**new, "counts": {"suspensions": 1000}, "knobs": {"outer": {"population": 16}}}
+    assert compare_records.compare(old, new)["results"] == []
+    assert compare_records.compare({**new, "counts": {"suspensions": 1000}}, new)["results"] == [
+        "counts.suspensions: 1000 != 16000"]
+    lg = {**old, "agent_layer": "langgraph"}
+    assert compare_records.compare(lg, {**new, "agent_layer": "langgraph"})["results"] == [
+        "counts.suspensions: 1000 != 16000"]
+
+
 def test_compare_records_tolerates_last_digit_differences(tmp_path):
     assert run.main(["--agents", "5", "--sim", "fixture", "--out", str(tmp_path / "a")]) == 0
     rec = json.loads((tmp_path / "a" / "run_record.json").read_text())

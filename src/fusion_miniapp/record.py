@@ -66,12 +66,14 @@ async def ticker(read, emit=None, interval: float = LIVE_INTERVAL_S) -> None:
 
 # timings, memory, touch counts and device names: what depends on the machine or the scheduling
 MACHINE_KEYS = ("sim_s", "wait_s", "t_start", "t_end", "worker_peak_rss_mb", "touches", "devices", "llm_call_details")
+EXTRA_KEYS = ("monitor",)   # per-candidate detail written with record.extras (the AUTONMI layer): not the result
 
 
 def comparable(result: dict) -> dict:
     """A campaign's result without what depends on the machine or the scheduling: per-evaluation and
-    per-generation times, touch counts (which evaluations met a cold worker), device names."""
-    out = {k: v for k, v in result.items() if k not in MACHINE_KEYS}
+    per-generation times, touch counts (which evaluations met a cold worker), device names; and without
+    the record toggle's per-candidate detail (EXTRA_KEYS)."""
+    out = {k: v for k, v in result.items() if k not in MACHINE_KEYS and k not in EXTRA_KEYS}
     if "generations" in out:
         out["generations"] = [{k: v for k, v in g.items() if k not in ("elapsed_s", "t0", "fastest", "slowest")}
                               for g in out["generations"]]
@@ -412,7 +414,9 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
         "rates_per_s": {"evaluations": rate(len(sim_s)), "model_calls": rate(c["llm_calls"]),
                         "model_calls_all_agents": rate(calls["all"]),
                         "generations": rate(c["generations"]), "campaigns": rate(len(c_start))},
-        "sims_in_flight": occupancy(e_sub, e_end, lo, hi) if timed else None,     # submitted, not yet returned
+        # sims_in_flight: submitted, not yet returned (on the AUTONMI layer from when the candidate was put on its
+        # campaign's queue, so with its wait for a free Monitor slot)
+        "sims_in_flight": occupancy(e_sub, e_end, lo, hi) if timed else None,
         "sims_executing": occupancy(e_start, e_end, lo, hi) if timed else None,   # on a simulation worker
         "sim_s": _pct(sim_s), "queue_wait_s": _pct(wait_s), "generation_s": _pct(gen_s),
         "model_latency_s": _pct(latencies),
