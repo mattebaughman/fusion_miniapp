@@ -9,8 +9,10 @@ Every campaign is the same three roles as in the other two layers (decide.py's C
 and Evaluator), with Monitor slots that run the Evaluator's inner loops, and the parent's whole-generation
 selection on the inner loop's numbers alone, so its result is the same: `results_sha256` equals the other
 layers' for the same knobs, at any campaign.slots. With campaign.mode async (this layer only) there is no
-generation barrier and, for now, no model call: each agent applies each result as it arrives (Script), so
-results differ from run to run and the checks are invariants (verify). What runs them is AUTONMI's:
+generation barrier, and each agent makes its own model call (unless llm.mode is off): each applies each result as
+it arrives (Script), so results differ from run to run and the checks are invariants (verify). A model call of
+the roles' own is tried up to TRIES times, then the role decides on numbers alone (its fallback, counted). What
+runs them is AUTONMI's:
 - The mini-app is an AsyncFlow application. Its campaigns are split into populations (`--populations`;
   by default one per agent process of run.py, or the next count up that divides the campaigns: layout),
   each an AsyncFlow node with an engine of its own for its simulations, a fleet for its model calls, and
@@ -67,11 +69,13 @@ import threading
 import time
 import traceback
 import urllib.request
+from array import array
 from collections import Counter, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from importlib import metadata
 from pathlib import Path
 
+import numpy as np
 from autonmi import AgentSpec, Campaign, CampaignConfig, Check
 from autonmi.population import PopulationConfig
 from autonmi.scripted import Done, Lookup, Remember, Report, ScriptedAgent, Simulate
@@ -183,6 +187,7 @@ FAIL_ENV = "FUSION_AUTONMI_FAIL"   # tests only: "<agent id>:<g>" fails that age
                                    # (a Monitor's g is its candidate's call id, g<g>c<i>: before that report; in
                                    # the asynchronous mode g is the agent's cycle from 0, a Monitor's call id c<k>)
 QUEUE = "candidates"   # each campaign's candidate queue: the Generator puts, a free Monitor takes the next
+TRIES = 3   # tries of a role's own model call (an error, or a reply that cannot be used) before its fallback
 
 
 def agent_names(knobs: dict) -> list[str]:
@@ -216,13 +221,15 @@ def messages(knobs: dict) -> dict:
     they vary. With B = P x G candidates: the Generator puts B candidates and S stops; each Monitor reports
     each candidate it takes; each Evaluator cycle (1 to B of them, E) sends the Coordinator its scored results
     and the Generator a digest; each Coordinator cycle (1 to E of them, C) sends the Generator the survivors,
-    and at the end done to the Generator and the Evaluator. So the Coordinator sends C + 2 (3 to B + 2) and
-    receives E (1 to B), the Generator receives C + E + 1 (3 to 2B + 1), the Evaluator sends 2E (2 to 2B)."""
+    then (with its model call, decide.role_calls) its guidance, and at the end done to the Generator and the
+    Evaluator. So with k = 2 messages a cycle with the call and 1 without, the Coordinator sends kC + 2 (k + 2 to
+    kB + 2) and receives E (1 to B), the Generator receives kC + E + 1 (k + 2 to (k + 1)B + 1), the Evaluator
+    sends 2E (2 to 2B)."""
     G, P, S = knobs["outer"]["generations"], knobs["outer"]["population"], knobs["campaign"]["slots"]
     if decide.asynchronous(knobs):
-        B = P * G
-        return {"coordinator": {"sent": [3, B + 2], "received": [1, B]},
-                "generator": {"sent": B + S, "received": [3, 2 * B + 1]},
+        B, k = P * G, 1 + decide.role_calls(knobs)
+        return {"coordinator": {"sent": [k + 2, k * B + 2], "received": [1, B]},
+                "generator": {"sent": B + S, "received": [k + 2, (k + 1) * B + 1]},
                 "evaluator": {"sent": [2, 2 * B], "received": B + 1},
                 "monitor": {"sent": B, "received": B + S}}
     return {"coordinator": {"sent": G + 2, "received": 2 * G},
@@ -237,6 +244,10 @@ class CampaignFailed(RuntimeError):
 
 class InjectedFailure(RuntimeError):
     """FAIL_ENV's failure (tests only)."""
+
+
+class PromptTooLong(RuntimeError):
+    """A prompt and its max_tokens do not fit the model servers' context: the call is not sent."""
 
 
 class _Queue:
@@ -270,12 +281,14 @@ class Mailbox:
     for one if there is none (or, with wait=False, none). A waiting agent awaits inside its own step, counted
     by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken once, never polled. `fail(campaign)` fails
     that campaign's waits, now and later, and drops its messages not yet received (counted per receiver in
-    `dropped`, a campaign queue's under its own key). With agents.start_together, `all_started` is set when
-    every agent of the population has started."""
+    `dropped`, a campaign queue's under its own key); a message that has already woken its receiver is that
+    receiver's, received and not dropped. With agents.start_together, `all_started` is set when every agent of
+    the population has started."""
 
     def __init__(self, agents: int) -> None:
         self.agents, self.started, self.all_started = agents, 0, asyncio.Event()
         self.box: dict[str, asyncio.Future] = {}
+        self.asked: set[str] = set()          # exact keys a receive waits on
         self.queues: dict[str, _Queue] = {}   # <campaign>/<kind> and inboxes, while it holds items or waits
         self.most: Counter = Counter()        # per queue: the most items it held at once
         self.failed: dict[str, str] = {}   # campaign -> why
@@ -309,10 +322,12 @@ class Mailbox:
         if campaign in self.failed:
             raise CampaignFailed(self.failed[campaign])
         key, t = f"{me}/{kind}/{g}", time.perf_counter()
+        self.asked.add(key)
         try:
             with activity(AgentState.TOOL_WAIT):
                 text = await self._future(key)
         finally:
+            self.asked.discard(key)
             self.waited[me] += time.perf_counter() - t
             self.box.pop(key, None)
         self.received[me] += 1
@@ -413,7 +428,7 @@ class Mailbox:
             f = self.box.pop(key)
             if not f.done():   # an agent waits on it
                 f.set_exception(CampaignFailed(why))
-            else:              # sent, never received
+            elif key not in self.asked:   # sent, never received (one that woke its receiver is received)
                 self.dropped[key.rsplit("/", 2)[0]] += 1
         for key in [k for k in self.queues if k.startswith(campaign + "/")]:
             q = self.queues.pop(key)
@@ -442,13 +457,14 @@ class EvaluateArgs(BaseModel):
 
 class StubTransport:
     """Fusion's stub LLM as a Flowgentic transport. Its replies depend on the campaign (of the agent
-    Flowgentic's host runs the call for) and the request's last line only, so the three layers agree.
+    Flowgentic's host runs the call for) and the request's last line only, so the three layers agree (the
+    Evaluator's on the q and m its prompt gives, at monitor.weight `weight`: llm.numbers_only).
     Each call takes `latency_s` (llm.stub_latency_s): an emulated model server's time, not its decoding."""
 
     model = "fusion-stub"
 
-    def __init__(self, latency_s: float = 0.001) -> None:
-        self.stub = StubLLM(latency_s=latency_s)
+    def __init__(self, latency_s: float = 0.001, weight: float = 0.25) -> None:
+        self.stub = StubLLM(latency_s=latency_s, weight=weight)
 
     async def complete(self, messages, tools=None, *, extra_body: dict | None = None, max_tokens: int | None = None,
                        **kwargs) -> Reply:
@@ -459,6 +475,58 @@ class StubTransport:
         prompt = sum(len(str(m.get("content") or "")) for m in messages) // 4   # an estimate, for admission
         return Reply(content=text, finish_reason=meta["finish_reason"],
                      usage=Usage(prompt_tokens=prompt, completion_tokens=len(text) // 4))
+
+
+class CallSums:
+    """One population's model calls whose details are not in a campaign's line (llm_call_details): the roles' own
+    calls without record.extras (counts only by default), and a call that ends after its campaign's line was
+    written (it failed). Summed here instead, for the record's model figures (llm_service, and the client-side
+    counts of requests in flight and queued that record.write makes from each call's times), and written at the
+    population's end beside its campaign lines (`write`, calls-p<index>.npz), where part() reads them (`read`);
+    write_record removes the file once the record is written."""
+
+    def __init__(self) -> None:
+        self.n = Counter()   # calls, errors, empty, retried
+        self.budgets, self.finish_reasons, self.tokens = Counter(), Counter(), Counter()
+        self.latency = array("d")   # every call's latency_s
+        self.times = array("d")     # each answered call's t_end, service_s, recovery_s, wait_s
+
+    def add(self, d: dict) -> None:
+        """One call's details, as on_call and _ask make them."""
+        self.n["calls"] += 1
+        self.budgets[str(d["budget"])] += 1
+        self.latency.append(d["latency_s"])
+        if d.get("error"):
+            self.n["errors"] += 1
+            return
+        self.n["empty"] += bool(d["empty"])
+        self.n["retried"] += bool(d["recovery_s"])
+        self.finish_reasons[d["finish_reason"]] += 1
+        for k in ("prompt", "completion", "reasoning"):
+            self.tokens[k] += d[f"{k}_tokens"] or 0
+        self.times.extend((d["t_end"], d["service_s"], d["recovery_s"], d["wait_s"]))
+
+    def write(self, path: Path) -> None:
+        """To `path` (none without a call)."""
+        if self.n["calls"]:
+            counts = {"n": self.n, "budgets": self.budgets, "finish_reasons": self.finish_reasons,
+                      "tokens": self.tokens}
+            np.savez(path, counts=json.dumps(counts), latency=np.array(self.latency, dtype=float),
+                     times=np.array(self.times, dtype=float).reshape(-1, 4))
+
+    @staticmethod
+    def read(path: Path) -> dict | None:
+        """What `write` wrote: the counts, `latency_s` (a list) and `times` (an array of rows t_end, service_s,
+        recovery_s, wait_s); None without the file."""
+        if not path.exists():
+            return None
+        with np.load(path) as z:
+            return {**json.loads(str(z["counts"])), "latency_s": z["latency"].tolist(), "times": z["times"]}
+
+
+def sums_file(lines_file: Path, index: int) -> Path:
+    """The CallSums file of population `index`, beside its campaign lines."""
+    return lines_file.with_name(f"calls-p{index:03d}.npz")
 
 
 def sim_pool(workers: int):
@@ -530,6 +598,7 @@ class Fusion:
         self.knobs, self.sim, self.out, self.work_root = knobs, sim, Path(out), work_root
         self.populations: dict[str, asyncio.Task] = {}   # p000...: the task running each population here (build)
         self.live: Counter = Counter()   # agents started and ended in this process (LiveLine)
+        self.context: int | None = None   # the model servers' context (max_model_len), for the prompt-length check
 
     def agents(self):
         """Each campaign's agents (agent_names), one after another (AUTONMI cuts this list into contiguous
@@ -543,7 +612,7 @@ class Fusion:
         return [], []   # no MCP servers: the lookups run in the campaign's process (tools.lookup)
 
     def stub(self, replica: int) -> StubTransport:
-        return StubTransport(self.knobs["llm"]["stub_latency_s"])
+        return StubTransport(self.knobs["llm"]["stub_latency_s"], self.knobs["monitor"]["weight"])
 
     def sim_knobs(self, seed: int) -> dict:
         """The `sim` knobs one campaign's evaluations get: its cost scale, and this run's own work folder."""
@@ -565,22 +634,28 @@ class Fusion:
         whether it ended normally (`finished`; a Coordinator only once its campaign reported), the evaluations
         it submitted (a Monitor's, each of which ends before it goes on: AUTONMI checks them against the
         tasks its engine completed), its lookups, its messages sent, received, left unreceived and dropped
-        when its campaign failed, and its seconds waiting for messages; the Coordinator's also its wait for
+        when its campaign failed, its seconds waiting for messages, and its own model calls asked, tried and
+        fallen back (`model_asks`, `model_tries`, `model_fallbacks`; AUTONMI's `model_calls` beside them counts
+        the replies); the asynchronous Generator's also its proposals by the parameters its replies filled
+        (`parameters_filled`, 0 to 7); the Coordinator's also its wait for
         every agent to start and when it began its campaign (`t_begin`, after that wait); a Monitor's also
         its slot, the inner-loop traces it got (monitor.capture) and the reports it sent. The campaign's
-        candidate queue is its Monitors' inbox: what is left on it, or dropped, counts as its first slot's."""
+        candidate queue is its Monitors' inbox: what is left on it, or dropped, counts as its first slot's. The
+        population's calls not in its campaigns' lines are written beside them (CallSums)."""
         sc = pop.state.get("script")
         if sc is None:   # the population ended before its agents were built
             return [{"agent_id": a, "finished": False, "simulations": 0, "population": pop.index}
                     for a in pop.agent_ids]
         sc.lines.close()
+        sc.sums.write(sums_file(Path(sc.lines.name), pop.index))
         mail, left, out = sc.mail, sc.mail.left(), []
         for a in pop.agent_ids:
             campaign, role = campaign_of(a), role_of(a)
             row = {"agent_id": a, "campaign": campaign, "role": role, "finished": a in sc.finished,
                    "simulations": sc.sims.get(a, 0), "population": pop.index, "lookups": sc.lookups_made[a],
                    "messages_sent": mail.sent[a], "messages_received": mail.received[a], "messages_left": left[a],
-                   "messages_dropped": mail.dropped[a], "message_wait_s": round(mail.waited[a], 6)}
+                   "messages_dropped": mail.dropped[a], "message_wait_s": round(mail.waited[a], 6),
+                   "model_asks": sc.asks[a], "model_tries": sc.tries[a], "model_fallbacks": sc.fallbacks[a]}
             if role == "coordinator":   # the campaign's model calls by its own count (decide.finish)
                 row.update(llm_calls=sc.llm_calls.get(campaign), start_wait_s=sc.start_wait.get(a),
                            t_begin=sc.began.get(a))
@@ -600,15 +675,17 @@ class Fusion:
                                candidates_distinct=seen.bit_count(), candidate_max=seen.bit_length() - 1,
                                candidates_repeated=sc.repeated[campaign])
                 elif role == "generator":
-                    row["survivor_waits"] = sc.survivor_waits[a]
+                    row.update(survivor_waits=sc.survivor_waits[a], parameters_filled=sc.filled.get(a, [0] * 8))
             out.append(row)
         return out
 
     def verify(self, rows: list[dict], store) -> list[Check]:
         """AUTONMI's checks of the campaigns' agents; the run record checks their results (touches, the model).
-        Per role, exactly: evaluations, model calls (AUTONMI's count of each agent's calls: the Coordinator's
-        summary, the Generator's refills as many as its campaign counted, none by the Evaluator or the
-        Monitors), lookups and messages, the Monitors' together per campaign (which slot takes which candidate
+        Per role, exactly: evaluations, model calls (each agent's asked: the Coordinator's summary, the
+        Generator's refills as many as its campaign counted, and with campaign.notes the Evaluator's assessment
+        per generation and a Monitor's note per candidate, else none; each answered, or fallen back after at most
+        TRIES tries, which AUTONMI's count of replies must match: calls_as_planned), lookups and messages, the
+        Monitors' together per campaign (which slot takes which candidate
         is the queue's), and each Monitor one evaluation, one report and one message sent per candidate it
         took; every message received (none left); the lookups against AUTONMI's own count; and the store at
         the end: no agent's saved state (ScriptRunner's script/p<index>/<agent>, kept while it is
@@ -620,14 +697,16 @@ class Fusion:
         if decide.asynchronous(self.knobs):
             return self._verify_async(rows, store, exp, msgs)
 
+        notes = decide.role_calls(self.knobs)
+
         def planned(r: dict) -> bool:
             e, m = exp[r["role"]], msgs[r["role"]]
             if r["role"] == "monitor":   # its share, whichever candidates it took
                 return (r["simulations"] == r["reports"] == r["messages_sent"] == r["messages_received"] - 1
-                        and r["model_calls"] == r["lookups"] == 0)
-            calls = {"coordinator": 1, "evaluator": 0,
+                        and r["lookups"] == 0 and calls_as_planned(r, r["simulations"] if notes else 0))
+            calls = {"coordinator": 1, "evaluator": e["llm_calls"],
                      "generator": (coordinators[r["campaign"]].get("llm_calls") or 0) - 1}[r["role"]]
-            return (r["simulations"] == e["sims"] and r["model_calls"] == calls <= e["llm_calls"]
+            return (r["simulations"] == e["sims"] and calls_as_planned(r, calls) and calls <= e["llm_calls"]
                     and r["lookups"] == len(e["lookups"]) and (r["messages_sent"], r["messages_received"]) ==
                     (m["sent"], m["received"]))
         done = [r for r in rows if r["finished"]]
@@ -669,8 +748,10 @@ class Fusion:
 
     def _verify_async(self, rows: list[dict], store, exp: dict, msgs: dict) -> list[Check]:
         """verify() in the asynchronous mode, where the counts depend on the order of arrival. Per agent that
-        ended normally: no model calls, its lookups, and its counts within messages()' bounds and tied to its
-        cycles (the Coordinator sends cycles + 2 and receives at least cycles; the Generator takes
+        ended normally: its model calls (with decide.role_calls one asked per cycle, a Monitor's per candidate,
+        each answered or fallen back: calls_as_planned; none with llm.mode off), its lookups, and its counts
+        within messages()' bounds and tied to its cycles (the Coordinator sends 2 per cycle with its call, else
+        1, + 2 and receives at least cycles; the Generator takes
         ceil(B / decide.TAKE) times, or once more when a take stops at candidate P for want of a survivor (an odd
         P), and puts B candidates and S stops; the Evaluator sends 2 per cycle and
         receives B reports and done; each Monitor one evaluation, report and message sent per candidate
@@ -680,7 +761,7 @@ class Fusion:
         outer.population survivors; at most campaign.slots inner loops running; at most decide.TAKE candidates
         waiting on the queue. Then the checks of both modes."""
         o, S, take = self.knobs["outer"], self.knobs["campaign"]["slots"], decide.TAKE
-        P, B = o["population"], o["population"] * o["generations"]
+        P, B, on = o["population"], o["population"] * o["generations"], decide.role_calls(self.knobs)
         takes = (-(-B // take), -(-P // take) + -(-(B - P) // take))   # the Generator's cycles: in one take, or split at P
 
         def within(x: int, bound) -> bool:
@@ -688,14 +769,14 @@ class Fusion:
 
         def planned(r: dict) -> bool:
             role, m, c = r["role"], msgs[r["role"]], r.get("cycles", 0)
-            if r["model_calls"] != 0 or r["lookups"] != len(exp[role]["lookups"]):
+            if not calls_as_planned(r, c if on else 0) or r["lookups"] != len(exp[role]["lookups"]):
                 return False
             if role == "monitor":
                 return r["simulations"] == r["reports"] == r["messages_sent"] == r["messages_received"] - 1 == c
             if r["simulations"] != 0 or not (within(r["messages_sent"], m["sent"])
                                              and within(r["messages_received"], m["received"])):
                 return False
-            return {"coordinator": r["messages_sent"] == c + 2 and 1 <= c <= r["messages_received"],
+            return {"coordinator": r["messages_sent"] == (1 + on) * c + 2 and 1 <= c <= r["messages_received"],
                     "generator": takes[0] <= c <= takes[1],
                     "evaluator": r["messages_sent"] == 2 * c and 1 <= c <= B}[role]
         done = [r for r in rows if r["finished"]]
@@ -732,6 +813,14 @@ class Fusion:
                 Check("candidates_waiting_within_take", not waiting, {"most": take, "over": waiting[:10]})]
 
 
+def calls_as_planned(r: dict, asks: int) -> bool:
+    """An agent's model calls (its row): `asks` asked, each answered by a reply it could use or fallen back after
+    at most TRIES tries, so AUTONMI's count of replies (model_calls) lies between the calls answered and the
+    tries."""
+    a, t, f = (r.get(k) or 0 for k in ("model_asks", "model_tries", "model_fallbacks"))
+    return a == asks and f <= a and a - f <= r["model_calls"] <= t <= TRIES * a
+
+
 class Script:
     """One population's campaigns as AUTONMI scripted agents (autonmi.scripted), 3 + campaign.slots per
     campaign: decide.py's Coordinator, Generator and Evaluator, and the Monitor slots, each a hosted agent of
@@ -763,27 +852,38 @@ class Script:
     files and the campaign's line never see one. `stats` holds each live campaign's trace statistics
     (monitor.Rolling), which its Monitors score against and hold their traces in; at the barrier the
     Evaluator labels the generation's traces good or bad and adds them (`_label`). The Monitor's numbers
-    change no result in this mode:
-    selection is the parent's, on the inner loop's numbers alone. AsyncFlow and RHAPSODY keep each evaluate
+    change no result in this mode: selection is the parent's, on the inner loop's numbers alone. With
+    campaign.notes each Monitor also asks the model for a note on its candidate, and the Evaluator at the
+    barrier for an assessment of the generation (a keep-probability for each candidate), both recorded with
+    record.extras and read by nothing. AsyncFlow and RHAPSODY keep each evaluate
     task's returned record, trace included, and RHAPSODY a text copy of it (its `stdout`), until the
     population ends, so the traces are held per population.
 
-    In the asynchronous mode (campaign.mode: async) there is no generation and no barrier, and no agent makes
-    a model call yet: each repeats one cycle on what has arrived, its decisions decide.async_*'s pure
-    functions, its messages in the inboxes of the population's Mailbox (take_all):
+    In the asynchronous mode (campaign.mode: async) there is no generation and no barrier: each agent repeats
+    one cycle on what has arrived, its decisions decide.async_*'s pure functions, its messages in the inboxes of
+    the population's Mailbox (take_all), and each cycle makes the role's own model call (`_ask`; none with
+    llm.mode off):
 
         Generator                   once no candidate waits on the queue: the next decide.TAKE profiles onto
-                                    it (candidates c0 .. c<B-1>); it waits only for its first survivors
-        Monitor (each free slot)    the next candidate, as in the generations mode
-        Monitor -> Evaluator        report        the result and the Monitor's numbers
-        Evaluator -> Coordinator    scored        each result that has arrived, with its q and score
+                                    it (candidates c0 .. c<B-1>), each reconciled with its model call's reply;
+                                    it waits only for its first survivors
+        Monitor (each free slot)    the next candidate, as in the generations mode; then its call: the note
+        Monitor -> Evaluator        report        the result, the Monitor's numbers and its note
+        Evaluator -> Coordinator    scored        each result that has arrived, with its q and score (its
+                                                  call's keep-probability)
         Evaluator -> Generator      digest        their candidates and scores
         Coordinator -> Generator    survivors     after each cycle: survival, survivors, best-so-far and log
+        Coordinator -> Generator    guidance      then its call's guidance on what to explore next
 
     then, once the budget's last result is in, done/G to the Generator and the Evaluator and the Coordinator's
     Report; the Generator takes what is left for it and puts the Monitors' stops. The campaign's statistics
     object also holds its window of the last outer.population scored results (the Evaluator's), and each trace
-    is labelled as its result is scored (`_label_async`)."""
+    is labelled as its result is scored (`_label_async`). A role's call that fails (an error, a reply its
+    decide parse cannot use, or a prompt too long for the servers' context) is tried up to TRIES times; then
+    the role decides as with llm.mode off, counted: the Generator's profiles unchanged, no note, the score from
+    numbers, no guidance. The roles' own calls (those tried TRIES times) are in their campaign's line
+    (llm_call_details) with record.extras only; otherwise each is summed in the population's `sums` (CallSums),
+    as is any call that ends after its campaign's line was written."""
 
     def __init__(self, definition: Fusion, pop) -> None:
         self.knobs, self.sim, self.out, self.pop = definition.knobs, definition.sim, definition.out, pop
@@ -820,6 +920,14 @@ class Script:
         self.repeated: Counter = Counter()
         self.survivor_waits: Counter = Counter()
         self.replay: dict[str, dict] = {}
+        # the roles' own model calls (decide.role_calls): per agent, those asked, tried and fallen back; each
+        # Generator's proposals by parameters filled; each campaign's calls answered; the servers' context
+        self.calls_on = decide.role_calls(self.knobs)
+        self.asks, self.tries, self.fallbacks = Counter(), Counter(), Counter()
+        self.filled: dict[str, list] = {}
+        self.answered: Counter = Counter()
+        self.sums = CallSums()
+        self.context = definition.context
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
@@ -832,10 +940,10 @@ class Script:
 
     def agent(self) -> ScriptedAgent:
         """One definition for all the roles (AUTONMI has one per population), so one model-call limit: the
-        largest role's. verify() checks each role's exact count."""
+        largest role's, each call tried at most TRIES times. verify() checks each role's count."""
         return ScriptedAgent(start=self.start, step=self.step, simulate=self.evaluate, lookup=self.lookup,
-                             remember=self.remember, report=self.report, on_call=self.on_call,
-                             on_done=self.on_done, model_calls_limit=max(r["llm_calls"] for r in self.roles.values()))
+                             remember=self.remember, report=self.report, on_call=self.on_call, on_done=self.on_done,
+                             model_calls_limit=TRIES * max(r["llm_calls"] for r in self.roles.values()))
 
     # --- the steps --------------------------------------------------------------------------------------
 
@@ -885,8 +993,7 @@ class Script:
             cst = s["cst"]
             if s["next"] is not None:
                 return await self._generation(s, cst, s["next"], run_dir)
-            summary = await self._model(campaign, ask, decide.summary_messages(cst), cst["budget"],
-                                        decide.SUMMARY_TOKENS, "coordinator")
+            summary = await self._ask(me, ask, decide.summary_messages(cst), decide.SUMMARY_TOKENS, cst["budget"])
             for to in ("generator", "evaluator"):
                 self._send(me, to, "done", self.G, None)
             return _state(s, "reporting"), Report(decide.finish(cst, summary, run_dir))
@@ -916,7 +1023,7 @@ class Script:
         if todo:
             return {**s, "todo": todo, "ctx": ctx}, Lookup(todo[0])
         gst = decide.generator_state(campaign, s["seed"], self.knobs)
-        ask_model = lambda m, b, r: self._model(campaign, ask, m, b, r, "generator")  # noqa: E731
+        ask_model = lambda m, b, r: self._ask(me, ask, m, r, b)  # noqa: E731
         for g in range(self.G):
             msg = await self.mail.receive(me, "make", g)
             if g == 0:   # the Coordinator's lookups, and its own: the refill prompt reads both
@@ -935,9 +1042,10 @@ class Script:
         """A Monitor slot: the next candidate on its campaign's queue, its inner loop as one evaluation (the
         call decide.evaluation_calls names, as the Evaluator submitted it before: the same results),
         suspended until it ends; then its trace, taken out of the result, scored against the campaign's
-        statistics and held there for the barrier's label; its report (the result, `t0` and the numbers) to
-        the Evaluator; then the next candidate, until its stop. In the asynchronous mode the report goes to the
-        Evaluator's inbox (take_all), and its trace is labelled when the Evaluator scores its result."""
+        statistics and held there for the barrier's label; its model call (decide.role_calls), the note on its
+        candidate ("" when the call falls back: none); its report (the result, `t0`, the numbers and the note)
+        to the Evaluator; then the next candidate, until its stop. In the asynchronous mode the report goes to
+        the Evaluator's inbox (take_all), and its trace is labelled when the Evaluator scores its result."""
         me, campaign = s["agent_id"], s["campaign"]
         if s["phase"] == "running":   # resumed: its candidate's inner loop ended
             if campaign in self.mail.failed:
@@ -951,15 +1059,21 @@ class Script:
                 x = monitor.steps(tr)
                 stats.hold(call["generation"], call["candidate_idx"], x, bool(tr["synthetic"]))
                 numbers = stats.score(x)
-            if self.asynchronous:   # to the Evaluator's inbox, which takes every report that has arrived
+            if self.asynchronous:   # its inner loop has ended
                 self.running[campaign] -= 1
+            note = None
+            if self.calls_on:
+                note = await self._ask(me, ask, decide.note_messages(result, numbers), decide.NOTE_TOKENS,
+                                       decide.budget(self.knobs, s["seed"]), parse=decide.parse_text) or ""
+            if self.asynchronous:   # to the Evaluator's inbox, which takes every report that has arrived
                 self._hook(me, call["id"])
                 self.mail.deliver(me, "evaluator", "report", {
                     "candidate": call["candidate_idx"], "result": result, "t0": call["t0"], "source": call["source"],
-                    "m": numbers["m"] if numbers else None, "numbers": numbers})
+                    "filled": call["filled"], "m": numbers["m"] if numbers else None, "numbers": numbers,
+                    "note": note})
             else:
                 self._send(me, "evaluator", "report", call["id"],
-                           {"result": result, "t0": call["t0"], "numbers": numbers})
+                           {"result": result, "t0": call["t0"], "numbers": numbers, "note": note})
             self.reports[me] += 1
         call = await self.mail.take(me, QUEUE)
         if campaign in self.mail.failed:   # it failed after the item reached me: start no inner loop for it
@@ -969,7 +1083,7 @@ class Script:
         self.sims[me] += 1
         keep = ("id", "generation", "candidate_idx", "t0")
         if self.asynchronous:   # its cycle; each candidate's evaluations and the inner loops running, counted
-            keep += ("source",)
+            keep += ("source", "filled")
             self.cycles[me] += 1
             bit, seen = 1 << call["candidate_idx"], self.seen.get(campaign, 0)
             self.repeated[campaign] += bool(seen & bit)
@@ -982,16 +1096,35 @@ class Script:
 
     async def _evaluator(self, s: dict, event, ask):
         """Each generation's P reports, gathered in candidate order (the barrier); the labels of their traces
-        (`_label`); their results, in candidate order, to the Coordinator (`t0`: when the Generator put them
-        on the queue); after the last generation, done."""
+        (`_label`); with campaign.notes its assessment (`_assess`, before the results go on, so that its call is
+        in the campaign's line); their results, in candidate order, to the Coordinator (`t0`: when the Generator
+        put them on the queue); after the last generation, done."""
         me, campaign = s["agent_id"], s["campaign"]
         for g in range(self.G):
             reports = [await self.mail.receive(me, "report", f"g{g}c{i}") for i in range(self.P)]
             results, t0 = [r["result"] for r in reports], min(r["t0"] for r in reports)
             self._label(campaign, g, results, [r["numbers"] for r in reports])
+            if self.calls_on:
+                await self._assess(me, ask, s["seed"], reports)
             self._send(me, "coordinator", "results", g, {"results": results, "t0": t0, "elapsed_s": time.time() - t0})
         await self.mail.receive(me, "done", self.G)
         return s, Done()
+
+    async def _assess(self, me: str, ask, seed: int, reports: list[dict]) -> None:
+        """campaign.notes, after a generation's barrier: the Evaluator's call, as in the asynchronous mode (a
+        keep-probability for each candidate; the score from numbers, q + monitor.weight x m clipped to 0..1, when
+        it falls back), which changes no result; with record.extras each candidate's note and assessment
+        (`assessed`) beside its numbers (the entries _label has just written)."""
+        q = decide.keep_probabilities([decide.native(r["result"]) for r in reports], self.knobs["outer"]["wall_weight"])
+        w = self.knobs["monitor"]["weight"]
+        items = [{"candidate": i, "result": r["result"], "q": q[i], "numbers": r["numbers"], "note": r["note"],
+                  "score": decide.numbers_score(q[i], (r["numbers"] or {}).get("m"), w)} for i, r in enumerate(reports)]
+        got = await self._ask(me, ask, decide.scores_messages(items), decide.scores_tokens(len(items)),
+                              decide.budget(self.knobs, seed),
+                              parse=lambda x: decide.parse_scores(x, list(range(len(items)))))
+        if self.extras:
+            for entry, it in zip(self.numbers.get(campaign_of(me), [])[-len(items):], items):
+                entry.update(note=it["note"], assessed=it["score"] if got is None else got[it["candidate"]])
 
     def _label(self, campaign: str, g: int, results: list[dict], numbers: list) -> None:
         """At generation g's barrier: each held trace joins the campaign's good side when its keep-probability
@@ -1024,8 +1157,9 @@ class Script:
         """Its start and lookups as in the generations mode; then its cycle until the budget's last result is
         in: every scored message that has arrived (waiting for one), their results in arrival order
         (decide.async_on_scored: survival, the survivors, best-so-far, the log), the newest survivors to the
-        Generator, and its memory; at the end done to the Generator and the Evaluator, and its Report (no
-        summary call in this mode)."""
+        Generator, then its model call and its guidance to the Generator ("" when the call falls back: none;
+        survival is already decided), and its memory; at the end done to the Generator and the Evaluator, and
+        its Report (no summary call in this mode), with its campaign's model calls answered."""
         me, campaign, phase = s["agent_id"], s["campaign"], s["phase"]
         run_dir = decide.campaign_dir(self.out, self.knobs, campaign)
         if phase == "start":
@@ -1055,12 +1189,18 @@ class Script:
                 replay["survivors"] = [x["candidate"] for x in cst["survivors"]]
             self._hook(me, self.cycles[me] - 1)
             self.mail.deliver(me, "generator", "survivors", decide.async_survivors(cst))
+            if self.calls_on:
+                text = await self._ask(me, ask, decide.guidance_messages(cst, rows, self.knobs),
+                                       decide.GUIDANCE_TOKENS, cst["budget"], parse=decide.parse_text) or ""
+                self.mail.deliver(me, "generator", "guidance", {"n": cst["cycles"], "text": text})
+                if replay is not None:
+                    replay["guidance"].append(text)
             return _state(s, "cycle" if cst["arrived"] < self.B else "ending", cst=cst), \
                 Remember(decide.async_memory(cst))
         if phase == "ending":
             for to in ("generator", "evaluator"):
                 self._send(me, to, "done", self.G, None)
-            return _state(s, "reporting"), Report(decide.async_finish(s["cst"], run_dir))
+            return _state(s, "reporting"), Report(decide.async_finish(s["cst"], run_dir, self.answered[campaign]))
         if phase == "reporting":
             return s, Done()
         raise ValueError(f"unknown phase {phase!r}")
@@ -1068,9 +1208,10 @@ class Script:
     async def _generator_async(self, s: dict, event, ask):
         """Its lookups; then (with agents.start_together, once every agent of its population has started) its
         cycle until the budget's candidates are made: once no candidate waits on the campaign's queue, the
-        survivors and digests that have arrived (taken without waiting), its first survivors if the take needs
-        one and none has come (its only wait), and the next decide.TAKE profiles onto the queue (`t0`: when they
-        were put there). Then done, every message still left for it, and one stop on the queue per Monitor."""
+        survivors, digests and guidance that have arrived (taken without waiting), its first survivors if the
+        take needs one and none has come (its only wait), and the next decide.TAKE profiles, reconciled by its
+        model call (`_reconcile`), onto the queue (`t0`: when they were put there). Then done, every message
+        still left for it, and one stop on the queue per Monitor."""
         me, campaign, todo, ctx = s["agent_id"], s["campaign"], s["todo"], s["ctx"]
         if event is not None:
             todo, ctx = todo[1:], {**ctx, todo[0]: event}
@@ -1079,15 +1220,18 @@ class Script:
         if self.together:
             with activity(AgentState.TOOL_WAIT):
                 await self.mail.all_started.wait()
-        gst, replay = decide.async_generator_state(campaign, s["seed"], self.knobs), self._replay(campaign)
+        gst, replay = decide.async_generator_state(campaign, s["seed"], self.knobs, ctx), self._replay(campaign)
         while gst["made"] < self.B:
             await self.mail.emptied(me, QUEUE)
             gst = decide.async_on_survivors(gst, await self.mail.take_all(me, "survivors", wait=False))
-            await self.mail.take_all(me, "digest", wait=False)   # read; no model call reads them yet
+            gst = decide.async_on_digests(gst, await self.mail.take_all(me, "digest", wait=False), self.knobs)
+            gst = decide.async_on_guidance(gst, await self.mail.take_all(me, "guidance", wait=False))
             if decide.async_waits(gst, self.knobs):
                 self.survivor_waits[me] += 1
                 gst = decide.async_on_survivors(gst, await self.mail.take_all(me, "survivors"))
             gst, calls = decide.async_profiles(gst, self.knobs)
+            if self.calls_on and calls:
+                calls = await self._reconcile(me, ask, gst, calls, s["seed"])
             self._hook(me, self.cycles[me])
             t0 = time.time()
             for call in calls:
@@ -1096,17 +1240,35 @@ class Script:
                 replay["held"] += [gst["held"]] * len(calls)
             self.cycles[me] += 1
         await self.mail.receive(me, "done", self.G)
-        for kind in ("survivors", "digest"):   # all sent before done
+        for kind in ("survivors", "digest", "guidance"):   # all sent before done
             await self.mail.take_all(me, kind, wait=False)
         for _ in range(self.slots):
             self.mail.put(me, QUEUE, None)
         return s, Done()
 
+    async def _reconcile(self, me: str, ask, gst: dict, calls: list[dict], seed: int) -> list[dict]:
+        """The Generator's model call on a take (its JSON schema as response_format): each profile with the
+        reply's values in place of the evolutionary loop's (decide.async_reconcile), or unchanged when the call
+        falls back; each candidate's `filled` (the parameters its reply filled, 0 on the fallback), and this
+        Generator's proposals counted by the parameters filled."""
+        n = len(calls)
+        got = await self._ask(me, ask, decide.async_generator_messages(gst, calls, self.knobs), decide.reply_tokens(n),
+                              decide.budget(self.knobs, seed), parse=lambda r: decide.parse_reconcile(r, n),
+                              response_format=decide.candidates_schema(n))
+        if got is None:
+            return [{**c, "filled": 0} for c in calls]
+        calls, filled = decide.async_reconcile(calls, got)
+        counts = self.filled.setdefault(me, [0] * 8)
+        for k in filled:
+            counts[k] += 1
+        return calls
+
     async def _evaluator_async(self, s: dict, event, ask):
         """Its cycle until the budget's results are scored: every report that has arrived (waiting for one),
         scored in arrival order against the campaign's window, which its statistics hold
-        (decide.async_evaluate), each trace labelled (`_label_async`); the scored results to the Coordinator
-        and a digest to the Generator. Then done."""
+        (decide.async_evaluate), each trace labelled (`_label_async`); its model call, whose keep-probabilities
+        are the scores (from numbers when it falls back); the scored results to the Coordinator and a digest to
+        the Generator. Then done."""
         me, campaign = s["agent_id"], s["campaign"]
         scored_n, replay = 0, self._replay(campaign)
         while scored_n < self.B:
@@ -1115,6 +1277,13 @@ class Script:
             stats.recent, scored, digest = decide.async_evaluate(stats.recent, reports, self.knobs)
             for r, sc in zip(reports, scored):
                 self._label_async(campaign, stats, r, sc)
+            if self.calls_on:
+                items = [{**sc, "numbers": r["numbers"], "note": r["note"]} for r, sc in zip(reports, scored)]
+                got = await self._ask(me, ask, decide.scores_messages(items),
+                                      decide.scores_tokens(len(items)), decide.budget(self.knobs, s["seed"]),
+                                      parse=lambda x: decide.parse_scores(x, [sc["candidate"] for sc in scored]))
+                if got is not None:
+                    scored, digest = decide.async_model_scores(scored, got)
             scored_n += len(scored)
             self._hook(me, self.cycles[me])
             self.mail.deliver(me, "coordinator", "scored", {"results": scored})
@@ -1129,7 +1298,8 @@ class Script:
         """As a result is scored, its trace (held by its Monitor) joins the campaign's good side when q is 0.5
         or more, else the bad side; a synthetic trace (the fixture's) is labelled instead from its own end
         values among the window's synthetic traces, it last (monitor.end_keep), marked synthetic. With
-        record.extras, the candidate's numbers, q and label, for its campaign's line."""
+        record.extras, the candidate's numbers, q, label and (with the roles' calls) the Monitor's note, for its
+        campaign's line."""
         k = sc["candidate"]
         held, label, label_from = stats.take_one(k // self.P, k), None, None
         if held is not None:
@@ -1144,7 +1314,8 @@ class Script:
         if self.extras:
             self.numbers.setdefault(campaign, []).append(
                 {"generation": k // self.P, "candidate_idx": k, "q": round(sc["q"], 6), **(report["numbers"] or {}),
-                 "label": None if label is None else "good" if label else "bad", "label_from": label_from})
+                 "label": None if label is None else "good" if label else "bad", "label_from": label_from,
+                 **({"note": report["note"]} if self.calls_on else {})})
 
     def _stats(self, campaign: str) -> monitor.Rolling:
         """The campaign's statistics object, made by whichever agent needs it first."""
@@ -1154,11 +1325,12 @@ class Script:
     def _replay(self, campaign: str) -> dict | None:
         """With record.extras, what a replay of the campaign needs, for its line: the order results reached the
         Evaluator and the Coordinator (one list per cycle), the survivors message held at each profile, each
-        result's row (decide.async_on_scored) and the survivors at the end."""
+        result's row (decide.async_on_scored) and the survivors at the end; and each Coordinator cycle's
+        guidance (with the roles' calls)."""
         if not self.extras:
             return None
         return self.replay.get(campaign) or self.replay.setdefault(
-            campaign, {"evaluator": [], "coordinator": [], "held": [], "results": [], "survivors": []})
+            campaign, {"evaluator": [], "coordinator": [], "held": [], "results": [], "survivors": [], "guidance": []})
 
     def _hook(self, me: str, tag) -> None:
         if self.fail_at == f"{me}:{tag}":   # the tests' injected failure (FAIL_ENV)
@@ -1169,26 +1341,85 @@ class Script:
             raise InjectedFailure(f"{me} failed before sending {kind}/{g} ({FAIL_ENV})")
         self.mail.send(me, to, kind, g, value)
 
-    async def _model(self, campaign: str, ask, messages: list[dict], budget: int, reply_tokens: int,
-                     role: str) -> str:
-        """decide.Ask through the population's fleet, with the request run.py's OpenAIChat sends:
-        max_tokens = thinking budget + reply allowance, vLLM's thinking_token_budget (unless
-        llm.send_thinking_budget is false), and no temperature (AUTONMI's transports set 0; None leaves the
-        server's default). Admission reserves the budget. A call that fails is recorded, as run.Services
-        records it. `role`: the role whose call it is (generator: a refill; coordinator: the summary)."""
-        kwargs = {"max_tokens": budget + reply_tokens, "reserve": budget + reply_tokens, "temperature": None,
-                  "meta": {"budget": budget, "reply_tokens": reply_tokens, "role": role}}
-        if self.send_budget:
+    def _request(self, budget: int, reply_tokens: int, role: str, own: bool) -> dict:
+        """A call's request fields: by default run.py's OpenAIChat's, max_tokens = thinking budget + reply
+        allowance, vLLM's thinking_token_budget (unless llm.send_thinking_budget is false), and no temperature
+        (AUTONMI's transports set 0; None leaves the server's default). The llm knobs change them: with
+        llm.reply_cap, max_tokens is the cap plus the budget (the cap alone with llm.thinking off); llm.thinking
+        off sends no budget (the transports send chat_template_kwargs, miniapp_workflow); llm.temperature and
+        llm.top_p are sent as set. No per-call extra_body otherwise: one would replace the transports' own
+        (flowgentic/fleet/_transport.py:555-556). Admission reserves the budget and the allowance. `own`: a
+        role's own call (tried TRIES times), in the call's meta for on_call."""
+        k = self.knobs["llm"]
+        cap = budget + reply_tokens if k["reply_cap"] is None else k["reply_cap"] + (0 if k["thinking"] == "off"
+                                                                                      else budget)
+        kwargs = {"max_tokens": cap, "reserve": budget + reply_tokens, "temperature": k["temperature"],
+                  "meta": {"budget": budget, "reply_tokens": reply_tokens, "role": role, "own": own}}
+        if k["top_p"] is not None:
+            kwargs["top_p"] = k["top_p"]
+        if self.send_budget and k["thinking"] != "off":
             kwargs["extra_body"] = {"thinking_token_budget": budget}
-        t0 = time.perf_counter()
-        try:
-            return await ask(messages, **kwargs)
-        except Exception as exc:
-            self.calls.setdefault(campaign, []).append(
-                {"role": role, "reply_tokens": reply_tokens, "budget": budget,
-                 "latency_s": round(time.perf_counter() - t0, 4), "error": type(exc).__name__, "finish_reason": None,
-                 "empty": None})
-            raise
+        return kwargs
+
+    async def _ask(self, me: str, ask, messages: list[dict], reply_tokens: int, budget: int, parse=None,
+                   response_format: dict | None = None):
+        """A model call of agent `me` (decide.Ask through the population's fleet, `_request`'s fields;
+        `response_format`, the Generator's JSON schema, as a plain keyword). Each try's details (`_detail`): one
+        answered by on_call, one that failed here, as run.Services records it. Counted per agent: asked, tried,
+        fallen back. No try is made once another agent has failed the campaign (CampaignFailed).
+
+        Without `parse` (the generations mode's refill and summary): the reply's text, after one try whose
+        failure ends the campaign, as before. With it (the roles' own calls): parse(reply), tried up to TRIES
+        times while the call fails or parse gives None (a reply it cannot use); then None, the role's fallback.
+        A role's call whose prompt is too long for the servers' context (the prompt-length check: its characters,
+        at least its tokens, plus max_tokens over the context) is not sent and not tried again: it fails at once,
+        with the error PromptTooLong."""
+        role, campaign, own = role_of(me), campaign_of(me), parse is not None
+        kwargs = self._request(budget, reply_tokens, role, own)
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        chars = sum(len(str(m.get("content") or "")) for m in messages) if own and self.context is not None else 0
+        too_long = own and self.context is not None and chars + kwargs["max_tokens"] > self.context
+        self.asks[me] += 1
+        for _ in range(TRIES if own else 1):
+            if campaign in self.mail.failed:
+                raise CampaignFailed(self.mail.failed[campaign])
+            self.tries[me] += 1
+            t0 = time.perf_counter()
+            try:
+                if too_long:
+                    raise PromptTooLong(f"{chars} prompt characters + max_tokens {kwargs['max_tokens']} > the "
+                                        f"servers' context {self.context}")
+                reply = await ask(messages, **kwargs)
+            except Exception as exc:
+                self._detail(campaign, own, {"role": role, "reply_tokens": reply_tokens, "budget": budget,
+                                             "latency_s": round(time.perf_counter() - t0, 4),
+                                             "error": type(exc).__name__, "finish_reason": None, "empty": None})
+                if not own:
+                    raise
+                if too_long:
+                    break
+                continue
+            if not own:
+                return reply
+            out = parse(reply)
+            if out is not None:
+                return out
+        self.fallbacks[me] += 1
+        return None
+
+    def _detail(self, campaign: str, own: bool, d: dict) -> None:
+        """A call's details: in its campaign's line (llm_call_details) for the generations mode's refill and
+        summary, as before, and for the roles' own calls with record.extras; otherwise, and for a call that ends
+        after its campaign's line was written, summed for the record (`sums`)."""
+        if (self.extras or not own) and self._open(campaign):
+            self.calls.setdefault(campaign, []).append(d)
+        else:
+            self.sums.add(d)
+
+    def _open(self, campaign: str) -> bool:
+        """Whether the campaign's line is still to be written (it has neither reported nor failed)."""
+        return campaign not in self.reported and campaign not in self.mail.failed
 
     # --- the actions' services ----------------------------------------------------------------------------
 
@@ -1207,17 +1438,21 @@ class Script:
         campaign = campaign_of(agent_id)
         self.reported.add(campaign)
         self.llm_calls[campaign] = result["n_llm_calls"]
+        self.answered.pop(campaign, None)
         extras = {"monitor": self.numbers.pop(campaign, [])} if self.extras else {}   # record.extras: outside the digest
         if self.extras and self.asynchronous:   # each result's row, and what a replay needs
             extras["asynchronous"] = self.replay.pop(campaign, {})
         self._line({**result, "llm_call_details": self.calls.pop(campaign, []), **extras})
 
     def on_call(self, rec, reply: Reply) -> None:
-        """A model call that returned: its details, as run.Services keeps them for the campaign's line, with
-        its times (Flowgentic's CallRecord): it was in flight at the server from t_end - service_s to t_end,
-        after recovery_s of failed tries (latency_s is their sum) and, before those, wait_s for admission."""
-        m = rec.meta or {}
-        self.calls.setdefault(campaign_of(rec.agent_id), []).append({
+        """A model call that returned: counted for its campaign's line (n_llm_calls in the asynchronous mode) while
+        the line is still to be written, and its details (`_detail`), as run.Services keeps them, with its times
+        (Flowgentic's CallRecord): it was in flight at the server from t_end - service_s to t_end, after
+        recovery_s of failed tries (latency_s is their sum) and, before those, wait_s for admission."""
+        m, campaign = rec.meta or {}, campaign_of(rec.agent_id)
+        if self._open(campaign):
+            self.answered[campaign] += 1
+        self._detail(campaign, m.get("own", False), {
             "role": m.get("role"), "reply_tokens": m.get("reply_tokens"), "budget": m.get("budget"),
             "latency_s": round(rec.service_s + rec.recovery_s, 4), "wait_s": round(rec.wait_s, 4),
             "t_end": round(rec.t_end, 6), "service_s": round(rec.service_s, 6), "recovery_s": round(rec.recovery_s, 6),
@@ -1242,6 +1477,7 @@ class Script:
                             "role": role_of(result.id), "llm_call_details": self.calls.pop(campaign, [])})
                 self.numbers.pop(campaign, None)
                 self.replay.pop(campaign, None)
+                self.answered.pop(campaign, None)
             self.mail.fail(campaign, f"{result.id} failed: {result.error}")
 
     def _line(self, line: dict) -> None:
@@ -1358,9 +1594,10 @@ def _get(url: str, key: str | None, timeout: float = 10.0) -> bytes:
         return r.read()
 
 
-def check_served_model(model: dict, name: str) -> list[dict]:
+def check_served_model(model: dict, name: str, context: list | None = None) -> list[dict]:
     """Every server of the model job lists `name` (llm.model) in its /v1/models, or ModelServiceError. The
-    distinct entries they list for it (id and owned_by: who the server says serves it), for the record."""
+    distinct entries they list for it (id and owned_by: who the server says serves it), for the record; and
+    into `context` each server's max_model_len, when it gives one (vLLM does)."""
     from autonmi.models import api_key
 
     key, served = api_key(model), []
@@ -1374,6 +1611,9 @@ def check_served_model(model: dict, name: str) -> list[dict]:
             raise ModelServiceError(f"{url} serves {ids}, not llm.model {name!r}: set llm.model to the name the "
                                     "server serves (vLLM's --served-model-name)")
         entry = next({"id": m.get("id"), "owned_by": m.get("owned_by")} for m in data if m.get("id") == name)
+        length = next(m.get("max_model_len") for m in data if m.get("id") == name)
+        if context is not None and isinstance(length, int):
+            context.append(length)
         if entry not in served:
             served.append(entry)
     return served
@@ -1459,6 +1699,9 @@ def load_knobs(a: argparse.Namespace) -> dict:
                                 modes=("generations", "async"))   # the asynchronous mode runs on this layer only
     if knobs["llm"]["mode"] == "openai" and knobs["llm"]["model"] == "stub":
         raise knob_files.KnobError('llm.mode is openai but llm.model is still "stub"; set llm.model in a knob file')
+    if knobs["llm"]["mode"] == "openai" and decide.asynchronous(knobs) and knobs["llm"]["thinking"] is None:
+        raise knob_files.KnobError("llm.mode openai in the asynchronous mode needs llm.thinking set (off or on): "
+                                   "unset, the server's chat template decides whether the model thinks")
     return knobs
 
 
@@ -1568,13 +1811,15 @@ async def run_miniapp(a: argparse.Namespace, knobs: dict, out: Path, work_root: 
 
 async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str | None, live: LiveLine) -> bool:
     k = knobs["llm"]
-    model = None
+    model, context = None, []
     if k["mode"] == "openai":   # the model job's servers, once all answer; the thinking budget is per call
-        from autonmi.models import wait_for_servers
+        from autonmi.models import THINKING_OFF, wait_for_servers
 
+        # llm.thinking off: chat_template_kwargs {enable_thinking: false} on every call (the transports' own)
         model = await wait_for_servers(a.endpoints_file, a.api_key_file, wait_s=a.model_wait, name=k["model"],
-                                       timeout_s=k["timeout_s"], thinking_off={})
-        live.served = await asyncio.to_thread(check_served_model, model, k["model"])   # before any campaign
+                                       timeout_s=k["timeout_s"], outage_s=k["outage_s"],
+                                       thinking_off=THINKING_OFF if k["thinking"] == "off" else {})
+        live.served = await asyncio.to_thread(check_served_model, model, k["model"], context)   # before any campaign
         if a.no_vllm_metrics:
             live.why_no_sampler = "--no-vllm-metrics"
         else:
@@ -1585,6 +1830,7 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
     live.servers = len(model["endpoints"]) if model else 1   # the stub: one replica (PopulationConfig)
     definition = importlib.import_module(MODULE).Fusion(knobs, a.sim, out, work_root)
     definition.live = live.counts
+    definition.context = min(context) if context else None   # the prompt-length check (Script._ask)
     # locally, the populations' simulations run on run.py's pools; under Dragon, on RHAPSODY's native backend
     executor = f"{MODULE}:{'sim_pool' if a.sim == 'real' else 'fixture_pool'}" if a.runtime == "local" else None
     campaign = Campaign(
@@ -1688,24 +1934,31 @@ def probe(a: argparse.Namespace) -> dict | None:
         return pool.submit(record.device_probe, True).result()
 
 
-def llm_service(knobs: dict, lines: list[dict]) -> dict:
-    """These campaigns' model calls, as llm.py's recorder reports an agent process's (seen())."""
+def llm_service(knobs: dict, lines: list[dict], sums: dict | None = None) -> dict:
+    """These campaigns' model calls, as llm.py's recorder reports an agent process's (seen()): those in their
+    lines' details, and those the population summed instead (`sums`, CallSums.read)."""
     details = [c for r in lines for c in r.get("llm_call_details", [])]
     ok = [c for c in details if not c.get("error")]
-    return {"mode": knobs["llm"]["mode"], "calls": len(details),
-            "budgets": dict(Counter(str(c["budget"]) for c in details)),
-            "empty": sum(bool(c["empty"]) for c in ok), "errors": len(details) - len(ok),
+    n, sums = Counter(), sums or {}
+    n.update(sums.get("n", {}))
+    return {"mode": knobs["llm"]["mode"], "calls": len(details) + n["calls"],
+            "budgets": dict(Counter(str(c["budget"]) for c in details) + Counter(sums.get("budgets", {}))),
+            "empty": sum(bool(c["empty"]) for c in ok) + n["empty"], "errors": len(details) - len(ok) + n["errors"],
             "retries": 0,   # AUTONMI's fleet waits out a server instead (layer.model_outages)
-            "finish_reasons": dict(Counter(c["finish_reason"] for c in ok)),
-            "tokens": {k: sum(c.get(f"{k}_tokens") or 0 for c in ok) for k in ("prompt", "completion", "reasoning")},
-            "latency_s": [c["latency_s"] for c in details]}
+            "finish_reasons": dict(Counter(c["finish_reason"] for c in ok) + Counter(sums.get("finish_reasons", {}))),
+            "tokens": {k: sum(c.get(f"{k}_tokens") or 0 for c in ok) + sums.get("tokens", {}).get(k, 0)
+                       for k in ("prompt", "completion", "reasoning")},
+            "latency_s": [c["latency_s"] for c in details] + sums.get("latency_s", [])}
 
 
 def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, loop_lag, device, threads) -> dict:
     """Population `index` as record.write takes an agent process of run.py (run.Services.part): its campaign
     lines, and its counts, from them and from AUTONMI's population.json (written when it ends; an
-    interrupted population has none). The counts from the lines are those of the campaigns that reported."""
+    interrupted population has none). The counts from the lines are those of the campaigns that reported. The
+    model calls not in the lines (CallSums) count in llm_service, and their times (`call_times`) in record.write's
+    client-side counts."""
     lines = [json.loads(x) for x in lines_file.read_text().splitlines() if x]
+    sums = CallSums.read(sums_file(lines_file, index))   # the calls not in the lines
     done = [r for r in lines if "error" not in r]
     stats_file = Path(a.out) / "populations" / f"p{index:03d}" / "population.json"
     stats = json.loads(stats_file.read_text()) if stats_file.exists() else {}
@@ -1713,7 +1966,9 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     survival = {"survival": {k: sum(r["survival"][k] for r in done) for k in ASYNC_COUNTS}} \
         if decide.asynchronous(knobs) else {}   # the reported campaigns' results scored and kept
     return {**survival,
-        "agents_file": str(lines_file), "llm_service": llm_service(knobs, lines),
+        "agents_file": str(lines_file), "llm_service": llm_service(knobs, lines, sums),
+        "call_times": None if sums is None else {"calls": sums["n"].get("calls", 0),
+                                                 "retried": sums["n"].get("retried", 0), "times": sums["times"]},
         "tool_calls": dict(Counter(what for _ in done for what in decide.lookups(knobs))),
         "sim_tasks": runner.get("simulations", sum(r["n_sims"] for r in done)),
         # one memory write per generation, or per Coordinator cycle in the asynchronous mode
@@ -1822,7 +2077,8 @@ def _rows(out: Path) -> list[dict]:
 
 def by_role(rows: list[dict]) -> dict:
     """counts.by_role, from AUTONMI's rows: each role's agents, those that ended normally, their model calls
-    (the fleets' count), lookups, messages sent, received and dropped (a failed campaign's), suspensions
+    (the fleets' count of replies; and the layer's of calls asked, tries and fallbacks: Script._ask), lookups,
+    messages sent, received and dropped (a failed campaign's), suspensions
     (AUTONMI's: the Monitors', one per evaluation unless it had ended when the Monitor asked), the
     evaluations the Monitors submitted, the inner-loop traces they got (monitor.capture) and the reports they
     sent, and each agent's seconds waiting for messages (their sum, and n, mean, median, 95th percentile and
@@ -1832,7 +2088,8 @@ def by_role(rows: list[dict]) -> dict:
         rs = [r for r in rows if r.get("role") == role]
         waits = [r.get("message_wait_s") or 0.0 for r in rs]
         out[role] = {"agents": len(rs), "finished": sum(bool(r.get("finished")) for r in rs),
-                     **{k: sum(r.get(k) or 0 for r in rs) for k in ("model_calls", "lookups", "messages_sent",
+                     **{k: sum(r.get(k) or 0 for r in rs) for k in ("model_calls", "model_asks", "model_tries",
+                                                                     "model_fallbacks", "lookups", "messages_sent",
                                                                      "messages_received", "messages_dropped",
                                                                      "suspensions", "simulations", "traces",
                                                                      "reports")},
@@ -1846,13 +2103,16 @@ ASYNC_COUNTS = ("results_scored", "results_kept", "results_scored_after_warmup",
 def asynchronous_counts(parts: list[dict], rows: list[dict]) -> dict:
     """counts.asynchronous: the results scored and kept, in all and after warm-up (campaign.warmup: the first
     results are kept whatever their score), of the campaigns that reported (their lines, as counts.sims);
-    and from AUTONMI's rows each role's cycles and the Generators' waits for their first survivors (None
-    without rows: a population the run's interruption cancelled writes none)."""
+    and from AUTONMI's rows each role's cycles, the Generators' waits for their first survivors, and their
+    proposals by the parameters (0 to 7) their model calls filled (None without rows: a population the run's
+    interruption cancelled writes none)."""
     out = {k: sum(p["survival"][k] for p in parts) for k in ASYNC_COUNTS}
     if not rows:
-        return {**out, "cycles": None, "survivor_waits": None}
+        return {**out, "cycles": None, "survivor_waits": None, "parameters_filled": None}
+    generators = [r for r in rows if r.get("role") == "generator"]
     return {**out, "cycles": {role: sum(r.get("cycles") or 0 for r in rows if r.get("role") == role) for role in ROLES},
-            "survivor_waits": sum(r.get("survivor_waits") or 0 for r in rows if r.get("role") == "generator")}
+            "survivor_waits": sum(r.get("survivor_waits") or 0 for r in generators),
+            "parameters_filled": [sum((r.get("parameters_filled") or [0] * 8)[k] for r in generators) for k in range(8)]}
 
 
 def begin_margin_s(rows: list[dict]) -> float | None:
@@ -2010,6 +2270,8 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     refs = references(a, knobs, live)
     rec = record.write(out, knobs=knobs, layer="autonmi", sim=a.sim, parts=parts, failed=failed, wall_s=wall_s,
                        interrupted=interrupted, t_run=t_run, model_refs=refs)
+    for i in range(a.populations):   # summed into the record (part): not kept beside it
+        sums_file(out / f"agents-p{i:03d}.jsonl", i).unlink(missing_ok=True)
     try:
         summary = assemble(out)
     except Exception as exc:   # an interrupted or broken run may lack what AUTONMI assembles

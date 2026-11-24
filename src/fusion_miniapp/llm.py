@@ -15,7 +15,7 @@ import re
 import time
 from collections import Counter
 
-from fusion_miniapp.decide import ranges
+from fusion_miniapp.decide import GUIDANCE_ASK, NOTE_ASK, SCORES_ASK, numbers_score, ranges
 
 REPLY_TOKENS = 256   # room for the visible reply on top of the thinking budget
 MAX_IN_FLIGHT = 512  # requests in flight per model server, over all agent processes (both layers admit
@@ -91,17 +91,34 @@ class _Recorder:
         pass
 
 
+def numbers_only(content: str, weight: float = 0.25) -> str | None:
+    """FIXTURE, not a model: the stub's reply (and tests/fake_vllm.py's) to the calls the AUTONMI layer's roles add,
+    known by the request's last line (decide's asks): the Evaluator's gets, for each candidate, the score from the
+    numbers alone (decide.numbers_score of the q and m its prompt gives, at monitor.weight `weight`); a Monitor's
+    note and the Coordinator's guidance get "" (none). None for any other request."""
+    lines = content.splitlines()
+    last = lines[-1] if lines else ""
+    if last in (NOTE_ASK, GUIDANCE_ASK):
+        return ""
+    if last == SCORES_ASK:
+        found = (re.match(r"candidate (\d+): q ([^;]+); (?:m (\S+) |no trace)", x) for x in lines)
+        return json.dumps({m.group(1): numbers_score(float(m.group(2)), m.group(3) and float(m.group(3)), weight)
+                           for m in found if m})
+    return None
+
+
 class StubLLM(_Recorder):
     """FIXTURE, not a model. A refill request (its last line asks for "a JSON list of N objects") gets
     N candidates of the seven parameters, drawn in range from a generator seeded by the agent and that
     line; a request for one JSON object gets one; a summary request gets a one-line echo of the best
-    candidate. Replies depend on nothing else, so both layers agree."""
+    candidate; the AUTONMI layer's notes, scores and guidance the value from numbers alone (numbers_only).
+    Replies depend on nothing else, so both layers agree."""
 
     mode = "stub"
 
-    def __init__(self, seed: int = 0, latency_s: float = 0.001) -> None:
+    def __init__(self, seed: int = 0, latency_s: float = 0.001, weight: float = 0.25) -> None:
         super().__init__()
-        self.seed, self.latency_s = seed, latency_s
+        self.seed, self.latency_s, self.weight = seed, latency_s, weight   # weight: monitor.weight (numbers_only)
 
     async def call_with_meta(
         self,
@@ -113,12 +130,13 @@ class StubLLM(_Recorder):
         t0 = time.perf_counter()
         await asyncio.sleep(self.latency_s)
         lines = messages[-1]["content"].splitlines()
-        if "JSON" in lines[-1]:
+        text = numbers_only(messages[-1]["content"], self.weight)
+        if text is None and "JSON" in lines[-1]:
             rng = random.Random(f"{self.seed}/{agent_id}/{lines[-1]}")
             draw = lambda: {k: round(rng.uniform(lo, hi), 6) for k, (lo, hi) in ranges().items()}  # noqa: E731
             many = re.search(r"JSON list of (\d+)", lines[-1])
             text = json.dumps([draw() for _ in range(int(many.group(1)))] if many else draw())
-        else:
+        elif text is None:
             text = "Stub summary: " + lines[0]
         meta = self._record_ok(thinking_budget, time.perf_counter() - t0, "stop", not text.strip())
         return text, meta

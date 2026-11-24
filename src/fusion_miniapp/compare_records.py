@@ -5,7 +5,7 @@
 Results must agree: the counts and the knobs other than the machine's own (sim.device, sim.work_root,
 sim.threads_per_worker, workers.sim_workers; agents.per_process, max_live and start_together, and
 campaign.slots: the layout) and the model service's (llm.stub_latency_s, llm.max_in_flight,
-llm.admission_tokens) and the Monitor's trace (monitor.capture, monitor.fixture_trace: no result reads it)
+llm.admission_tokens, llm.outage_s) and the Monitor's trace (monitor.capture, monitor.fixture_trace: no result reads it)
 and record.extras (what the record writes), and the campaigns. A record older than a knob ran with the value
 ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
 once. Otherwise each campaign in the two neighbouring agents.jsonl files is compared by agent_id: ids,
@@ -18,9 +18,11 @@ Exit 0 when the results agree.
 
 Two records of the asynchronous mode (campaign.mode: async) are not compared on their results: those differ
 from run to run with the order of arrival, so results_sha256, the campaigns and the counts that follow from
-the results (feasible_agents, memory_writes: one per Coordinator cycle, and counts.asynchronous's kept and
-cycles) are left out. They agree when both pass (which includes AUTONMI's checks of the mode's invariants:
-P x G evaluations per campaign, each candidate once, every message received, the survivors, inner loops and
+the results (feasible_agents, memory_writes: one per Coordinator cycle, llm_calls: one per cycle of the
+Evaluator and the Coordinator, and counts.asynchronous's kept and cycles) are left out, and with llm.mode openai
+also the counts that follow the model's replies (candidates_by_source and refill_slots: a candidate is the
+model's when its Generator's reply filled a parameter). They agree when both
+pass (which includes AUTONMI's checks of the mode's invariants: P x G evaluations per campaign, each candidate once, every message received, the survivors, inner loops and
 candidates waiting within their bounds), their knobs agree, and so do the other exact counts and the results
 scored (counts.asynchronous.results_scored).
 """
@@ -36,14 +38,19 @@ MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_w
                  ("agents", "per_process"), ("agents", "max_live"), ("agents", "start_together"),   # the layout
                  ("campaign", "slots"),   # the layout too: in the generations mode the Monitor slots change no result
                  ("llm", "stub_latency_s"), ("llm", "max_in_flight"), ("llm", "admission_tokens"),   # the model's
+                 ("llm", "outage_s"),
                  ("monitor", "capture"), ("monitor", "fixture_trace"),   # the trace, which no result reads
                  ("record", "extras")}   # what the record writes
 # knobs newer than some records, with the value those records ran with
 ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False, ("campaign", "mode"): "generations",
-               ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25}
+               ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25, ("campaign", "notes"): False,
+               ("llm", "thinking"): None, ("llm", "reply_cap"): None, ("llm", "temperature"): None,
+               ("llm", "top_p"): None, ("llm", "outage_s"): 1800}
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",
                 "candidates_by_source", "refill_slots", "sim_tasks", "memory_writes", "reports", "feasible_agents")
-ASYNC_VARY = ("feasible_agents", "memory_writes")   # counts that follow the order of arrival in the asynchronous mode
+ASYNC_VARY = ("feasible_agents", "memory_writes", "llm_calls")   # counts that follow the order of arrival in the
+                                                                 # asynchronous mode
+ASYNC_MODEL_VARY = ("candidates_by_source", "refill_slots")   # and its real model's replies (llm.mode openai)
 SPEED = (("campaigns_live", "max"), ("campaigns_live", "mean"), ("agent_phase_s",), ("rates_per_s", "evaluations"),
          ("rates_per_s", "model_calls"), ("sims_in_flight", "max"), ("sims_executing", "max"), ("sim_s", "p50"),
          ("queue_wait_s", "p95"), ("generation_s", "p95"), ("model_latency_s", "p95"), ("sim_bound_ratio",),
@@ -151,8 +158,10 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
             compare_campaigns(agents_a, agents_b, rtol, atol)
     if same_suspensions(a, b) and a["counts"].get("suspensions") != b["counts"].get("suspensions"):
         bad.append(f"counts.suspensions: {a['counts'].get('suspensions')} != {b['counts'].get('suspensions')}")
+    vary = (ASYNC_VARY + (ASYNC_MODEL_VARY if (a["knobs"].get("llm") or {}).get("mode") == "openai" else ())
+            if both_async else ())
     for k in EXACT_COUNTS:
-        if both_async and k in ASYNC_VARY:
+        if k in vary:
             continue
         if a["counts"].get(k) != b["counts"].get(k):
             bad.append(f"counts.{k}: {a['counts'].get(k)} != {b['counts'].get(k)}")

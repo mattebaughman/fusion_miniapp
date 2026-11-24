@@ -34,7 +34,8 @@ tools:
   latency_ms: 0
 
 llm:
-  mode: stub                  # stub | openai (an endpoint that accepts vLLM's thinking_token_budget)
+  mode: stub                  # stub | openai (an endpoint that accepts vLLM's thinking_token_budget) | off (no
+                              # model calls: the asynchronous mode only, every agent on numbers alone)
   base_url_env: OPENAI_BASE_URL   # names of environment variables, never their values
   api_key_env: OPENAI_API_KEY
   model: stub                 # set to the served model's name for mode openai
@@ -47,6 +48,14 @@ llm:
   max_in_flight: 512          # model requests admitted at once per model server (the AUTONMI layer; run.py's
                               # layers keep llm.MAX_IN_FLIGHT); tune per server
   admission_tokens: 2000000   # tokens admitted at once per model server (the AUTONMI layer); 0: requests only
+  # the AUTONMI layer's request settings (null: each call as before)
+  thinking: null              # off: chat_template_kwargs enable_thinking false on every call, and no thinking
+                              # budget sent; on: the budget as llm.send_thinking_budget says; null: nothing sent
+  reply_cap: null             # max_tokens = this, plus agents.thinking_budget unless thinking is off; null:
+                              # fusion's per-call allowance (thinking budget + the call's reply allowance)
+  temperature: null           # sent with every call; null: the server's default
+  top_p: null                 # sent with every call when set (above 0, at most 1)
+  outage_s: 1800              # how long a call waits out a model server that went away (AUTONMI's default)
 
 workers:
   sim_workers: 2              # simulation worker processes in all; each agent process gets sim_workers // processes
@@ -76,10 +85,14 @@ campaign:                     # the AUTONMI layer: each campaign's Monitor slots
   mode: generations           # generations: the parent's generation barrier, as IGNOS; results equal IGNOS's
                               # at any slot count. async (the AUTONMI layer only): no barrier, each result
                               # scored and kept or dropped as it arrives, so results differ from run to run;
-                              # for now it makes no model calls, whatever llm.mode says (numbers alone)
+                              # each agent makes its own model call (the Generator per 2 candidates, a Monitor
+                              # per candidate, the Evaluator and the Coordinator per cycle) unless llm.mode is off
   warmup: 4                   # traces the good side and the bad side each hold before the Monitor's m is not 0;
                               # in the asynchronous mode also the results kept whatever their score
+  notes: false                # the generations mode: true adds a Monitor call per candidate (its note) and an
+                              # Evaluator call per generation (its assessment); recorded, they change no result
 
 record:
-  extras: false               # true: each candidate's Monitor numbers in its campaign's line (agents.jsonl);
-                              # false: counts only
+  extras: false               # true: each candidate's Monitor numbers and note, the Evaluator's scores, the
+                              # Coordinator's guidance and the roles' model calls' details in its campaign's
+                              # line (agents.jsonl); false: counts only

@@ -112,8 +112,9 @@ def test_compare_records_skips_suspensions_across_the_monitor_slots():
 def test_compare_records_compares_asynchronous_records_on_counts_and_invariants():
     """Two records of the asynchronous mode (whose results differ from run to run with the order of arrival)
     agree when both pass (AUTONMI's checks of the mode's invariants are in the status), and their knobs, their
-    exact counts other than those that follow the order (feasible_agents, memory_writes) and their results
-    scored agree; their digests are not compared. An asynchronous and a generations record differ in the mode."""
+    exact counts other than those that follow the order (feasible_agents, memory_writes) and, with a real model,
+    its replies (candidates_by_source, refill_slots), and their results scored agree; their digests are not
+    compared. An asynchronous and a generations record differ in the mode."""
     knobs = {"outer": {"population": 16}, "campaign": {"slots": 2, "mode": "async", "warmup": 4}}
     a = {"status": "pass", "agent_layer": "autonmi", "results_sha256": "x", "knobs": knobs,
          "counts": {"sims": 32, "feasible_agents": 0, "memory_writes": 30, "suspensions": 32,
@@ -128,6 +129,16 @@ def test_compare_records_compares_asynchronous_records_on_counts_and_invariants(
         "the second run's status is 'fail', not 'pass'"]
     g = {**b, "knobs": {**knobs, "campaign": {**knobs["campaign"], "mode": "generations"}}}
     assert "knobs.campaign.mode: 'async' != 'generations'" in compare_records.compare(a, g)["results"]
+    # the counts that follow the model's replies (a candidate is the model's when its reply filled a parameter):
+    # left out with a real model (llm.mode openai), compared with the stub, whose replies are fixed
+    stub = {**a, "counts": {**a["counts"], "candidates_by_source": {"model": 32}, "refill_slots": {"filled_by_model": 32}}}
+    model = {**b, "counts": {**b["counts"], "candidates_by_source": {"model": 30, "mutation": 2},
+                             "refill_slots": {"filled_by_model": 30}}}
+    assert compare_records.compare(stub, model)["results"] == [
+        "counts.candidates_by_source: {'model': 32} != {'model': 30, 'mutation': 2}",
+        "counts.refill_slots: {'filled_by_model': 32} != {'filled_by_model': 30}"]
+    openai = {**knobs, "llm": {"mode": "openai"}}
+    assert compare_records.compare({**stub, "knobs": openai}, {**model, "knobs": openai})["results"] == []
 
 
 def test_compare_records_tolerates_last_digit_differences(tmp_path):

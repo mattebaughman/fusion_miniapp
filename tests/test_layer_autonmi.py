@@ -30,6 +30,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -863,7 +864,9 @@ def test_the_mailbox_delivers_each_message_once():
     """The Mailbox's contract: a receiver that asks first is woken by the send; a second send of a key not yet
     received raises; a send after its receipt stays in the box, reported as left (rows' messages_left, which
     every_message_received fails on); fail(a1) fails a1's waits and sends, now and later, counts a1's messages
-    not yet received as dropped, and leaves a10's alone; all_started is set by the last agent's start."""
+    not yet received as dropped, and leaves a10's alone; all_started is set by the last agent's start. A send
+    that has woken a waiting receive before its campaign fails is that receive's: received once, not also
+    dropped."""
     from fusion_miniapp.layer_autonmi import CampaignFailed, Mailbox
 
     async def check():
@@ -896,6 +899,14 @@ def test_the_mailbox_delivers_each_message_once():
             assert not box.all_started.is_set()
             box.start()
         assert box.all_started.is_set()
+        waiting = asyncio.ensure_future(box.receive("a2/generator", "make", 0))
+        await asyncio.sleep(0)
+        box.send("a2/coordinator", "generator", "make", 0, {"x": 5})   # wakes it
+        box.fail("a2", "a2/evaluator failed")                          # before it resumes: received, not dropped
+        assert await waiting == {"x": 5}
+        assert (box.sent["a2/coordinator"], box.received["a2/generator"], box.dropped["a2/generator"]) == (1, 1, 0)
+        with pytest.raises(CampaignFailed):
+            await box.receive("a2/generator", "make", 1)
     asyncio.run(check())
 
 
@@ -1176,8 +1187,9 @@ def test_a_run_off_the_pin_warns_once_and_records_it(tmp_path):
 
 # --- the asynchronous mode (campaign.mode: async) ------------------------------------------------------------
 
-ASYNC_KNOBS = {"campaign": {"mode": "async"}, "agents": {"start_together": True},
+ASYNC_KNOBS = {"campaign": {"mode": "async"}, "agents": {"start_together": True}, "llm": {"mode": "off"},
                "outer": {"population": 4, "generations": 4, "parent_stdout": "drop"}}   # 16 candidates a campaign
+ASYNC_CALLS = {**ASYNC_KNOBS, "llm": {}}   # the stub LLM (FIXTURE): every role makes its own call
 ASYNC_ARGS = ("--preset", "smoke", "--sim", "fixture", "--agents", "20", "--populations", "2")
 ASYNC_CHECKS = ("every_campaign_reports", "every_agent_finishes", "evaluations_and_model_calls_as_planned",
                 "every_message_received", "lookups_match_autonmi", "store_holds_only_the_memories",
@@ -1187,8 +1199,9 @@ ASYNC_CHECKS = ("every_campaign_reports", "every_agent_finishes", "evaluations_a
 
 @pytest.fixture(scope="module")
 def async_run(tmp_path_factory):
-    """One asynchronous run with record.extras: 20 fixture campaigns of 16 candidates (population 4), all agents
-    starting together, in 2 populations, with each campaign's arrivals reordered (tests/async_replay.py run as a
+    """One asynchronous run with no model calls (llm.mode off) and record.extras: 20 fixture campaigns of 16
+    candidates (population 4), all agents starting together, in 2 populations, with each campaign's arrivals
+    reordered (tests/async_replay.py run as a
     script: every fourth candidate's report and each Coordinator cycle wait on the event loop), so results reach
     the Evaluator out of candidate order and the Coordinator takes several Evaluator cycles at once. Its folder
     and run record."""
@@ -1200,8 +1213,24 @@ def async_run(tmp_path_factory):
     return d / "autonmi", json.loads((d / "autonmi" / "run_record.json").read_text())
 
 
+def reordered_run(d: Path, knobs: dict, *args, code: int = 0) -> tuple[Path, dict]:
+    """An asynchronous run of ASYNC_ARGS' 20 campaigns with each campaign's arrivals reordered (async_run); its
+    folder and run record."""
+    proc = subprocess.run([sys.executable, str(Path(__file__).with_name("async_replay.py")), *ASYNC_ARGS, "--knobs",
+                           knob_file(d, knobs), *args, "--out", str(d / "autonmi")],
+                          cwd=d, check=False, timeout=900, capture_output=True, text=True)
+    assert proc.returncode == code, proc.stderr[-3000:]
+    return d / "autonmi", json.loads((d / "autonmi" / "run_record.json").read_text())
+
+
+@pytest.fixture(scope="module")
+def async_calls_run(tmp_path_factory):
+    """async_run with the stub LLM (FIXTURE, at 1 ms a call): every role makes its own model call."""
+    return reordered_run(tmp_path_factory.mktemp("async_calls"), {**ASYNC_CALLS, "record": {"extras": True}})
+
+
 def test_the_asynchronous_mode_keeps_its_invariants(async_run):
-    """campaign.mode async, no model calls: each campaign's 16 candidates are evaluated once each by its Monitors,
+    """campaign.mode async, no model calls (llm.mode off): each campaign's 16 candidates are evaluated once each by its Monitors,
     every message is received, the survivors stay within the population, at most campaign.slots inner loops run
     and at most decide.TAKE candidates wait at once, and AUTONMI's checks hold them all; each role's counts are
     within messages()' bounds and tied to its cycles (the Generator's 8 takes of 2); the counters behind those
@@ -1298,7 +1327,11 @@ def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, 
     """record.extras off: no campaign line has per-result detail, and the record gains only the mark of the mode
     and its counts (counts.asynchronous) beside a generations-mode record of the same campaigns; a line gains
     only counts (n_cycles, survival) and its evaluations' submission times (t_submit, beside sim_s and wait_s,
-    which replace the generations' t0), and its lists are no longer than P x G (its generations none); on: each
+    which replace the generations' t0), and its lists are no longer than P x G (its generations none); with
+    every role's model call (the stub) the record and the lines have the same keys and lists as without, the
+    calls only counted (no line has a call's details: llm_call_details stays empty, and the record's model
+    figures, llm_service and the client-side requests in flight, count every call from the populations' sums,
+    whose files are not left beside the record); on: each
     line gains `monitor` (the Monitor's numbers, q and label of each candidate) and `asynchronous` (each result's row:
     arrival, candidate, q, m, score, draw, kept; and the replay's orders), outside results_sha256. Two
     asynchronous records agree in compare_records on their counts and invariants, not their (differing) digests."""
@@ -1306,18 +1339,31 @@ def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, 
         return {p for k, v in d.items() for p in (paths(v, f"{prefix}{k}.") if isinstance(v, dict) and v else
                                                   [f"{prefix}{k}"])}
     on_out, on = async_run
-    gen_knobs = {**ASYNC_KNOBS, "campaign": {"mode": "generations"}}
-    for name, knobs in (("off", ASYNC_KNOBS), ("gen", gen_knobs)):
+    gen_knobs = {**ASYNC_KNOBS, "campaign": {"mode": "generations"}, "llm": {}}
+    for name, knobs in (("off", ASYNC_KNOBS), ("gen", gen_knobs), ("calls", ASYNC_CALLS)):
         (tmp_path / name).mkdir()
         rec = run("autonmi", tmp_path / name, *ASYNC_ARGS, "--knobs", knob_file(tmp_path / name, knobs))
         assert rec["status"] == "pass"
-    off, gen = (json.loads((tmp_path / x / "autonmi" / "run_record.json").read_text()) for x in ("off", "gen"))
+    off, gen, calls = (json.loads((tmp_path / x / "autonmi" / "run_record.json").read_text()) for x in ("off", "gen",
+                                                                                                         "calls"))
+    calls_lines = lines_of(tmp_path / "calls" / "autonmi")
+    keyed = ("speed.", "llm_service.")   # the speed figures and the model calls' figures, keyed by their values
+    assert {p for p in paths(calls) if not p.startswith(keyed)} == {p for p in paths(off) if not p.startswith(keyed)}
+    assert {k for r in calls_lines for k in r} == {k for r in lines_of(tmp_path / "off" / "autonmi") for k in r}
+    assert all(r["llm_call_details"] == [] and r["n_llm_calls"] > 0 for r in calls_lines)
+    assert not any("note" in json.dumps(r) or "guidance" in json.dumps(r) for r in calls_lines)
+    by = calls["counts"]["by_role"]
+    assert calls["llm_service"]["calls"] == sum(by[role]["model_tries"] for role in ROLES) == \
+        sum(by[role]["model_calls"] for role in ROLES) == calls["speed"]["model_requests_in_flight"]["calls_timed"] > 0
+    assert calls["speed"]["rates_per_s"]["model_calls_all_agents"] > 0 and calls["llm_service"]["tokens"]["completion"] > 0
+    assert not list((tmp_path / "calls" / "autonmi").glob("calls-p*"))
     # the speed figures, knob echo, per-role bounds and model calls' figures (none here) of either mode
     skip = ("speed.", "knobs.", "counts.expected_by_role.", "llm_service.")
     added = {p for p in paths(off) - paths(gen) if not p.startswith(skip)}
     assert added == {"campaign_mode", *(f"counts.asynchronous.{k}" for k in (
         "results_scored", "results_kept", "results_scored_after_warmup", "results_kept_after_warmup",
-        "cycles.coordinator", "cycles.generator", "cycles.evaluator", "cycles.monitor", "survivor_waits"))}, added
+        "cycles.coordinator", "cycles.generator", "cycles.evaluator", "cycles.monitor", "survivor_waits",
+        "parameters_filled"))}, added
     assert not {p for p in paths(gen) - paths(off) if not p.startswith(skip)}
     assert paths(on) == paths(off)
     assert not any({"monitor", "asynchronous"} & set(r) for r in lines_of(tmp_path / "off" / "autonmi"))
@@ -1331,9 +1377,10 @@ def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, 
         return {(k, len(v)) for r in rows for k, v in r.items() if isinstance(v, list)}
     assert lists(gen_lines) == {("generations", 4), ("llm_call_details", 4), ("sim_s", 16), ("wait_s", 16)}
     assert lists(off_lines) == {("generations", 0), ("llm_call_details", 0), ("sim_s", 16), ("wait_s", 16),
-                                ("t_submit", 16)}
+                                ("t_submit", 16)} == lists(calls_lines)   # no list grows with the model calls
     for r in lines_of(on_out):
-        assert set(r["asynchronous"]) == {"evaluator", "coordinator", "held", "results", "survivors"}
+        assert set(r["asynchronous"]) == {"evaluator", "coordinator", "held", "results", "survivors", "guidance"}
+        assert r["asynchronous"]["guidance"] == []   # llm.mode off: no guidance
         assert [x["arrival"] for x in r["asynchronous"]["results"]] == list(range(16))
         assert all(set(x) == {"arrival", "candidate", "q", "m", "score", "draw", "kept"} for x in r["asynchronous"]["results"])
         assert [x["candidate_idx"] for x in r["monitor"]] == [x["candidate"] for x in r["asynchronous"]["results"]]
@@ -1400,17 +1447,19 @@ def test_verify_catches_each_broken_invariant(async_run):
         assert failing(edit) == want, what
 
 
+@pytest.mark.parametrize("calls", (False, True))
 @pytest.mark.parametrize("role, at", (("coordinator", "2"), ("generator", "3"), ("evaluator", "2"),
                                       ("monitor0", "c5")))
-def test_an_agent_that_fails_ends_its_campaign_alone_in_the_asynchronous_mode(tmp_path, role, at):
+def test_an_agent_that_fails_ends_its_campaign_alone_in_the_asynchronous_mode(tmp_path, role, at, calls):
     """A Coordinator before its third survivors message, a Generator before its fourth take, an Evaluator before
     its third cycle's sends, or a Monitor, the campaign's only slot, before its report of candidate 5
     (FUSION_AUTONMI_FAIL): its campaign is one error line with the failing role; the campaign's other agents end
     with an error instead of waiting, each message it sent received or dropped; the other 19 campaigns end whole.
-    The run ends on its own and fails."""
+    The run ends on its own and fails. The same with no model calls (llm.mode off) and with every role's own
+    call (the stub, FIXTURE), when the other agents may be in a model call as the campaign fails."""
     env = {**os.environ, "FUSION_AUTONMI_FAIL": f"a3/{role}:{at}"}
     slots = 1 if role == "monitor0" else 2
-    knobs = {**ASYNC_KNOBS, "campaign": {**ASYNC_KNOBS["campaign"], "slots": slots}}
+    knobs = {**(ASYNC_CALLS if calls else ASYNC_KNOBS), "campaign": {**ASYNC_KNOBS["campaign"], "slots": slots}}
     rec = run("autonmi", tmp_path, *ASYNC_ARGS, "--knobs", knob_file(tmp_path, knobs), env=env, code=1)
     out, name = tmp_path / "autonmi", role.rstrip("0")
     errors = [r for r in lines_of(out) if "error" in r]
@@ -1456,20 +1505,348 @@ def test_odd_shapes_run_in_the_asynchronous_mode(tmp_path, population, generatio
     assert rec["counts"]["asynchronous"]["cycles"]["generator"] >= 6 * -(-population * generations // 2)
 
 
-def test_the_asynchronous_mode_makes_no_model_call_whatever_llm_mode_says(tmp_path):
-    """llm.mode openai, with a model server: in the asynchronous mode (model calls off in this package) no request
-    reaches the server, no model call is counted, and the run passes."""
-    knobs = {**SERVER_KNOBS, "campaign": {"mode": "async"}}
+STELLAR_LLM = {"thinking": "off", "reply_cap": 4096, "temperature": 1.0, "top_p": 0.95}   # the LLM plan's settings
+
+
+def run_on_a_server(tmp_path, knobs: dict, server: FakeVllm, *args, code: int = 0) -> tuple[dict, list[dict]]:
+    """An AUTONMI run of SERVER_ARGS with --llm openai on the server: its record and its requests."""
+    (tmp_path / "endpoints").write_text(server.url + "\n")
+    rec = run("autonmi", tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "2",
+              "--endpoints-file", str(tmp_path / "endpoints"), *args, code=code)
+    return rec, server.take()
+
+
+@pytest.mark.parametrize("mode, thinking", (("async", "off"), ("generations", "off"), ("async", "on")))
+def test_the_stellarai_settings_reach_every_request(tmp_path, mode, thinking):
+    """llm.mode openai against the fake vLLM server (a FIXTURE) with the LLM plan's StellarAI request settings
+    (llm.thinking off, llm.reply_cap 4,096, temperature 1.0, top_p 0.95): every request carries them, with
+    chat_template_kwargs {enable_thinking: false} from AUTONMI's transport (no per-call extra_body replaced it)
+    and no thinking budget. In the asynchronous mode every role calls, and only the Generator's calls carry its
+    JSON schema as response_format; in the generations mode (with campaign.notes) the refills, summaries, notes
+    and assessments carry the same settings and no schema. With llm.thinking on: no chat_template_kwargs, the
+    thinking budget (agents.thinking_budget, 64 here) sent and added to the cap. Without record.extras a line
+    holds only the generations mode's refill and summary calls' details; the record counts every call."""
+    knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], **STELLAR_LLM, "thinking": thinking},
+             "campaign": {"mode": "async"} if mode == "async" else {"notes": True}}
     with FakeVllm() as server:
-        (tmp_path / "endpoints").write_text(f"http://127.0.0.1:{server.port}\n")
-        rec = run("autonmi", tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "2",
-                  "--endpoints-file", str(tmp_path / "endpoints"))
-        sent, answered = server.take(), server.successes
-    assert rec["status"] == "pass" and rec["autonmi"]["ok"] and rec["knobs"]["llm"]["mode"] == "openai", rec["autonmi"]
-    assert (sent, answered, rec["counts"]["llm_calls"], rec["llm_service"]["calls"]) == ([], 0, 0, 0)
-    assert rec["counts"]["sims"] == 12 * 4 * 3
-    assert {role: v["model_calls"] for role, v in rec["counts"]["by_role"].items()} == dict.fromkeys(ROLES, 0)
-    assert all(r["llm_call_details"] == [] for r in lines(tmp_path, "autonmi"))
+        rec, sent = run_on_a_server(tmp_path, knobs, server)
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    by = rec["counts"]["by_role"]
+    assert len(sent) == rec["llm_service"]["calls"] == sum(by[role]["model_calls"] for role in ROLES)
+    assert all(by[role]["model_calls"] > 0 for role in ROLES)
+    for body in sent:
+        if thinking == "off":
+            assert body["chat_template_kwargs"] == {"enable_thinking": False} and "thinking_token_budget" not in body
+        else:
+            assert "chat_template_kwargs" not in body and body["thinking_token_budget"] == 64
+        assert (body["max_tokens"], body["temperature"], body["top_p"]) == (4096 + 64 * (thinking == "on"), 1.0, 0.95)
+        many = re.search(r"JSON list of (\d+)", body["messages"][-1]["content"].splitlines()[-1])
+        if mode == "async" and many:
+            assert body["response_format"] == decide.candidates_schema(int(many.group(1)))
+        else:
+            assert "response_format" not in body
+    if mode == "async":
+        assert sum("response_format" in body for body in sent) == by["generator"]["model_calls"] == 12 * 6
+    details = [c for r in lines(tmp_path, "autonmi") for c in r["llm_call_details"]]
+    if mode == "async":
+        assert details == []
+    else:
+        assert {c["role"] for c in details} == {"generator", "coordinator"}
+        assert len(details) == by["generator"]["model_calls"] + by["coordinator"]["model_calls"] < len(sent)
+
+
+def test_a_model_run_in_the_asynchronous_mode_needs_llm_thinking(tmp_path):
+    """llm.mode openai in the asynchronous mode with llm.thinking unset is refused before anything starts (unset,
+    the server's chat template decides whether the model thinks)."""
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, "-m", ENTRY["autonmi"], *SERVER_ARGS, "--knobs",
+                           knob_file(tmp_path, {**SERVER_KNOBS, "campaign": {"mode": "async"}}), "--endpoints-file",
+                           str(tmp_path / "endpoints"), "--out", str(out)], cwd=tmp_path, capture_output=True,
+                          text=True, timeout=300, check=False)
+    assert proc.returncode != 0 and "needs llm.thinking set" in proc.stderr and not out.exists(), proc.stderr[-2000:]
+
+
+def test_each_role_makes_its_own_model_call_in_the_asynchronous_mode(async_calls_run):
+    """The stub LLM (FIXTURE): the Generator asks once per take of 2, each Monitor once per candidate, the
+    Evaluator and the Coordinator once per cycle, each answered (no try again, no fallback), and AUTONMI's checks
+    of the mode pass. Every candidate went through the Generator's call, which filled all 7 parameters (the stub
+    draws a full candidate); the Coordinator sends its guidance after each cycle's survivors; a line's model
+    calls are its agents'. With record.extras: each candidate's note ("" from the stub), each cycle's guidance
+    (""), and every score the score from numbers (the stub's answer), q + 0.25 m clipped."""
+    out, rec = async_calls_run
+    n, B = 20, 16
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    checks = {c["name"]: c["ok"] for c in json.loads((out / "app" / "checks.json").read_text())}
+    assert checks == dict.fromkeys(ASYNC_CHECKS, True), checks
+    c = rec["counts"]
+    by, a = c["by_role"], c["asynchronous"]
+    for role in ROLES:
+        assert by[role]["model_asks"] == by[role]["model_tries"] == by[role]["model_calls"] == a["cycles"][role], role
+        assert by[role]["model_fallbacks"] == 0
+    assert (a["cycles"]["generator"], a["cycles"]["monitor"]) == (n * B // 2, n * B)
+    assert c["llm_calls"] == sum(by[role]["model_calls"] for role in ROLES) == rec["llm_service"]["calls"]
+    assert c["candidates_by_source"] == {"start": 0, "survivor": 0, "mutation": 0, "model": n * B, "restart": 0}
+    assert c["refill_slots"] == {"asked": n * B, "filled_by_model": n * B} and a["parameters_filled"] == [0] * 7 + [n * B]
+    assert rec["llm_check"]["fail"] == [] and c["expected_per_agent"]["llm_calls"] == 8 + 3 * B
+    rows = app_rows(out)
+    for line in lines_of(out):
+        x = {r["role"]: r for r in rows if r["campaign"] == line["agent_id"] and r["role"] != "monitor"}
+        co, ge, ev = x["coordinator"], x["generator"], x["evaluator"]
+        assert co["messages_sent"] == 2 * co["cycles"] + 2 and ge["messages_received"] == 2 * co["cycles"] + ev["cycles"] + 1
+        mine = sum(r["model_calls"] for r in rows if r["campaign"] == line["agent_id"])
+        assert line["n_llm_calls"] == mine == len(line["llm_call_details"]) <= 8 + 3 * B
+        assert line["asynchronous"]["guidance"] == [""] * co["cycles"]
+        assert [e["note"] for e in line["monitor"]] == [""] * B
+        m = {e["candidate_idx"]: e["m"] for e in line["monitor"]}
+        assert all(r["score"] == min(1.0, max(0.0, r["q"] + 0.25 * m[r["candidate"]]))
+                   for r in line["asynchronous"]["results"])
+
+
+def test_a_recorded_order_with_the_stubs_calls_replays_to_the_same_campaign(async_calls_run):
+    """The stub's replies replayed: each take's profiles reconciled with the stub's reply for the campaign and the
+    request's last line (async_replay.stub_reconcile), the scores the score from numbers (which the stub
+    answers): every result's q, m, score, draw and kept flag, the survivors and best-so-far are the run's, in its
+    reordered orders. So a value in the Generator's reply replaces the evolutionary loop's, and the stub's three
+    other answers change nothing."""
+    from async_replay import fixture, replay, stub_reconcile
+
+    out, rec = async_calls_run
+    knobs = rec["knobs"]
+    for line in lines_of(out):
+        x, seed = line["asynchronous"], line["seed"]
+        m = {r["candidate"]: r["m"] for r in x["results"]}
+        cst, rows, calls = replay(seed, knobs, x["evaluator"], x["coordinator"], x["held"], m, fixture(knobs, seed),
+                                  stub_reconcile(knobs))
+        assert rows == x["results"], line["agent_id"]
+        assert [s["candidate"] for s in cst["survivors"]] == x["survivors"], line["agent_id"]
+        assert json.loads(json.dumps(cst["best"])) == line["best"], line["agent_id"]
+        assert all(c["source"] == "model" and c["filled"] == 7 for c in calls.values())
+    assert sum(sum(line["asynchronous"]["evaluator"], []) != list(range(16)) for line in lines_of(out)) > 0
+
+
+def test_a_server_that_fails_every_call_leaves_each_role_on_its_fallback(tmp_path):
+    """A model server that answers every request with an error (the fake vLLM server, FIXTURE: HTTP 400): each
+    role's call is tried 3 times, then its fallback is used and counted (the Generator's profiles unchanged, no
+    note, the score from numbers, no guidance); every campaign completes and AUTONMI's checks pass; and replayed
+    with no model call (llm.mode off's path) in the run's own reordered orders, every result, the survivors and
+    best-so-far are the run's. The run fails only its model check: the model filled none of the candidates."""
+    from async_replay import fixture, replay
+
+    knobs = {**ASYNC_CALLS, "llm": {"mode": "openai", "model": "stand-in", "thinking": "off"}, "record": {"extras": True}}
+    with FakeVllm(lambda body: True) as server:
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        out, rec = reordered_run(tmp_path, knobs, "--endpoints-file", str(tmp_path / "endpoints"), code=1)
+        sent = server.take()
+    assert rec["autonmi"]["ok"] and (rec["counts"]["agents"], rec["counts"]["agents_failed"]) == (20, 0), rec["autonmi"]
+    assert len(rec["llm_check"]["fail"]) == 1 and "filled 0 of the 320" in rec["llm_check"]["fail"][0]
+    by, cycles = rec["counts"]["by_role"], rec["counts"]["asynchronous"]["cycles"]
+    for role in ROLES:
+        assert by[role]["model_asks"] == by[role]["model_fallbacks"] == cycles[role] > 0, role
+        assert (by[role]["model_tries"], by[role]["model_calls"]) == (3 * by[role]["model_asks"], 0), role
+    assert len(sent) == sum(by[role]["model_tries"] for role in ROLES) == rec["llm_service"]["errors"]
+    assert rec["counts"]["candidates_by_source"]["model"] == 0 and rec["counts"]["refill_slots"]["asked"] == 320
+    for line in lines_of(out):
+        x, seed = line["asynchronous"], line["seed"]
+        assert x["guidance"] == [""] * len(x["coordinator"])
+        m = {r["candidate"]: r["m"] for r in x["results"]}
+        cst, rows, _ = replay(seed, rec["knobs"], x["evaluator"], x["coordinator"], x["held"], m,
+                              fixture(rec["knobs"], seed))
+        assert rows == x["results"], line["agent_id"]
+        assert [s["candidate"] for s in cst["survivors"]] == x["survivors"], line["agent_id"]
+        assert json.loads(json.dumps(cst["best"])) == line["best"], line["agent_id"]
+
+
+def test_a_prompt_too_long_for_the_servers_context_is_not_sent(tmp_path):
+    """The prompt-length check: the servers' /v1/models give max_model_len (the fake server's, FIXTURE, set to
+    2,000 here); a call whose prompt's characters (at least its tokens) and max_tokens exceed it is not sent and
+    not tried again: the role falls back at once, counted, with the error PromptTooLong in its details (in the
+    line with record.extras, and in the record's count of errors). The others are sent; every campaign
+    completes."""
+    knobs = {**ASYNC_CALLS, "llm": {"mode": "openai", "model": "stand-in", "thinking": "off"}, "record": {"extras": True}}
+    with FakeVllm(max_model_len=2000) as server:
+        rec, sent = run_on_a_server(tmp_path, knobs, server, code=1)
+    assert rec["autonmi"]["ok"] and rec["counts"]["agents_failed"] == 0, rec["autonmi"]
+    details = [c for r in lines(tmp_path, "autonmi") for c in r["llm_call_details"]]
+    too_long = [c for c in details if c.get("error") == "PromptTooLong"]
+    by = rec["counts"]["by_role"]
+    assert too_long and sent and len(sent) + len(too_long) == len(details) == sum(by[r]["model_tries"] for r in ROLES)
+    assert all(c["latency_s"] < 0.01 for c in too_long)
+    assert sum(by[r]["model_fallbacks"] for r in ROLES) == len(too_long)   # each once, at once
+    assert all(sum(len(str(m["content"])) for m in body["messages"]) + body["max_tokens"] <= 2000 for body in sent)
+    assert rec["llm_service"]["errors"] == len(too_long)
+
+
+def each_roles_reply(content: str) -> str | None:
+    """FIXTURE replies that differ from the stub's numbers-only ones, each marked so a test can find it where it
+    goes: the Evaluator gives every candidate keep-probability 1.0, a Monitor's note on candidate k is NOTEMARK-k,
+    and the Coordinator's guidance after n results is GUIDEMARK-n. The Generator's reply is the fixture's."""
+    lines_ = content.splitlines()
+    if lines_[-1] == decide.SCORES_ASK:
+        return json.dumps({k: 1.0 for k in re.findall(r"^candidate (\d+): q ", content, re.M)})
+    if lines_[-1] == decide.NOTE_ASK:
+        return "NOTEMARK-" + re.match(r"Candidate (\d+):", lines_[0]).group(1)
+    if lines_[-1] == decide.GUIDANCE_ASK:
+        return "GUIDEMARK-" + re.search(r"(\d+) of \d+ results in", content).group(1)
+    return None
+
+
+def test_each_roles_reply_reaches_where_it_goes(tmp_path):
+    """The asynchronous mode against the fake vLLM server (FIXTURE) whose replies differ from the numbers-only
+    values (each_roles_reply): the Evaluator's reply is the score, so every result scores 1.0 and is kept; each
+    Monitor's note reaches the Evaluator's prompt on its own candidate's row; the Evaluator's latest scores (its
+    digest) and the Coordinator's guidance reach the Generator's later prompts; with record.extras each note and
+    guidance is in the campaign's line."""
+    knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], "thinking": "off"}, "campaign": {"mode": "async"},
+             "record": {"extras": True}}
+    with FakeVllm(reply=each_roles_reply) as server:
+        rec, sent = run_on_a_server(tmp_path, knobs, server)
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    results = [x for r in lines(tmp_path, "autonmi") for x in r["asynchronous"]["results"]]
+    assert len(results) == 12 * 12 and all(x["score"] == 1.0 and x["kept"] for x in results)
+    content = [body["messages"][-1]["content"] for body in sent]
+    generator = [c for c, body in zip(content, sent) if "response_format" in body]
+    evaluator = [c for c in content if c.splitlines()[-1] == decide.SCORES_ASK]
+    last = [c for c in generator if c.splitlines()[-1].startswith("Candidates 10 and 11 of 12:")]   # each campaign's
+    assert len(last) == 12 and all("The Coordinator's guidance: GUIDEMARK-" in c for c in last)
+    assert all(re.search(r"keep-probabilities \(candidate: probability\): (\d+: 1\.0(, |$))+$", c, re.M) for c in last)
+    rows = [m.groups() for c in evaluator for m in re.finditer(r"^candidate (\d+): q .*note: (.*)$", c, re.M)]
+    assert len(rows) == len(results) and all(note == f"NOTEMARK-{k}" for k, note in rows)
+    for r in lines(tmp_path, "autonmi"):
+        assert [e["note"] for e in r["monitor"]] == [f"NOTEMARK-{e['candidate_idx']}" for e in r["monitor"]]
+        assert r["asynchronous"]["guidance"] and all(g.startswith("GUIDEMARK-") for g in r["asynchronous"]["guidance"])
+
+
+def test_a_reply_that_cannot_be_used_is_tried_again_and_a_late_answer_is_used(tmp_path):
+    """Tries at the layer, against the fake vLLM server (FIXTURE), asynchronous mode. Replies the Generator and the
+    Evaluator cannot use (plain text): each of their calls is answered 3 times, then falls back, counted (the
+    Monitors' and the Coordinator's calls are answered at once). Every request failing twice and answered the third
+    time: each call is tried 3 times and answered, no fallback, and the run passes."""
+    knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], "thinking": "off"}, "campaign": {"mode": "async"}}
+
+    def unusable(content: str) -> str | None:
+        last = content.splitlines()[-1]
+        return "No JSON today." if last == decide.SCORES_ASK or "JSON list of" in last else None
+    (tmp_path / "unusable").mkdir()
+    with FakeVllm(reply=unusable) as server:
+        rec, sent = run_on_a_server(tmp_path / "unusable", knobs, server, code=1)   # the model filled nothing
+    assert rec["autonmi"]["ok"] and rec["counts"]["agents_failed"] == 0, rec["autonmi"]
+    by = rec["counts"]["by_role"]
+    for role in ("generator", "evaluator"):
+        b = by[role]
+        assert b["model_tries"] == b["model_calls"] == 3 * b["model_asks"] and b["model_fallbacks"] == b["model_asks"] > 0
+    for role in ("coordinator", "monitor"):
+        b = by[role]
+        assert b["model_tries"] == b["model_calls"] == b["model_asks"] > 0 and b["model_fallbacks"] == 0
+    assert len(sent) == sum(by[role]["model_tries"] for role in ROLES)
+
+    seen = Counter()
+
+    def twice(body) -> bool:   # each request fails on its first two sends
+        key = json.dumps(body["messages"], sort_keys=True)
+        seen[key] += 1
+        return seen[key] <= 2
+    (tmp_path / "third").mkdir()
+    with FakeVllm(twice) as server:
+        rec, sent = run_on_a_server(tmp_path / "third", knobs, server)
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    by = rec["counts"]["by_role"]
+    for role in ROLES:
+        b = by[role]
+        assert b["model_tries"] == 3 * b["model_asks"] == 3 * b["model_calls"] > 0 and b["model_fallbacks"] == 0, role
+    assert rec["llm_service"]["errors"] == 2 * sum(by[role]["model_asks"] for role in ROLES)
+
+
+def test_the_notes_falling_back_change_no_result_in_the_generations_mode(tmp_path):
+    """campaign.notes against the fake vLLM server (FIXTURE) that fails every note and assessment call (HTTP 400):
+    each is tried 3 times and falls back, counted; the refills and summaries are answered; the results and the
+    exact counts are the model_server reference's, recorded without the notes."""
+    def notes(body) -> bool:
+        return body["messages"][-1]["content"].splitlines()[-1] in (decide.NOTE_ASK, decide.SCORES_ASK)
+    with FakeVllm(notes) as server:
+        rec, _ = run_on_a_server(tmp_path, {**SERVER_KNOBS, "campaign": {"notes": True}}, server)
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    assert against_reference(tmp_path / "autonmi", rec, reference("model_server")) == []
+    by = rec["counts"]["by_role"]
+    assert (by["monitor"]["model_asks"], by["evaluator"]["model_asks"]) == (12 * 4 * 3, 12 * 3)
+    for role in ("monitor", "evaluator"):
+        b = by[role]
+        assert (b["model_tries"], b["model_calls"], b["model_fallbacks"]) == (3 * b["model_asks"], 0, b["model_asks"])
+    for role in ("coordinator", "generator"):
+        assert by[role]["model_fallbacks"] == 0 and by[role]["model_calls"] == by[role]["model_asks"] > 0
+
+
+def test_llm_outage_s_and_thinking_off_reach_the_wait_for_the_model_servers(tmp_path, monkeypatch):
+    """llm.outage_s (how long a call waits out a server that went away) and llm.thinking off (AUTONMI's
+    THINKING_OFF, which its transports send on every call) are what the layer passes to AUTONMI's
+    wait_for_servers."""
+    from autonmi import models
+
+    from fusion_miniapp import layer_autonmi
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    async def wait_for_servers(*args, **kwargs):
+        seen.update(kwargs)
+        raise Stop
+    monkeypatch.setattr(models, "wait_for_servers", wait_for_servers)
+    a = layer_autonmi.parse(["--llm", "openai", "--endpoints-file", str(tmp_path / "endpoints")])
+    knobs = knob_files.validate({"llm": {"mode": "openai", "model": "stand-in", "thinking": "off", "outage_s": 300}},
+                                modes=("generations", "async"))
+    with pytest.raises(Stop):
+        asyncio.run(layer_autonmi.miniapp_workflow(a, knobs, None, tmp_path, None, None, layer_autonmi.LiveLine()))
+    assert seen["outage_s"] == 300 and seen["thinking_off"] == models.THINKING_OFF and seen["name"] == "stand-in"
+
+
+def test_the_notes_change_no_result_in_the_generations_mode(tmp_path):
+    """campaign.notes (off by default): in the generations mode each Monitor asks for a note on its candidate and
+    the Evaluator for an assessment of each generation (the stub, FIXTURE: no note, the score from numbers); the
+    results and parent files are the reference's; the calls are counted by role (a note per candidate, an
+    assessment per generation); with record.extras each candidate's entry has its note and assessment."""
+    knobs = {**fixture_knobs("llm refills, one random stream, all live"), "campaign": {"notes": True},
+             "record": {"extras": True}}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--populations", "2", "--knobs", knob_file(tmp_path, knobs))
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    assert against_reference(tmp_path / "autonmi", rec, reference("fixture_llm_refills")) == []
+    by = rec["counts"]["by_role"]
+    assert {role: (by[role]["model_asks"], by[role]["model_calls"], by[role]["model_fallbacks"]) for role in ROLES} == {
+        "coordinator": (20, 20, 0), "generator": (20, 20, 0), "evaluator": (40, 40, 0), "monitor": (160, 160, 0)}
+    assert rec["counts"]["llm_calls"] == 40   # the outer loop's, as without the notes
+    for r in lines(tmp_path, "autonmi"):
+        assert all(e["note"] == "" and e["assessed"] == pytest.approx(min(1.0, max(0.0, e["q"] + 0.25 * e["m"])),
+                                                                       abs=1e-6) for e in r["monitor"])
+
+
+def test_verify_catches_broken_model_call_counts(async_calls_run):
+    """AUTONMI's check of the roles' calls on the stub run's own rows: each break of an agent's counts (a
+    Monitor that did not ask for its note, a Generator take without its call, more replies than tries, a
+    fallback beyond the calls asked) fails evaluations_and_model_calls_as_planned alone."""
+    from rascal.store import MemoryStore
+
+    from fusion_miniapp.layer_autonmi import Fusion
+
+    out, rec = async_calls_run
+    rows, store = app_rows(out), MemoryStore()
+    for c in {r["campaign"] for r in rows}:
+        store.put(f"campaign/{c}", "{}")
+    definition = Fusion(rec["knobs"], "fixture", out)
+
+    def failing(agent: str, edit) -> set:
+        broken = copy.deepcopy(rows)
+        for r in broken:
+            if r["agent_id"] == agent:
+                r.update(edit(r))
+        return {c.name for c in definition.verify(broken, store) if not c.ok}
+    assert failing("a5/coordinator", lambda r: {}) == set()
+    planned = {"evaluations_and_model_calls_as_planned"}
+    one_less = lambda r: {k: r[k] - 1 for k in ("model_asks", "model_tries", "model_calls")}  # noqa: E731
+    assert failing("a5/monitor0", one_less) == planned
+    assert failing("a5/generator", one_less) == planned
+    assert failing("a5/evaluator", lambda r: {"model_calls": r["model_tries"] + 1}) == planned
+    assert failing("a5/coordinator", lambda r: {"model_fallbacks": r["model_asks"] + 1}) == planned
+    assert failing("a5/coordinator", lambda r: {"model_fallbacks": 1, "model_tries": r["model_tries"] + 2}) == set()
 
 
 def test_the_asynchronous_mode_labels_each_trace_as_its_result_is_scored():
@@ -1484,7 +1861,7 @@ def test_the_asynchronous_mode_labels_each_trace_as_its_result_is_scored():
     from fusion_miniapp.layer_autonmi import Script
 
     sc = Script.__new__(Script)   # only what _label_async reads
-    sc.P, sc.extras, sc.numbers = 4, True, {}
+    sc.P, sc.extras, sc.numbers, sc.calls_on = 4, True, {}, False
     stats = monitor.Rolling(warmup=1, window=4)
     xs = {k: np.full((3, 4), float(k)) for k in range(4)}
     for k, x in xs.items():   # candidates 2 and 3 synthetic (the wall at the last step: 2 below 3)

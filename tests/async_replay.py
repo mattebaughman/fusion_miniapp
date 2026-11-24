@@ -5,7 +5,9 @@ Evaluator cycle and each Coordinator cycle took, in arrival order, and the survi
 at each profile, with the Monitor's m of each candidate, `replay` drives the Generator, the Evaluator and the
 Coordinator as the AUTONMI layer drives them, each as soon as what it needs exists, and evaluates each candidate
 with the fixture (whose values are a function of the profile alone). One order, one seed and the Monitors' m
-give one campaign.
+give one campaign. With `reconcile` (stub_reconcile: the Generator's model call on the stub LLM) each take's
+profiles go through it, as the layer's Generator reconciles them; the stub's other replies are the values from
+numbers alone, which the replay computes itself.
 
 Run as a script, `python tests/async_replay.py <layer_autonmi's arguments>` is the AUTONMI layer with each
 campaign's arrivals reordered (`reordered`), so that a replay meets results that arrive out of candidate order
@@ -26,8 +28,22 @@ def fixture(knobs: dict, seed: int):
                                              candidate_idx=call["candidate_idx"], generation=call["generation"])
 
 
+def stub_reconcile(knobs: dict):
+    """The asynchronous Generator's model call on the stub LLM, as the AUTONMI layer's StubTransport makes it (the
+    campaign as the agent): each take's profiles with the values of the stub's reply, which is seeded by the
+    campaign and the prompt's last line (decide.async_reconcile)."""
+    from fusion_miniapp.llm import StubLLM
+
+    stub = StubLLM(latency_s=0)
+
+    def reconcile(gst: dict, calls: list[dict]) -> list[dict]:
+        text, _ = asyncio.run(stub.call_with_meta(gst["agent_id"], decide.async_generator_messages(gst, calls, knobs), 0))
+        return decide.async_reconcile(calls, decide.parse_reconcile(text, len(calls)))[0]
+    return reconcile
+
+
 def replay(seed: int, knobs: dict, evaluator: list[list[int]], coordinator: list[list[int]], held: list[int],
-           m: dict, evaluate) -> tuple[dict, list[dict], dict]:
+           m: dict, evaluate, reconcile=None) -> tuple[dict, list[dict], dict]:
     """The Coordinator's memory at the end and its rows (decide.async_on_scored's, in arrival order), and the
     candidates made (their evaluate calls, by number). Raises when the orders cannot have happened."""
     B = decide.async_budget(knobs)
@@ -40,11 +56,13 @@ def replay(seed: int, knobs: dict, evaluator: list[list[int]], coordinator: list
             n = held[gst["made"]]
             gst = decide.async_on_survivors(gst, [msgs[n]] if n else [])
             gst, made = decide.async_profiles(gst, knobs)
+            if reconcile is not None:
+                made = reconcile(gst, made)
             calls.update((x["candidate_idx"], x) for x in made)
             moved = True
         if e < len(evaluator) and all(k in calls for k in evaluator[e]):   # the Evaluator's next cycle
             reports = [{"candidate": k, "result": evaluate(calls[k]), "t0": 0.0, "source": calls[k]["source"],
-                        "m": m[k]} for k in evaluator[e]]
+                        "filled": calls[k]["filled"], "m": m[k]} for k in evaluator[e]]
             window, out, _ = decide.async_evaluate(window, reports, knobs)
             scored.update((x["candidate"], x) for x in out)
             e, moved = e + 1, True

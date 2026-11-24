@@ -314,7 +314,9 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
     agents.jsonl and write run_record.json. `failed`: agent processes that wrote none; their campaigns are
     missing. `t_run`: when the run started (epoch). `model_refs`: the references ({name: n}) of the model
     requests open at once, which the record gives when the calls' details carry their times (t_end,
-    service_s, wait_s, recovery_s: the AUTONMI layer's). Other files in `out` are never read.
+    service_s, wait_s, recovery_s: the AUTONMI layer's), or a part gives them apart from its lines
+    (`call_times`: the calls' count, those retried, and `times`, an array of rows t_end, service_s, recovery_s,
+    wait_s; the AUTONMI layer's calls summed instead of written in a line). Other files in `out` are never read.
 
     The merge streams: each line is copied to agents.jsonl.tmp and counted as it passes, the file is
     renamed into place, and only then are the per-process files removed. Fixture evaluations make no
@@ -332,6 +334,15 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
     tmp = out / "agents.jsonl.tmp"
     with tmp.open("w") as merged:
         for part in parts:
+            t = part.get("call_times")
+            if t is not None:   # the calls not in its lines, as their details would give them
+                calls.update(all=t["calls"], retried=t["retried"])
+                sent = t["times"][:, 0] - t["times"][:, 1]
+                asked = sent - t["times"][:, 2]
+                m_start.extend(sent.tolist())
+                m_end.extend(t["times"][:, 0].tolist())
+                q_start.extend((asked - t["times"][:, 3]).tolist())
+                q_end.extend(asked.tolist())
             with open(part["agents_file"]) as src:
                 for line in src:
                     line = line.rstrip("\n")

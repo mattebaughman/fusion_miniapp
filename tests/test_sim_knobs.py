@@ -7,7 +7,8 @@ from fusion_miniapp.knobs import KnobError
 
 
 # knobs added after the hundredk and ignos_shape presets, which take them from smoke (hundredk.yaml is kept as it is)
-NEWER = {"monitor.weight", "campaign.slots", "campaign.mode", "campaign.warmup", "record.extras"}
+NEWER = {"monitor.weight", "campaign.slots", "campaign.mode", "campaign.warmup", "record.extras", "campaign.notes",
+         "llm.thinking", "llm.reply_cap", "llm.temperature", "llm.top_p", "llm.outage_s"}
 
 
 @pytest.mark.parametrize("name", knobs.PRESETS)
@@ -53,6 +54,17 @@ def test_partial_file_merges_over_smoke(tmp_path):
     ({"campaign": {"mode": "async"}}, "campaign.mode async is not run by this layer"),   # (run.py's layers)
     ({"campaign": {"warmup": 0}}, "campaign.warmup must be in [1, inf]"),
     ({"record": {"extras": "yes"}}, "record.extras must be true or false"),
+    ({"campaign": {"notes": 1}}, "campaign.notes must be true or false"),
+    ({"llm": {"thinking": "maybe"}}, "llm.thinking must be off, on or null"),
+    ({"llm": {"reply_cap": 0}}, "llm.reply_cap must be in [1, inf]"),
+    ({"llm": {"temperature": -0.5}}, "llm.temperature must be in [0, inf]"),
+    ({"llm": {"top_p": 1.5}}, "llm.top_p must be in [0, 1]"),
+    ({"llm": {"top_p": 0}}, "llm.top_p must be in (0, 1]"),   # vLLM's range
+    ({"llm": {"thinking": "off", "top_p": 0.95}}, "llm.thinking, llm.top_p set: only the AUTONMI layer"),   # run.py's
+    ({"campaign": {"notes": True}}, "campaign.notes set: only the AUTONMI layer"),
+    ({"llm": {"top_p": "high"}}, "llm.top_p must be a number"),
+    ({"llm": {"outage_s": -1}}, "llm.outage_s must be in [0, inf]"),
+    ({"llm": {"mode": "off"}}, "llm.mode off (no model calls) is the asynchronous mode's only"),
 ])
 def test_validation_errors_name_the_knob(bad, message):
     with pytest.raises(KnobError) as info:
@@ -75,7 +87,10 @@ def test_load_errors(tmp_path):
                                                                       "weight": 0.25}
     assert knobs.monitor_section({"capture": False}) == {"capture": False, "fixture_trace": "smooth", "weight": 0.25}
     base = knobs.base()   # the new knobs' defaults: today's results and requests
-    assert (base["campaign"], base["record"]) == ({"slots": 2, "mode": "generations", "warmup": 4}, {"extras": False})
+    assert (base["campaign"], base["record"]) == ({"slots": 2, "mode": "generations", "warmup": 4, "notes": False},
+                                                  {"extras": False})
+    assert {k: base["llm"][k] for k in ("thinking", "reply_cap", "temperature", "top_p", "outage_s")} == {
+        "thinking": None, "reply_cap": None, "temperature": None, "top_p": None, "outage_s": 1800}
     with pytest.raises(KnobError, match="'monitor' section as a dict"):
         knobs.monitor_section([1, 2])
 
@@ -89,3 +104,9 @@ def test_the_asynchronous_mode_is_the_autonmi_layers(tmp_path):
     assert knobs.validate(k, modes=("generations", "async"))["campaign"]["mode"] == "async"
     with pytest.raises(KnobError, match="runs on the AUTONMI layer"):
         knobs.validate(k)
+    (tmp_path / "t.yaml").write_text("llm: {thinking: off, mode: off}\n")   # YAML's bare off is false: kept as "off"
+    assert {k: v for k, v in knobs.load(tmp_path / "t.yaml")["llm"].items() if k in ("thinking", "mode")} == {
+        "thinking": "off", "mode": "off"}
+    assert knobs.validate({"llm": {"thinking": True}}, modes=("generations", "async"))["llm"]["thinking"] == "on"
+    off = {**k, "llm": {**k["llm"], "mode": "off"}}   # no model calls: the asynchronous mode's only
+    assert knobs.validate(off, modes=("generations", "async"))["llm"]["mode"] == "off"

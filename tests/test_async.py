@@ -3,6 +3,7 @@ arrived give its new state and what it sends. No agent framework: these run in t
 
 The results are the fixture's (FIXTURE data: a function of the profile, not an inner loop), a few marked
 feasible by hand so that both of the parent's rankings are used."""
+import asyncio
 import copy
 import csv
 import json
@@ -13,6 +14,7 @@ import pytest
 from async_replay import fixture, replay
 
 from fusion_miniapp import decide, knobs as knob_files, monitor, record, sim
+from fusion_miniapp.llm import StubLLM, numbers_only
 
 
 def async_knobs(weight: float = 0.25, population: int = 16, generations: int = 2) -> dict:
@@ -215,3 +217,97 @@ def test_a_trace_is_held_until_its_result_is_scored():
     assert stats.take_one(1, 17)[1] is True and stats.take_one(1, 17) is None and stats.held == {1: {18: (x, False)}}
     assert stats.take_one(1, 18)[1] is False and stats.held == {} and stats.take_one(0, 0) is None
     assert stats.recent == [] and stats.ends == []
+
+
+def stub(messages: list[dict], agent: str = "a3") -> str:
+    """The stub LLM's reply (FIXTURE), as the AUTONMI layer's stub transport asks it for campaign `agent`."""
+    return asyncio.run(StubLLM(latency_s=0).call_with_meta(agent, messages, 0))[0]
+
+
+def test_the_generators_reply_replaces_the_evolutionary_loops_values():
+    """The asynchronous Generator's call: its prompt shows the take's profiles, the newest survivors, the
+    Evaluator's latest scores and the Coordinator's guidance, and its last line names the candidates (the stub
+    seeds its reply by the campaign and that line); its schema (sent as response_format) is a JSON list of as many
+    objects as candidates. The reply is the last such list in the text: each value in it replaces the profile's,
+    clipped to range (then the parent's clip_delta), a key left out keeps the evolutionary loop's value, and the
+    parameters each filled are counted (source `model` when any). A reply that is not such a list cannot be used."""
+    k = async_knobs(population=4, generations=8)
+    gst, calls = decide.async_profiles(decide.async_generator_state("a3", 3, k, {"abstract": {"text": "Pedestals."}}), k)
+    content = decide.async_generator_messages(gst, calls, k)[-1]["content"]
+    assert content.splitlines()[-1].startswith("Candidates 0 and 1 of 32: reply with a JSON list of 2 objects,")
+    assert "No survivors yet." in content and all(f"candidate {c['candidate_idx']} (start)" in content for c in calls)
+    gst2 = {**gst, "survivors": [calls[0]["params"]], "scores": [[0, 0.5], [1, 0.25]], "guidance": "Lower a1_Te."}
+    text = decide.async_generator_messages(gst2, calls, k)
+    assert "Background: Pedestals." in text[0]["content"]
+    assert all(x in text[1]["content"] for x in ("newest survivors (1)", "0: 0.5, 1: 0.25", "guidance: Lower a1_Te."))
+    one = decide.async_generator_messages(gst, calls[1:], k)[-1]["content"].splitlines()[-1]
+    assert one.startswith("Candidate 1 of 32: reply with a JSON list of 1 objects")
+    schema = decide.candidates_schema(2)
+    assert schema["type"] == "json_schema" and schema["json_schema"]["schema"]["minItems"] == 2 == \
+        schema["json_schema"]["schema"]["maxItems"]
+    assert set(schema["json_schema"]["schema"]["items"]["properties"]) == set(decide.ranges())
+    lo, hi = decide.ranges()["a1_Te"]
+    props = decide.parse_reconcile('[1, 2] then [{"a1_Te": %r, "other": 1}, {"Delta": "wide"}]' % (hi + 5), 2)
+    assert props == [{"a1_Te": hi}, {}]
+    out, filled = decide.async_reconcile(calls, props)
+    assert filled == [1, 0] and (out[0]["source"], out[0]["filled"], out[1]["filled"]) == ("model", 1, 0)
+    assert out[0]["params"] == {**calls[0]["params"], "a1_Te": hi} and out[1] == {**calls[1], "filled": 0}
+    for bad in ("", "no JSON", "[{}]", '[{"a1_Te": 1}, 3]', '{"a1_Te": 1}'):
+        assert decide.parse_reconcile(bad, 2) is None, bad
+    got = decide.parse_reconcile(stub(decide.async_generator_messages(gst, calls, k)), 2)   # FIXTURE
+    assert len(got) == 2 and all(set(x) == set(decide.ranges()) for x in got)
+
+
+def test_the_evaluators_reply_is_the_score_and_the_stub_answers_the_score_from_numbers():
+    """The Evaluator's call: its prompt gives each result's q and the Monitor's m (in full), the Monitor's other
+    numbers and note, and neither the score from numbers nor its formula; its reply is one JSON object with a
+    keep-probability for every candidate, each clipped to 0..1, and becomes the score (and the digest); a reply
+    without every candidate cannot be used. The stub (and the fake vLLM server) answer it with each score from
+    numbers exactly, at their monitor.weight (a result without a trace: q), a Monitor's note and the
+    Coordinator's guidance with nothing."""
+    k = async_knobs(population=4, generations=4)
+    rs = results(6)
+    _, scored, _ = decide.async_evaluate([], reports(rs, m=lambda c: None if c == 2 else 0.5 - c / 5), k)
+    items = [{**x, "numbers": None if x["m"] is None else {"m": x["m"], "left_at": 3, "back_at": None, "split_at": 5},
+              "note": "steady"} for x in scored]
+    messages = decide.scores_messages(items)
+    assert messages[-1]["content"].splitlines()[-1] == decide.SCORES_ASK
+    assert "numbers alone" not in json.dumps(messages) and "x m" not in json.dumps(messages)
+    assert "candidate 2: q " in messages[-1]["content"] and "no trace" in messages[-1]["content"]
+    cands = [x["candidate"] for x in scored]
+    from_numbers = {x["candidate"]: x["score"] for x in scored}
+    assert decide.parse_scores(stub(messages), cands) == from_numbers   # exactly the score from numbers
+    assert numbers_only(messages[-1]["content"]) == stub(messages)
+    half = asyncio.run(StubLLM(latency_s=0, weight=0.5).call_with_meta("a3", messages, 0))[0]   # another weight
+    assert decide.parse_scores(half, cands) == {x["candidate"]: decide.numbers_score(x["q"], x["m"], 0.5) for x in scored}
+    assert decide.parse_scores(half, cands) != from_numbers
+    new, digest = decide.async_model_scores(scored, dict.fromkeys(cands, 0.875))
+    assert [x["score"] for x in new] == [0.875] * 6 and digest == {"candidates": cands, "scores": [0.875] * 6}
+    assert [x["q"] for x in new] == [x["q"] for x in scored]
+    assert decide.parse_scores('{"0": 2, "1": -1, "2": 0.5, "3": 0, "4": 1, "5": 0.25}', cands) == {
+        0: 1.0, 1: 0.0, 2: 0.5, 3: 0.0, 4: 1.0, 5: 0.25}
+    for bad in ('{"0": 0.5}', '{"0": "x", "1": 1, "2": 1, "3": 1, "4": 1, "5": 1}', "[]", ""):
+        assert decide.parse_scores(bad, cands) is None, bad
+    note = decide.note_messages(rs[0], items[0]["numbers"])
+    assert note[-1]["content"].splitlines()[-1] == decide.NOTE_ASK and stub(note) == ""
+    cst, rows = decide.async_on_scored(decide.async_coordinator_state("a3", 3, k, {}, 0.0), new, k, None)
+    guidance = decide.guidance_messages(cst, rows, k)[-1]["content"]
+    assert guidance.splitlines()[-1] == decide.GUIDANCE_ASK and stub(decide.guidance_messages(cst, rows, k)) == ""
+    assert all(f"candidate {c}: {'kept' if r['kept'] else 'dropped'}" in guidance for c, r in zip(cands, rows))
+    assert decide.parse_text(" two\n lines ") == "two lines" and decide.parse_text("") == ""
+
+
+def test_the_calls_per_campaign_are_bounded_by_role():
+    """The most calls each role asks in a campaign of the asynchronous mode (decide.async_calls): the hundredk shape
+    (16 x 2) gives the Generator 16, the Monitors 32, the Evaluator and the Coordinator 32 each, 112 in all; none
+    with llm.mode off; and the Generator's limit grows by one take when an odd P splits a take."""
+    hundredk = knob_files.load(preset="hundredk")
+    hundredk["campaign"]["mode"] = "async"
+    assert decide.async_calls(hundredk) == {"coordinator": 32, "generator": 16, "evaluator": 32, "monitor": 32}
+    assert decide.expected(hundredk)["llm_calls"] == 112
+    off = {**hundredk, "llm": {**hundredk["llm"], "mode": "off"}}
+    assert sum(decide.async_calls(off).values()) == decide.expected(off)["llm_calls"] == 0
+    assert decide.async_calls(async_knobs(population=5, generations=2))["generator"] == 6
+    assert decide.role_calls(hundredk) and not decide.role_calls(off)
+    gen = knob_files.base()
+    assert not decide.role_calls(gen) and decide.role_calls({**gen, "campaign": {**gen["campaign"], "notes": True}})

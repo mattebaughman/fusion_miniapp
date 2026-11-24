@@ -22,7 +22,9 @@ PRESETS_DIR = next((d for d in (_HERE / "knobs", _HERE.parents[1] / "knobs") if 
 PRESETS = ("smoke", "hundredk", "ignos_shape")
 
 # (kind, *args): ("int", lo, hi) ("num", lo, hi) ("nums", lo, hi) ("bool",) ("choice", options) ("str",) ("env",)
-# ("optstr",) ("optint", lo) (null or an integer) ("autoint", lo) ("auto" or an integer)
+# ("optstr",) ("optint", lo) (null or an integer) ("optnum", lo, hi[, "open"]) (null or a number; "open": above lo)
+# ("autoint", lo) ("auto" or an integer) ("onoff",) (null, off or on). YAML reads a bare off or on as false or
+# true: in an onoff knob, or a choice that has "off", they are kept as "off" and "on".
 SCHEMA = {
     "sim": {
         "nodes_per_plane": ("int", 16, None),
@@ -54,7 +56,8 @@ SCHEMA = {
         "latency_ms": ("num", 0, None),
     },
     "llm": {
-        "mode": ("choice", ("stub", "openai")),
+        # off: no model calls, every agent decides on numbers alone (the asynchronous mode only)
+        "mode": ("choice", ("stub", "openai", "off")),
         "base_url_env": ("env",),
         "api_key_env": ("env",),
         "model": ("str",),
@@ -66,6 +69,12 @@ SCHEMA = {
         "stub_latency_s": ("num", 0, None),   # the stub's seconds per call (emulated: never a model's decoding)
         "max_in_flight": ("int", 1, None),    # model requests admitted at once per model server (the AUTONMI layer)
         "admission_tokens": ("int", 0, None),  # tokens admitted at once per model server (the AUTONMI layer; 0: none)
+        # the AUTONMI layer's request settings; null leaves each call as before
+        "thinking": ("onoff",),               # off: chat_template_kwargs enable_thinking false, and no budget
+        "reply_cap": ("optint", 1),           # max_tokens: this (plus agents.thinking_budget unless thinking is off)
+        "temperature": ("optnum", 0, None),   # sent with every call; null: the server's default
+        "top_p": ("optnum", 0, 1, "open"),    # sent with every call when set (vLLM takes (0, 1])
+        "outage_s": ("num", 0, None),         # how long a call waits out a server that went away (AUTONMI's Recovery)
     },
     "workers": {
         "sim_workers": ("int", 1, None),
@@ -89,13 +98,16 @@ SCHEMA = {
     "campaign": {                             # the AUTONMI layer: each campaign's Monitor slots and candidate queue
         "slots": ("int", 1, None),            # Monitor agents per campaign, so 3 + slots hosted agents
         # generations: the parent's generation barrier, as IGNOS; async (the AUTONMI layer only, validate's
-        # `modes`): each result applied as it arrives, and for now no model calls, whatever llm.mode says
+        # `modes`): each result applied as it arrives, each agent making its own model call unless llm.mode is off
         "mode": ("choice", ("generations", "async")),
         "warmup": ("int", 1, None),           # traces the good and the bad side each hold before m is not 0; in
                                               # the asynchronous mode also the first results, kept whatever their score
+        "notes": ("bool",),                   # the generations mode: also a Monitor call per candidate (its note) and
+                                              # an Evaluator call per generation (its assessment); they change no result
     },
     "record": {
-        "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers); false: counts only
+        "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers and note, the Evaluator's
+                                              # scores, the Coordinator's guidance); false: counts only
     },
 }
 
@@ -112,6 +124,11 @@ def _check(name: str, value, rule: tuple) -> None:
     elif kind == "optint":
         if value is not None:
             _check(name, value, ("int", rule[1], None))
+    elif kind == "optnum":
+        if value is not None:
+            _check(name, value, ("num", *rule[1:]))
+            if len(rule) > 3 and value == rule[1]:   # an open lower end
+                raise KnobError(f"{name} must be in ({rule[1]}, {rule[2]}], got {value!r}")
     elif kind == "autoint":
         if value != "auto":
             if isinstance(value, str):
@@ -126,6 +143,8 @@ def _check(name: str, value, rule: tuple) -> None:
         lo, hi = rule[1], rule[2]
         if (lo is not None and value < lo) or (hi is not None and value > hi):
             raise KnobError(f"{name} must be in [{lo}, {'inf' if hi is None else hi}], got {value!r}")
+    elif kind == "onoff" and value not in (None, "off", "on"):
+        raise KnobError(f"{name} must be off, on or null, got {value!r}")
     elif kind == "bool" and not isinstance(value, bool):
         raise KnobError(f"{name} must be true or false, got {value!r}")
     elif kind == "choice" and value not in rule[1]:
@@ -157,7 +176,10 @@ def _merge_checked(base: dict, overlay: dict, where: str) -> dict:
         for key, value in values.items():
             if key not in SCHEMA[section]:
                 raise KnobError(f"{where}: unknown knob {section}.{key}; allowed: {list(SCHEMA[section])}")
-            _check(f"{section}.{key}", value, SCHEMA[section][key])
+            rule = SCHEMA[section][key]
+            if isinstance(value, bool) and (rule[0] == "onoff" or (rule[0] == "choice" and "off" in rule[1])):
+                value = "on" if value else "off"   # YAML's bare off and on
+            _check(f"{section}.{key}", value, rule)
             out[section][key] = value
     return out
 
@@ -188,14 +210,26 @@ def base() -> dict:
     return copy.deepcopy(_base_cached())
 
 
+AUTONMI_ONLY = ("thinking", "reply_cap", "temperature", "top_p")   # the llm knobs run.py's layers do not read
+
+
 def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generations",)) -> dict:
     """Check a (possibly partial) knob dict and return it merged over the smoke preset. `modes`: the
-    campaign.mode values the caller runs (run.py's layers the generations mode alone; the AUTONMI layer also
-    async)."""
+    campaign.mode values the caller runs (run.py's layers the generations mode alone, and they refuse the knobs
+    only the AUTONMI layer reads, set: AUTONMI_ONLY and campaign.notes; the AUTONMI layer also async)."""
     out = _merge_checked(base(), knobs or {}, where)
     if out["campaign"]["mode"] not in modes:
         raise KnobError(f"campaign.mode {out['campaign']['mode']} is not run by this layer (it runs "
                         f"{', '.join(modes)}); the asynchronous mode runs on the AUTONMI layer (layer_autonmi)")
+    if out["llm"]["mode"] == "off" and out["campaign"]["mode"] != "async":
+        raise KnobError("llm.mode off (no model calls) is the asynchronous mode's only: the generations mode's "
+                        "refill and summary calls need llm.mode stub or openai")
+    if "async" not in modes:   # run.py's layers send each call as before and make no Monitor or Evaluator call
+        unread = [f"llm.{k}" for k in AUTONMI_ONLY if out["llm"][k] is not None] + \
+            (["campaign.notes"] if out["campaign"]["notes"] else [])
+        if unread:
+            raise KnobError(f"{', '.join(unread)} set: only the AUTONMI layer (layer_autonmi) reads these knobs, "
+                            "and this layer would ignore them")
     return out
 
 
@@ -226,9 +260,10 @@ def monitor_section(monitor: dict | None) -> dict | None:
 
 
 def sim_section(sim: dict | None) -> dict:
-    """The `sim` section that evaluate() takes, merged over the smoke preset and checked."""
+    """The `sim` section that evaluate() takes, merged over the smoke preset's and checked (that section alone, as
+    monitor_section: once per evaluation, a copy of the whole preset cost the fixture about 0.3 ms)."""
     if sim is None:
         return base()["sim"]
     if not isinstance(sim, dict):
         raise KnobError(f"evaluate knobs must be the 'sim' section as a dict, got {type(sim).__name__}")
-    return validate({"sim": sim}, "sim knobs")["sim"]
+    return _merge_checked({"sim": _base_cached()["sim"]}, {"sim": sim}, "sim knobs")["sim"]

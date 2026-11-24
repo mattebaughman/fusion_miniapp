@@ -2,10 +2,11 @@
 
 FakeVllm serves on 127.0.0.1, on a thread of its own, what fusion uses of a vLLM server:
 - /health (vLLM answers it without a key);
-- /v1/models, the served model's name (`model`);
+- /v1/models, the served model's name (`model`) and its context (`max_model_len`);
 - /v1/chat/completions, OpenAI-compatible: each reply depends on the request's last line only (as the stub
-  LLM's do), so every layer, and every server of several, gives the same replies; usage 100 prompt and 50
-  completion tokens per reply;
+  LLM's do), so every layer, and every server of several, gives the same replies; the AUTONMI layer's roles'
+  scores the score from numbers alone, from the q and m the prompt gives at monitor.weight `weight`, their notes
+  and guidance a short fixture text (llm.numbers_only); usage 100 prompt and 50 completion tokens per reply;
 - /metrics in vLLM's Prometheus format: the gauges vllm:num_requests_running, vllm:num_requests_waiting and
   vllm:kv_cache_usage_perc, from its own requests, and the counters AUTONMI compares with the fleets'
   (vllm:prompt_tokens_total, vllm:generation_tokens_total, vllm:request_success_total).
@@ -14,7 +15,8 @@ Each request takes `latency_s` (settable while it runs) in one of `batch` slots 
 beyond the cap waits, counted as waiting. A request's KV-cache use is its 150 tokens of `kv_tokens`. With
 `api_key`, /v1/* need it as a bearer token, as `vllm serve --api-key` does. With `metrics` false it has no
 /metrics, as an OpenAI-compatible server that is not vLLM. It keeps every chat request's body; `fail(body)`
-true answers that request with HTTP 400.
+true answers that request with HTTP 400; `reply(content)`, given the last message's content, gives the reply's
+text in place of the fixture's (None: the fixture's).
 """
 from __future__ import annotations
 
@@ -24,15 +26,17 @@ import random
 import re
 import threading
 
-from fusion_miniapp import decide
+from fusion_miniapp import decide, llm
 
 PROMPT_TOKENS, COMPLETION_TOKENS = 100, 50
 
 
 class FakeVllm:
     def __init__(self, fail=None, *, latency_s: float = 0.0, batch: int | None = None, model: str = "stand-in",
-                 api_key: str | None = None, kv_tokens: int = 65_536, metrics: bool = True) -> None:
-        self.fail, self.bodies = fail or (lambda body: False), []
+                 api_key: str | None = None, kv_tokens: int = 65_536, metrics: bool = True,
+                 max_model_len: int = 32768, weight: float = 0.25, reply=None) -> None:
+        self.fail, self.bodies, self.max_model_len = fail or (lambda body: False), [], max_model_len
+        self.weight, self.reply = weight, reply or (lambda content: None)
         self.latency_s, self.batch, self.model, self.api_key = latency_s, batch, model, api_key
         self.kv_tokens, self.serves_metrics = kv_tokens, metrics
         self.running = self.waiting = self.running_max = self.waiting_max = 0
@@ -70,9 +74,14 @@ class FakeVllm:
         self.running_max = max(self.running_max, self.running)
         try:
             await asyncio.sleep(self.latency_s)
-            last = body["messages"][-1]["content"].splitlines()[-1]
+            content = body["messages"][-1]["content"]
+            last, text, mine = content.splitlines()[-1], llm.numbers_only(content, self.weight), self.reply(content)
             many = re.search(r"JSON list of (\d+)", last)
-            if many:
+            if mine is not None:   # the test's own
+                text = mine
+            elif text is not None:   # the AUTONMI layer's roles: scores from numbers alone, a short fixture text
+                text = text or "Fixture reply to: " + content.splitlines()[0]
+            elif many:
                 rng = random.Random(last)
                 text = json.dumps([{k: round(rng.uniform(lo, hi), 6) for k, (lo, hi) in decide.ranges().items()}
                                    for _ in range(int(many.group(1)))])
@@ -94,7 +103,7 @@ class FakeVllm:
         from aiohttp import web
         return self._refused(request) or web.json_response(
             {"object": "list", "data": [{"id": self.model, "object": "model", "created": 0,
-                                         "owned_by": "fusion-test-fixture", "max_model_len": 32768}]})
+                                         "owned_by": "fusion-test-fixture", "max_model_len": self.max_model_len}]})
 
     async def _health(self, request):
         from aiohttp import web
