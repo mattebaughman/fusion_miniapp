@@ -365,7 +365,7 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
   Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in
   that environment. The layer is tested on the framework's commit `layer_autonmi.AUTONMI_COMMIT`
-  (`e20861a`, origin/MTU-188-framework). Each run records the commit it imported (git in an editable
+  (`2f79177`, main). Each run records the commit it imported (git in an editable
   clone, else the installer's record) in `autonmi.framework_commit`, and warns once on stderr when it is
   another commit, unknown, or has changed files.
 - **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
@@ -438,8 +438,8 @@ only (a FIXTURE); real vLLM is unverified until a machine.
   which re-reads the endpoints and key files, as after a requeued model job. The campaigns survive it,
   but with `/metrics` sampled the run then fails AUTONMI's checks against the servers' counters (above);
   give `--no-vllm-metrics` where outages are expected.
-- **Reference launcher:** AUTONMI's `jobs/model.sh` starts one `vllm serve` per GPU (or per `RASCAL_TP`
-  GPUs), served as `RASCAL_MODEL_NAME`, with the reasoning parser `RASCAL_REASONING`, and writes
+- **Reference launcher:** AUTONMI's `jobs/model.sh` starts one `vllm serve` per GPU (or per `AUTONMI_TP`
+  GPUs), served as `AUTONMI_MODEL_NAME`, with the reasoning parser `AUTONMI_REASONING`, and writes
   `endpoints` and `api-key` into its folder once every server answers `/health`; it restarts a server that
   dies. Wiring it into `launch/` is not done yet.
 - **Not built (asks):** per-role models or servers (every role's calls go to one fleet); token streaming;

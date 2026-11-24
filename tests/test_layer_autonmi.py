@@ -281,7 +281,7 @@ def assert_agents_per_campaign(out: Path, rec: dict) -> None:
     assert {k: c["ok"] for k, c in checks.items()} == dict.fromkeys((
         "every_campaign_reports", "every_agent_finishes", "evaluations_and_model_calls_as_planned",
         "every_message_received", "lookups_match_autonmi", "store_holds_only_the_memories",
-        "every_agent_has_a_row"), True), checks
+        "every_agent_has_a_row", "every_done_agent_has_its_result"), True), checks
     assert checks["store_holds_only_the_memories"]["detail"] == {"saved_states_left": 0, "memories": n,
                                                                   "campaigns_reported": n}
 
@@ -1020,7 +1020,7 @@ def test_every_id_seen_outside_the_agents_is_the_campaigns(tmp_path):
     lookups (the abstract differs for a4 and a4/generator) and the store key of its memory are a4's."""
     import types
 
-    from rascal.store import MemoryStore
+    from autonmi.store import MemoryStore
 
     from fusion_miniapp import tools
     from fusion_miniapp.layer_autonmi import Fusion, Script
@@ -1182,7 +1182,7 @@ ASYNC_ARGS = ("--preset", "smoke", "--sim", "fixture", "--agents", "20", "--popu
 ASYNC_CHECKS = ("every_campaign_reports", "every_agent_finishes", "evaluations_and_model_calls_as_planned",
                 "every_message_received", "lookups_match_autonmi", "store_holds_only_the_memories",
                 "each_candidate_evaluated_once", "survivors_within_the_population", "inner_loops_within_the_slots",
-                "candidates_waiting_within_take", "every_agent_has_a_row")
+                "candidates_waiting_within_take", "every_agent_has_a_row", "every_done_agent_has_its_result")
 
 
 @pytest.fixture(scope="module")
@@ -1350,7 +1350,7 @@ def test_verify_catches_each_broken_invariant(async_run):
     its check (and only the checks that read it): evaluations per campaign, each candidate once, every message
     received, the survivors, inner loops and candidates waiting within their bounds, and each role's counts
     within their bounds, tied to its cycles, with no model calls."""
-    from rascal.store import MemoryStore
+    from autonmi.store import MemoryStore
 
     from fusion_miniapp.layer_autonmi import Fusion
 

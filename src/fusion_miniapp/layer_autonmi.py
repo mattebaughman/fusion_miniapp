@@ -86,10 +86,10 @@ from wfMiniAPI.api import MiniApp
 from fusion_miniapp import decide, knobs as knob_files, monitor, record, run, tools, trace
 from fusion_miniapp.llm import REPLY_TOKENS, StubLLM
 
-# The AUTONMI framework's commit this layer is tested on: origin/MTU-188-framework (its PR #16). An editable
-# install runs whatever its clone has checked out (MTU-188-retry, for one, turns on reruns), so the run record
-# names the commit imported, and a run on another commit, or on changed files, warns once (autonmi_pin).
-AUTONMI_COMMIT = "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75"
+# The AUTONMI framework's commit this layer is tested on: main, with the framework merged. An editable
+# install runs whatever its clone has checked out (another branch may, for one, turn on reruns), so the run
+# record names the commit imported, and a run on another commit, or on changed files, warns once (autonmi_pin).
+AUTONMI_COMMIT = "2f791772dd1d4508b1cdf33de66e4b3adeb98e03"
 # Under `python -m dragon -s .../layer_autonmi.py` (and `python -m`) this file runs as __main__. The
 # definition and the simulation pools' factory are taken from the module of this name instead, so the
 # populations' processes can unpickle them, and so _POOLS is the list the factory fills.
@@ -1385,7 +1385,7 @@ def vllm_sampler(model: dict, tries: int = 3, pause_s: float = 2.0):
     `pause_s` apart; else (None, why not). All or none: AUTONMI compares the servers' token counts with all
     the fleets' calls."""
     from autonmi.models import api_key
-    from rascal.telemetry.vllm import VllmSampler, fetch, parse
+    from autonmi.vllm import VllmSampler, fetch, parse
 
     key, urls = api_key(model), model["endpoints"]
     for url in urls:
