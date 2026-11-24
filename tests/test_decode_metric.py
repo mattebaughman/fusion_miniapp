@@ -174,8 +174,8 @@ def test_autonmis_sampler_reads_the_fake_vllm_servers_metrics():
     """AUTONMI's VllmSampler parses the fixture's /metrics: 5 requests at once against a batch of 2 are 2
     running and 3 waiting, with KV-cache use for the 2; afterwards none, and the counters AUTONMI compares
     with the fleets' (prompt and generated tokens, successful requests) count all 5."""
-    pytest.importorskip("rascal.telemetry.vllm", reason="needs the AUTONMI framework's clone (rascal)")
-    from rascal.telemetry.vllm import VllmSampler, fetch, parse
+    pytest.importorskip("autonmi.vllm", reason="needs the AUTONMI framework (autonmi)")
+    from autonmi.vllm import VllmSampler, fetch, parse
 
     body = {"model": "stand-in", "messages": [{"role": "user", "content": "Summarise.\nnothing more"}]}
     with FakeVllm(latency_s=1.5, batch=2) as server:
