@@ -236,7 +236,11 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   reply that cannot be used, or a prompt too long for the servers' context (`max_model_len` from their
   `/v1/models`; the prompt's characters count as its tokens; checked for the roles' own calls only, so the
   generations mode's refill and summary are sent as before) is tried up to 3 times (a prompt too long once),
-  then the fallback is used and counted. No try is made once another agent has failed the campaign. With the
+  then the fallback is used and counted. No try is made once another agent has failed the campaign. The
+  generations mode's refill and summary calls are also tried up to 3 times while they fail; then the refill
+  keeps the parent's mutants and the summary is left out (`""`), counted as the Generator's or the
+  Coordinator's fallback, and the campaign goes on. The LangGraph and Academy layers (`run.py`, unchanged) end
+  the campaign at the first failed call, so the layers differ on this failure path only. With the
   stub LLM each call takes `llm.stub_latency_s`; the stub answers the Generator as it answers a refill and the
   three other calls with the value from numbers alone (the score from numbers, computed from the q and m the
   Evaluator's prompt gives at `monitor.weight`; no note, no guidance). A model run (`--llm openai`) in this
@@ -283,10 +287,11 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
     calls are counted, not listed: without `record.extras` a campaign's line has none in `llm_call_details`
     (the generations mode's refill and summary stay there, as before), and each population sums them instead
     (`layer_autonmi.CallSums`, a file removed once the record is written) for the record's `llm_service` and
-    client-side counts. With `record.extras`
+    client-side counts and tokens per second. With `record.extras`
     each campaign's line also has each result's arrival number, q, m, score, draw and kept flag, each
     candidate's note, each Coordinator cycle's guidance, the orders a replay needs, and every call's details
-    in `llm_call_details`. `compare_records` compares two such records on their counts and invariants, not
+    in `llm_call_details` (each with the `server` that answered it); the record's model-call extras are below
+    (the decoding metric). `compare_records` compares two such records on their counts and invariants, not
     their digests (and with `llm.mode: openai` not the counts that follow the model's replies,
     `candidates_by_source` and `refill_slots`).
   - Measured with no model calls (as `llm.mode: off`) on a laptop on AC power (2026-11-24; hundredk shape,
@@ -301,9 +306,13 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   of its own for its simulations.
   - Locally the populations run in one process. Real simulations run in spawned workers
     (`pool.ResilientProcessPool`, `--workers` per population; by default its share of
-    `workers.sim_workers`). Fixture simulations run on threads that each keep one event loop
-    (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the
-    process each time, and a run's time grew about with the square of its campaigns.
+    `workers.sim_workers`). With `workers.gpu_per_worker` each worker takes the next number i from one counter
+    that every population's pool shares, and sees only GPU i mod the number of GPUs the device probe saw
+    (`pool.on_gpu`, through `CUDA_VISIBLE_DEVICES`; an MPS daemon, if any, is the launch script's). This is
+    tested with a faked GPU count only: real placement is unverified until the ladder's machine step 3.
+    Fixture simulations run on threads that each keep one event loop (`layer_autonmi.FixturePool`):
+    RHAPSODY's `asyncio.run` per task would walk every task of the process each time, and a run's time grew
+    about with the square of its campaigns.
   - AsyncFlow's engine loop finds finished tasks by checking every running one on every pass
     (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
     The layer gives each engine a set of running tasks that records completions as they happen
@@ -354,8 +363,33 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   gap (up to about 2.2 s at 2,000 campaigns on a laptop, measured). Under Dragon only the servers' count is seen in
   the head process (the populations run elsewhere; untested).
 - **The decoding metric** (`speed` in the record). For each count: the maximum, the time-weighted mean,
-  and the seconds at or above 50, 90 and 95% of each reference: the hosted agents (3 + `campaign.slots` per campaign) and
-  the admission capacity (`llm.max_in_flight` x servers, split over the populations).
+  and the seconds at or above 50, 90 and 95% of the hosted agents (3 + `campaign.slots` per campaign). There is
+  no comparison against the client's admission caps (Matt's answer 11 of 2026-11-24).
+  - `model_tokens_per_s` (on by default): prompt and generated tokens per second over the steady window, 15% to
+    85% of the agent phase (`record.STEADY`): the usage counts of the calls answered in it, per second of the
+    window. With the stub they are its estimates (a quarter of the characters), marked `emulated`. Null in
+    `run.py`'s layers, whose call details carry no times.
+  - With `record.extras` (off by default) the record also has each role's share of time in a model call over
+    the same window (`model_call_share`: the mean number of the role's agents in a call, from each answered
+    call's `[t_end - service_s, t_end]`, over its agents; and a campaign's agents in a call, of 3 +
+    `campaign.slots`), the request settings sent (`llm_service.requests`: each distinct body besides the
+    messages, as the transport makes it, by role, with its count of requests), the model servers in the order of
+    a call's `server` (`llm_service.servers`, null with the stub), and with `--llm openai` a copy of the model
+    servers' setup files in `<run>/model_service/` (`llm_service.model_service`): every plain file in the
+    folder of `--endpoints-file` (the model job's `endpoints`, `gpu.csv`, each `vllm-<i>.log` as its first 500
+    lines, and what a launch script puts there), and `environment.txt`, this process's variables of the
+    prefixes `RASCAL_`, `SLURM_`, `CUDA_`, `VLLM_`, `FLASHINFER_`, `TRITON_` and `HF_HUB_OFFLINE`,
+    `TRANSFORMERS_OFFLINE`, `PATH`, `TMPDIR`. Secrets are left out: the key file (`api-key`, `--api-key-file`)
+    and any file or variable whose name says it holds a secret (`VLLM_API_KEY`, `HF_TOKEN`, `secrets.json`,
+    `tokens.txt`, ...) are not copied. In every copied file the key, and the value of each such variable of
+    this process that has 8 characters or more, are replaced wherever they appear (a shorter value would match
+    ordinary text); a value set by such a name in the file (`HF_TOKEN=...`, `"api_key": "..."`,
+    `--api-key ...`) is replaced whatever its length, and so is a URL's user and password; a copied file that
+    still holds the key or one of those values is removed (`layer_autonmi.copy_model_service`). A secret under
+    a name that does not say so, in a file whose name does not say so and not in this process's environment,
+    cannot be recognised and is copied: the model job's folder must not hold one.
+    The share of time in a model call takes every campaign that finished as live through the whole window, as
+    when all start at once; campaigns in waves (`agents.max_live`) make it lower than the live agents' share.
   - `agents_live`: from AUTONMI's rows (`app/agents-p*.jsonl`, each agent's `t_start` to `t_end`), in all
     and per role (`by_role`, against one agent per campaign, the Monitors' `campaign.slots`), with `all_live_s`: how long every hosted agent
     was live at once (from the last start to the first end). `start_together` gives each Coordinator's wait
@@ -402,8 +436,9 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   another commit, unknown, or has changed files.
 - **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
   fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
-  requests, and a failed campaign). It also checks SIGTERM and the shape workflow-mini-apps requires, the
-  live line and the client's counts on the stub, and the model-service checks below. It checks the agents
+  requests; a failed summary, which the LangGraph layer ends the campaign at and this layer leaves out after
+  3 tries; and failed refills, which keep the parent's mutants). It also checks SIGTERM and the shape
+  workflow-mini-apps requires, the live line and the client's counts on the stub, and the model-service checks below. It checks the agents
   per campaign (their rows, messages, exact per-role counts, one Monitor report per inner loop and the store
   at the end), the same results with 1, 2 or 16 Monitor slots, the record toggle, the Monitors' numbers once
   warm-up is reached (in the hundredk shape the planted split is found, and the numbers are the same at 2 and
@@ -481,6 +516,10 @@ only (a FIXTURE); real vLLM is unverified until a machine.
   GPUs), served as `RASCAL_MODEL_NAME`, with the reasoning parser `RASCAL_REASONING`, and writes
   `endpoints` and `api-key` into its folder once every server answers `/health`; it restarts a server that
   dies. Wiring it into `launch/` is not done yet.
+- **The servers' setup files:** with `record.extras` the run copies every plain file of the endpoints file's
+  folder (logs as their first 500 lines) and a filtered environment snapshot into `<run>/model_service/`,
+  leaving out the key file and every secret it can recognise (the decoding metric, above). Tested with planted
+  fake secrets.
 - **Not built (asks):** per-role models or servers (every role's calls go to one fleet); token streaming;
   time to first token (the record has each call's whole time only).
 
@@ -578,6 +617,8 @@ run would still pass.
   generation's submission to the evaluation's start), generation time (submission to last result) and
   model-call latency;
 - event-loop lag (the same 100 ms timer in both layers);
+- the model calls' prompt and generated tokens per second over the steady window, 15% to 85% of the agent
+  phase (`model_tokens_per_s`; the AUTONMI layer's, whose call details carry their times);
 - `sim_bound_ratio`: the simulations' own time spread over the workers, against the agent phase
   (1 means the run took no longer than its simulations had to).
 
@@ -603,10 +644,10 @@ One YAML file with nine sections. A preset and any number of knob files are merg
 | `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub, openai, or off: no model calls, the asynchronous mode only), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server); the AUTONMI layer's request settings, each null by default so that every request is as before: `thinking` (off: `chat_template_kwargs {enable_thinking: false}` on every call and no thinking budget; on; YAML's bare `off` and `on` are read as these), `reply_cap` (`max_tokens`: the cap, plus `agents.thinking_budget` unless thinking is off), `temperature`, `top_p` (above 0, at most 1); `run.py`'s layers refuse these four set; and `outage_s` (how long a call waits out a server that went away; 1,800, AUTONMI's) |
-| `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one) |
+| `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one); `gpu_per_worker` (the AUTONMI layer with `--sim real`; default false: inner-loop worker i, counted over every population's pool, sees GPU i mod the GPUs the device probe saw, through `CUDA_VISIBLE_DEVICES`; no effect without a GPU; `run.py`'s layers refuse it set; the record's `autonmi.inner_loop_gpus`) |
 | `monitor` | `capture` (each evaluation's record carries the inner-loop trace; the AUTONMI layer only; default true), `fixture_trace` (`smooth` or `hash`: the fixture's synthetic trace), `weight` (the Monitor's `m` in a result's score in the asynchronous mode; default 0.25). Added instrumentation, not in IGNOS; no result of the generations mode reads it |
 | `campaign` | the AUTONMI layer: `slots` (Monitor agents per campaign; default 2), `mode` (`generations`, the default: the parent's generation barrier; `async`: each result applied as it arrives, each role making its own model call, the AUTONMI layer only), `warmup` (traces each side holds before the Monitor's `m` is not 0, and in the asynchronous mode the first results kept whatever their score; default 4), `notes` (the generations mode: a Monitor call per candidate and an Evaluator call per generation, recorded; default false; `run.py`'s layers refuse it). In the generations mode no result depends on them |
-| `record` | `extras` (each candidate's Monitor numbers, and its note and assessment, in its campaign's line, and in the asynchronous mode each result's row, the guidance and the orders a replay needs; default false: counts only) |
+| `record` | `extras` (each candidate's Monitor numbers, and its note and assessment, in its campaign's line, and in the asynchronous mode each result's row, the guidance and the orders a replay needs; each call's server; in the record each role's share of time in a model call, the request settings sent, and the model servers' setup files without their secrets; default false: counts only, and tokens per second) |
 
 | Preset | Campaigns | P | G | Simulations per campaign | Simulations in all | Notes |
 |---|---|---|---|---|---|---|

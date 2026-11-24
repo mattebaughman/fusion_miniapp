@@ -8,7 +8,7 @@ from fusion_miniapp.knobs import KnobError
 
 # knobs added after the hundredk and ignos_shape presets, which take them from smoke (hundredk.yaml is kept as it is)
 NEWER = {"monitor.weight", "campaign.slots", "campaign.mode", "campaign.warmup", "record.extras", "campaign.notes",
-         "llm.thinking", "llm.reply_cap", "llm.temperature", "llm.top_p", "llm.outage_s"}
+         "llm.thinking", "llm.reply_cap", "llm.temperature", "llm.top_p", "llm.outage_s", "workers.gpu_per_worker"}
 
 
 @pytest.mark.parametrize("name", knobs.PRESETS)

@@ -17,6 +17,20 @@ def test_occupancy_counts_open_intervals():
     assert record.occupancy([0, 1], [1, 2], 0, 2)["max"] == 1                # an end counts before a start
 
 
+def test_the_steady_windows_tokens_per_second_and_share_of_time_in_a_call():
+    """The steady window is 15% to 85% of the agent phase: [15, 85] of [0, 100]. Tokens per second count the calls
+    answered in it (t_end 10 and 90 are out); a role's share of time in a call is its calls' time open in it over
+    its agents' (here 2 campaigns, 1 coordinator and 2 monitors each), and a campaign's agents in a call their sum."""
+    tok = record.model_tokens([10, 20, 50, 85, 90], [100] * 5, [10, 20, 30, 40, 50], 0, 100, False)
+    assert tok == {"window": [0.15, 0.85], "window_s": 70.0, "calls": 3, "prompt_per_s": round(300 / 70, 3),
+                   "generated_per_s": round(90 / 70, 3), "emulated": False}
+    assert record.model_tokens([5], [1], [1], 3, 3, True)["prompt_per_s"] is None   # no phase: no rate
+    by_role = {"coordinator": ([10, 60], [50, 90]), "monitor": ([0], [100])}   # open 35 + 25 s, and all 70 s
+    got = record.call_share(by_role, {"coordinator": 1, "generator": 1, "monitor": 2}, 2, 0, 100)
+    assert got["by_role"] == {"coordinator": round(60 / 70 / 2, 4), "generator": 0.0, "monitor": 0.25}
+    assert got["agents_in_a_call_per_campaign"] == round(round(60 / 70 / 2, 4) + 2 * 0.25, 4)
+
+
 def test_speed_section_and_line(tmp_path, capsys):
     assert run.main(["--agents", "200", "--sim", "fixture", "--out", str(tmp_path / "r")]) == 0
     rec = json.loads((tmp_path / "r" / "run_record.json").read_text())

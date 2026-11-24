@@ -78,6 +78,7 @@ SCHEMA = {
     },
     "workers": {
         "sim_workers": ("int", 1, None),
+        "gpu_per_worker": ("bool",),          # the AUTONMI layer, --sim real: inner-loop worker i sees GPU i mod n
     },
     "outer": {                                # each campaign's IGNOS outer loop (parent run_evolutionary_loop)
         "population": ("int", 1, None),       # P
@@ -107,7 +108,9 @@ SCHEMA = {
     },
     "record": {
         "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers and note, the Evaluator's
-                                              # scores, the Coordinator's guidance); false: counts only
+                                              # scores, the Coordinator's guidance) and the model calls' (each call's
+                                              # server, the request settings, each role's time in a call, the model
+                                              # servers' setup files); false: counts only
     },
 }
 
@@ -216,7 +219,8 @@ AUTONMI_ONLY = ("thinking", "reply_cap", "temperature", "top_p")   # the llm kno
 def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generations",)) -> dict:
     """Check a (possibly partial) knob dict and return it merged over the smoke preset. `modes`: the
     campaign.mode values the caller runs (run.py's layers the generations mode alone, and they refuse the knobs
-    only the AUTONMI layer reads, set: AUTONMI_ONLY and campaign.notes; the AUTONMI layer also async)."""
+    only the AUTONMI layer reads, set: AUTONMI_ONLY, campaign.notes and workers.gpu_per_worker; the AUTONMI layer
+    also async)."""
     out = _merge_checked(base(), knobs or {}, where)
     if out["campaign"]["mode"] not in modes:
         raise KnobError(f"campaign.mode {out['campaign']['mode']} is not run by this layer (it runs "
@@ -226,7 +230,8 @@ def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generati
                         "refill and summary calls need llm.mode stub or openai")
     if "async" not in modes:   # run.py's layers send each call as before and make no Monitor or Evaluator call
         unread = [f"llm.{k}" for k in AUTONMI_ONLY if out["llm"][k] is not None] + \
-            (["campaign.notes"] if out["campaign"]["notes"] else [])
+            (["campaign.notes"] if out["campaign"]["notes"] else []) + \
+            (["workers.gpu_per_worker"] if out["workers"]["gpu_per_worker"] else [])
         if unread:
             raise KnobError(f"{', '.join(unread)} set: only the AUTONMI layer (layer_autonmi) reads these knobs, "
                             "and this layer would ignore them")

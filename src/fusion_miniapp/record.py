@@ -145,6 +145,7 @@ def _pct(values) -> dict:
 
 
 PCTS = (50, 90, 95)   # the shares of each reference whose time at or above occupancy(refs=) reports
+STEADY = (0.15, 0.85)   # the steady window: these shares of the agent phase (its start-up and its tail left out)
 
 
 def _held(held, dur, span: float, top, refs: dict | None, digits: int) -> dict:
@@ -307,16 +308,52 @@ def model_requests(starts, ends, lo: float, hi: float, refs: dict | None, **extr
     return {**extra, **occupancy(starts, ends, lo, hi, refs=refs, digits=4), "time_s": _pct(spans)}
 
 
+def steady(lo: float, hi: float) -> tuple[float, float]:
+    """The steady window of the agent phase [lo, hi] (STEADY)."""
+    return lo + STEADY[0] * (hi - lo), lo + STEADY[1] * (hi - lo)
+
+
+def model_tokens(ends, prompt, generated, lo: float, hi: float, emulated: bool) -> dict:
+    """Prompt and generated tokens per second over the steady window of the agent phase [lo, hi]: the usage
+    counts of the calls answered in it (each call's t_end), per second of the window (`model_tokens_per_s`)."""
+    w_lo, w_hi = steady(lo, hi)
+    ends = np.asarray(ends, dtype=float)
+    inside = (ends >= w_lo) & (ends <= w_hi)
+    span = w_hi - w_lo
+    def rate(a) -> float | None:
+        return round(float(np.asarray(a, dtype=float)[inside].sum()) / span, 3) if span > 0 else None
+    return {"window": list(STEADY), "window_s": round(span, 3), "calls": int(inside.sum()),
+            "prompt_per_s": rate(prompt), "generated_per_s": rate(generated), "emulated": emulated}
+
+
+def call_share(by_role: dict, roles: dict, campaigns: int, lo: float, hi: float) -> dict:
+    """Each role's share of time in a model call over the steady window of the agent phase [lo, hi]: the mean
+    number of its calls open at once (by_role: {role: (starts, ends)}, each call from t_end - service_s to t_end,
+    of the campaigns that finished) over its agents (roles: {role: agents per campaign} x those campaigns); and a
+    campaign's agents in a call, in all (`model_call_share`, record.extras). It takes every campaign as live
+    through the whole window, as when all start at once (the hundredk shape); campaigns in waves
+    (agents.max_live) would make it lower than the share of the agents live."""
+    w_lo, w_hi = steady(lo, hi)
+    share = {role: round(occupancy(*by_role.get(role, ((), ())), w_lo, w_hi, digits=6)["mean"] / (n * campaigns), 4)
+             for role, n in roles.items()}
+    return {"window": list(STEADY), "source": "each answered call's [t_end - service_s, t_end] in llm_call_details",
+            "by_role": share, "agents_in_a_call_per_campaign": round(sum(share[r] * n for r, n in roles.items()), 4)}
+
+
 def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wall_s: float,
           failed: list[int] = (), interrupted: bool = False, t_run: float | None = None,
-          model_refs: dict | None = None) -> dict:
+          model_refs: dict | None = None, roles: dict | None = None) -> dict:
     """Merge the campaign lines of this run's agent processes (`parts`, those that wrote their counts) into
     agents.jsonl and write run_record.json. `failed`: agent processes that wrote none; their campaigns are
     missing. `t_run`: when the run started (epoch). `model_refs`: the references ({name: n}) of the model
     requests open at once, which the record gives when the calls' details carry their times (t_end,
     service_s, wait_s, recovery_s: the AUTONMI layer's), or a part gives them apart from its lines
     (`call_times`: the calls' count, those retried, and `times`, an array of rows t_end, service_s, recovery_s,
-    wait_s; the AUTONMI layer's calls summed instead of written in a line). Other files in `out` are never read.
+    wait_s, prompt and completion tokens; the AUTONMI layer's calls summed instead of written in a line); from
+    the same calls, prompt and generated tokens per second over the steady window (`model_tokens_per_s`).
+    `roles` ({role: its agents per campaign}, the AUTONMI layer's): with record.extras, each role's share of
+    time in a model call (`model_call_share`), from the calls' details in the lines. Other files in `out` are
+    never read.
 
     The merge streams: each line is copied to agents.jsonl.tmp and counted as it passes, the file is
     renamed into place, and only then are the per-process files removed. Fixture evaluations make no
@@ -329,8 +366,12 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
     c_start, c_end, e_sub, e_start, e_end = (array("d") for _ in range(5))
     sim_s, wait_s, gen_s, worker_rss = array("d"), array("d"), array("d"), []
     # every model call, of every campaign: those whose details carry their times, as intervals at the client
-    # (in flight: admitted and sent, its reply not back; queued: waiting for admission before that)
+    # (in flight: admitted and sent, its reply not back; queued: waiting for admission before that), and their
+    # prompt and generated tokens
     m_start, m_end, q_start, q_end, calls = array("d"), array("d"), array("d"), array("d"), Counter()
+    m_prompt, m_generated = array("d"), array("d")
+    # record.extras, with the roles (the AUTONMI layer's): each role's calls in flight, from the lines' details
+    by_role = {} if roles and knobs["record"]["extras"] else None
     tmp = out / "agents.jsonl.tmp"
     with tmp.open("w") as merged:
         for part in parts:
@@ -343,6 +384,8 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
                 m_end.extend(t["times"][:, 0].tolist())
                 q_start.extend((asked - t["times"][:, 3]).tolist())
                 q_end.extend(asked.tolist())
+                m_prompt.extend(t["times"][:, 4].tolist())
+                m_generated.extend(t["times"][:, 5].tolist())
             with open(part["agents_file"]) as src:
                 for line in src:
                     line = line.rstrip("\n")
@@ -363,7 +406,13 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
                         m_end.append(d["t_end"])
                         q_start.append(asked - (d.get("wait_s") or 0.0))
                         q_end.append(asked)
+                        m_prompt.append(d.get("prompt_tokens") or 0)
+                        m_generated.append(d.get("completion_tokens") or 0)
                         calls["retried"] += bool(d.get("recovery_s"))
+                        if by_role is not None and "error" not in r:   # the campaigns that finished, as `timed`
+                            b, e = by_role.setdefault(d.get("role"), (array("d"), array("d")))
+                            b.append(sent)
+                            e.append(d["t_end"])
                     if "error" in r:
                         errors[r["error"].split(":", 1)[0]] += 1
                         continue
@@ -452,6 +501,11 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
         q_start, q_end, lo, hi, model_refs, side="client",
         what="model requests waiting for the client's admission caps (llm.max_in_flight, llm.admission_tokens)",
         source="each call's wait_s before its time in flight", emulated=emulated) if timed_calls and timed else None
+    # the usage counts of each call (with the stub, its estimate: emulated)
+    speed["model_tokens_per_s"] = model_tokens(m_end, m_prompt, m_generated, lo, hi, emulated) \
+        if timed_calls and timed else None
+    if by_role is not None and timed:
+        speed["model_call_share"] = call_share(by_role, roles, timed, lo, hi)
     rec = {
         "status": None, "agent_layer": layer, "sim": sim, "llm": knobs["llm"]["mode"],
         "emulated": True, "method": "miniapp_standin",

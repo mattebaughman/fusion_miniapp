@@ -11,8 +11,9 @@ selection on the inner loop's numbers alone, so its result is the same: `results
 layers' for the same knobs, at any campaign.slots. With campaign.mode async (this layer only) there is no
 generation barrier, and each agent makes its own model call (unless llm.mode is off): each applies each result as
 it arrives (Script), so results differ from run to run and the checks are invariants (verify). A model call of
-the roles' own is tried up to TRIES times, then the role decides on numbers alone (its fallback, counted). What
-runs them is AUTONMI's:
+the roles' own is tried up to TRIES times, then the role decides on numbers alone (its fallback, counted); so are
+the generations mode's refill and summary, whose fallbacks keep the parent's mutants and leave the summary out (the
+other layers end the campaign at the first failed call). What runs them is AUTONMI's:
 - The mini-app is an AsyncFlow application. Its campaigns are split into populations (`--populations`;
   by default one per agent process of run.py, or the next count up that divides the campaigns: layout),
   each an AsyncFlow node with an engine of its own for its simulations, a fleet for its model calls, and
@@ -38,7 +39,8 @@ runs them is AUTONMI's:
 - The head process prints one line to stderr per record.ticker interval (LiveLine): agents live, model
   requests open and queued at the client, sequences decoding at the model servers, agents done. The
   record keeps the same values as a series, and the counts' maxima, means and times at or above shares of
-  the hosted agents and the admission capacity (`speed`; write_record).
+  the hosted agents (`speed`; write_record), and the model calls' prompt and generated tokens per second over
+  the steady window (record.write).
 
 It writes what run.py writes, with `agent_layer: autonmi`: `run_record.json` (record.write, with an
 `autonmi` section), `agents.jsonl` and `campaigns/<id>/`; and AUTONMI's own folders (`launcher/`,
@@ -60,6 +62,7 @@ import importlib
 import json
 import multiprocessing as mp
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -99,6 +102,8 @@ AUTONMI_COMMIT = "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75"
 # populations' processes can unpickle them, and so _POOLS is the list the factory fills.
 MODULE = "fusion_miniapp.layer_autonmi"
 _POOLS: list = []   # this process's simulation pools, told to stop rebuilding on SIGTERM
+_GPUS: list = []    # workers.gpu_per_worker: the GPUs this process's inner-loop workers are placed on (inner_loop_gpus)
+_GPU_COUNTER = None   # the workers placed so far, one counter for every population's pool here (sim_pool)
 _OWN_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)   # the run's, not its engines' (run_until_signalled)
 
 
@@ -187,7 +192,7 @@ FAIL_ENV = "FUSION_AUTONMI_FAIL"   # tests only: "<agent id>:<g>" fails that age
                                    # (a Monitor's g is its candidate's call id, g<g>c<i>: before that report; in
                                    # the asynchronous mode g is the agent's cycle from 0, a Monitor's call id c<k>)
 QUEUE = "candidates"   # each campaign's candidate queue: the Generator puts, a free Monitor takes the next
-TRIES = 3   # tries of a role's own model call (an error, or a reply that cannot be used) before its fallback
+TRIES = 3   # tries of a model call (an error, or for a role's own call a reply that cannot be used) before its fallback
 
 
 def agent_names(knobs: dict) -> list[str]:
@@ -477,19 +482,43 @@ class StubTransport:
                      usage=Usage(prompt_tokens=prompt, completion_tokens=len(text) // 4))
 
 
+def transport_settings(model: dict | None) -> dict:
+    """What a fleet's transport sends with every call besides the call's own fields: for the model job's servers,
+    AUTONMI's settings (autonmi.models.transport: the served model's name, temperature 0, max_tokens, and
+    thinking_off as chat-template arguments in its extra_body); for the stub, its name alone (model None)."""
+    if model is None:
+        return {"model": StubTransport.model}
+    out = {"model": model["name"], "temperature": 0, "max_tokens": int(model.get("max_tokens", 512))}
+    if model.get("thinking_off"):
+        out["extra_body"] = {"chat_template_kwargs": dict(model["thinking_off"])}
+    return out
+
+
+def sent(transport: dict, kwargs: dict) -> dict:
+    """A request's settings, its body's fields besides the messages, as Flowgentic's HTTPTransport.complete makes
+    them: the transport's own (transport_settings), then the call's (`kwargs`, without the fleet's reserve and
+    meta), a call's extra_body replacing the transport's; then the extra_body's keys, put into the body."""
+    body = {**transport, **{k: v for k, v in kwargs.items() if k not in ("reserve", "meta")}}
+    body.update(body.pop("extra_body", None) or {})
+    return body
+
+
 class CallSums:
     """One population's model calls whose details are not in a campaign's line (llm_call_details): the roles' own
     calls without record.extras (counts only by default), and a call that ends after its campaign's line was
-    written (it failed). Summed here instead, for the record's model figures (llm_service, and the client-side
-    counts of requests in flight and queued that record.write makes from each call's times), and written at the
-    population's end beside its campaign lines (`write`, calls-p<index>.npz), where part() reads them (`read`);
-    write_record removes the file once the record is written."""
+    written (it failed). Summed here instead, for the record's model figures (llm_service, the client-side
+    counts of requests in flight and queued, and the tokens per second, that record.write makes from each call's
+    times and tokens), and written at the population's end beside its campaign lines (`write`, calls-p<index>.npz),
+    where part() reads them (`read`); write_record removes the file once the record is written. With
+    record.extras it also counts the requests sent, by role and settings (`requests`: Script._ask)."""
 
     def __init__(self) -> None:
         self.n = Counter()   # calls, errors, empty, retried
         self.budgets, self.finish_reasons, self.tokens = Counter(), Counter(), Counter()
         self.latency = array("d")   # every call's latency_s
-        self.times = array("d")     # each answered call's t_end, service_s, recovery_s, wait_s
+        self.times = array("d")     # each answered call's t_end, service_s, recovery_s, wait_s, prompt and
+                                    # completion tokens
+        self.requests = Counter()   # record.extras: JSON of {"role", "body": the request's settings} -> requests
 
     def add(self, d: dict) -> None:
         """One call's details, as on_call and _ask make them."""
@@ -504,20 +533,21 @@ class CallSums:
         self.finish_reasons[d["finish_reason"]] += 1
         for k in ("prompt", "completion", "reasoning"):
             self.tokens[k] += d[f"{k}_tokens"] or 0
-        self.times.extend((d["t_end"], d["service_s"], d["recovery_s"], d["wait_s"]))
+        self.times.extend((d["t_end"], d["service_s"], d["recovery_s"], d["wait_s"], d["prompt_tokens"] or 0,
+                           d["completion_tokens"] or 0))
 
     def write(self, path: Path) -> None:
-        """To `path` (none without a call)."""
-        if self.n["calls"]:
+        """To `path` (none without a call or a request counted)."""
+        if self.n["calls"] or self.requests:
             counts = {"n": self.n, "budgets": self.budgets, "finish_reasons": self.finish_reasons,
-                      "tokens": self.tokens}
+                      "tokens": self.tokens, "requests": self.requests}
             np.savez(path, counts=json.dumps(counts), latency=np.array(self.latency, dtype=float),
-                     times=np.array(self.times, dtype=float).reshape(-1, 4))
+                     times=np.array(self.times, dtype=float).reshape(-1, 6))
 
     @staticmethod
     def read(path: Path) -> dict | None:
         """What `write` wrote: the counts, `latency_s` (a list) and `times` (an array of rows t_end, service_s,
-        recovery_s, wait_s); None without the file."""
+        recovery_s, wait_s, prompt and completion tokens); None without the file."""
         if not path.exists():
             return None
         with np.load(path) as z:
@@ -531,13 +561,32 @@ def sums_file(lines_file: Path, index: int) -> Path:
 
 def sim_pool(workers: int):
     """The executor of a population's real evaluations (AUTONMI's PopulationConfig.executor): spawned
-    worker processes, as run.py's, which rebuild once when a worker dies and stop within run.SHUTDOWN_S."""
-    from fusion_miniapp.pool import ResilientProcessPool
+    worker processes, as run.py's, which rebuild once when a worker dies and stop within run.SHUTDOWN_S. With
+    GPUs to place them on (`_GPUS`, inner_loop_gpus), each worker takes the next number i from one counter that
+    every population's pool in this process shares, and sees GPU i mod their count alone (pool.on_gpu)."""
+    global _GPU_COUNTER
+    from fusion_miniapp.pool import ResilientProcessPool, on_gpu
 
-    pool = ResilientProcessPool(workers, mp_context=mp.get_context("spawn"), initializer=run._worker_init,
+    spawn, init, args = mp.get_context("spawn"), run._worker_init, ()
+    if _GPUS:
+        if _GPU_COUNTER is None:
+            _GPU_COUNTER = spawn.Value("i", 0)
+        init, args = on_gpu, (_GPU_COUNTER, list(_GPUS), run._worker_init)
+    pool = ResilientProcessPool(workers, mp_context=spawn, initializer=init, initargs=args,
                                 shutdown_timeout=run.SHUTDOWN_S)
     _POOLS.append(pool)
     return pool
+
+
+def inner_loop_gpus(knobs: dict, device: dict | None) -> list[str]:
+    """workers.gpu_per_worker: the GPUs to place the inner-loop workers on, one each: the n GPUs the device probe
+    saw where the inner loops run (CUDA_VISIBLE_DEVICES's first n entries when it is set, else 0 .. n - 1); none
+    without the knob or without a GPU (also the fixture and Dragon, which have no probe here)."""
+    n = len((device or {}).get("gpus") or [])
+    if not knobs["workers"]["gpu_per_worker"] or not n:
+        return []
+    seen = [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
+    return (seen or [str(k) for k in range(n)])[:n]
 
 
 class FixturePool(run.FixturePool):
@@ -599,6 +648,7 @@ class Fusion:
         self.populations: dict[str, asyncio.Task] = {}   # p000...: the task running each population here (build)
         self.live: Counter = Counter()   # agents started and ended in this process (LiveLine)
         self.context: int | None = None   # the model servers' context (max_model_len), for the prompt-length check
+        self.transport = transport_settings(None)   # what the transports send with every call (record.extras)
 
     def agents(self):
         """Each campaign's agents (agent_names), one after another (AUTONMI cuts this list into contiguous
@@ -837,7 +887,9 @@ class Script:
                                     barrier): the Coordinator's selection, best-so-far and log; its memory
 
     then make/g+1, or after the last generation the Coordinator's summary call, done/G to the Generator and
-    the Evaluator, and its Report; the Generator then puts one stop on the queue for each Monitor. The
+    the Evaluator, and its Report; the Generator then puts one stop on the queue for each Monitor. A refill or
+    summary call that fails is tried up to TRIES times, then falls back, counted (`_ask`): the refill keeps the
+    parent's mutants, and the summary is left out (""); the campaign goes on. The
     Generator makes the abstract lookup when it starts (decide.LOOKUP_ROLE); the Coordinator makes the
     constraints lookup, after waiting (agents.start_together) for every agent of the population to start.
     The others end on done or their stop, so all stay live until their campaign ends. The Generator never
@@ -927,7 +979,7 @@ class Script:
         self.filled: dict[str, list] = {}
         self.answered: Counter = Counter()
         self.sums = CallSums()
-        self.context = definition.context
+        self.context, self.transport = definition.context, definition.transport
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
@@ -996,7 +1048,8 @@ class Script:
             summary = await self._ask(me, ask, decide.summary_messages(cst), decide.SUMMARY_TOKENS, cst["budget"])
             for to in ("generator", "evaluator"):
                 self._send(me, to, "done", self.G, None)
-            return _state(s, "reporting"), Report(decide.finish(cst, summary, run_dir))
+            # after TRIES failed tries (None) the summary is left out: ""
+            return _state(s, "reporting"), Report(decide.finish(cst, summary or "", run_dir))
         if phase == "reporting":
             return s, Done()
         raise ValueError(f"unknown phase {phase!r}")
@@ -1368,9 +1421,11 @@ class Script:
         answered by on_call, one that failed here, as run.Services records it. Counted per agent: asked, tried,
         fallen back. No try is made once another agent has failed the campaign (CampaignFailed).
 
-        Without `parse` (the generations mode's refill and summary): the reply's text, after one try whose
-        failure ends the campaign, as before. With it (the roles' own calls): parse(reply), tried up to TRIES
-        times while the call fails or parse gives None (a reply it cannot use); then None, the role's fallback.
+        Without `parse` (the generations mode's refill and summary): the reply's text, tried up to TRIES times
+        while the call fails (an error); then None, the step's fallback (the refill keeps the parent's mutants, the
+        summary is left out), counted. The other layers end the campaign at the first failed call. With it (the
+        roles' own calls): parse(reply), tried up to TRIES times while the call fails or parse gives None (a reply
+        it cannot use); then None, the role's fallback.
         A role's call whose prompt is too long for the servers' context (the prompt-length check: its characters,
         at least its tokens, plus max_tokens over the context) is not sent and not tried again: it fails at once,
         with the error PromptTooLong."""
@@ -1380,8 +1435,11 @@ class Script:
             kwargs["response_format"] = response_format
         chars = sum(len(str(m.get("content") or "")) for m in messages) if own and self.context is not None else 0
         too_long = own and self.context is not None and chars + kwargs["max_tokens"] > self.context
+        # record.extras: the request's settings, counted per request sent (CallSums.requests)
+        settings = json.dumps({"role": role, "body": sent(self.transport, kwargs)}, sort_keys=True) \
+            if self.extras else None
         self.asks[me] += 1
-        for _ in range(TRIES if own else 1):
+        for _ in range(TRIES):
             if campaign in self.mail.failed:
                 raise CampaignFailed(self.mail.failed[campaign])
             self.tries[me] += 1
@@ -1390,13 +1448,13 @@ class Script:
                 if too_long:
                     raise PromptTooLong(f"{chars} prompt characters + max_tokens {kwargs['max_tokens']} > the "
                                         f"servers' context {self.context}")
+                if settings is not None:
+                    self.sums.requests[settings] += 1
                 reply = await ask(messages, **kwargs)
             except Exception as exc:
                 self._detail(campaign, own, {"role": role, "reply_tokens": reply_tokens, "budget": budget,
                                              "latency_s": round(time.perf_counter() - t0, 4),
                                              "error": type(exc).__name__, "finish_reason": None, "empty": None})
-                if not own:
-                    raise
                 if too_long:
                     break
                 continue
@@ -1448,7 +1506,9 @@ class Script:
         """A model call that returned: counted for its campaign's line (n_llm_calls in the asynchronous mode) while
         the line is still to be written, and its details (`_detail`), as run.Services keeps them, with its times
         (Flowgentic's CallRecord): it was in flight at the server from t_end - service_s to t_end, after
-        recovery_s of failed tries (latency_s is their sum) and, before those, wait_s for admission."""
+        recovery_s of failed tries (latency_s is their sum) and, before those, wait_s for admission. With
+        record.extras also the server that answered it (`server`: the fleet's replica, the index of the model
+        job's endpoints, llm_service.servers; 0 for the stub)."""
         m, campaign = rec.meta or {}, campaign_of(rec.agent_id)
         if self._open(campaign):
             self.answered[campaign] += 1
@@ -1458,7 +1518,7 @@ class Script:
             "t_end": round(rec.t_end, 6), "service_s": round(rec.service_s, 6), "recovery_s": round(rec.recovery_s, 6),
             "finish_reason": reply.finish_reason, "prompt_tokens": rec.prompt_tokens,
             "completion_tokens": rec.completion_tokens, "reasoning_tokens": rec.reasoning_tokens or 0,
-            "empty": not str(reply.content or "").strip()})
+            "empty": not str(reply.content or "").strip(), **({"server": rec.replica} if self.extras else {})})
 
     def on_done(self, result, output) -> None:
         """An agent that ended normally is finished. The first of a campaign's agents to fail writes the
@@ -1658,6 +1718,114 @@ def hold_s(series: list[dict], interval: float, recent: int | None = None) -> fl
     return HOLD_INTERVALS * max(interval, statistics.median(gaps) if gaps else 0.0)
 
 
+# a name that says it holds a secret (api-key, VLLM_API_KEY, HF_TOKEN, api_keys, ...): such a variable is not in
+# the snapshot, and its value is left out of every copied file, where it is set by that name and wherever it is
+SECRET_WORDS = r"API_?KEYS?|KEYS?|TOKEN|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?"
+SECRET_NAME = re.compile(rf"(^|[_.-])({SECRET_WORDS})($|[_.-])", re.IGNORECASE)
+# a file so named is not copied: also tokens.txt (a setting named for tokens, max_num_batched_tokens, is no secret)
+SECRET_FILE = re.compile(rf"(^|[_.-])({SECRET_WORDS}|TOKENS)($|[_.-])", re.IGNORECASE)
+# a value set by a name in a copied file: NAME=value, NAME: value, "name": "value", 'name': ['value'], and a
+# command line's --name value or --name=value (left out when SECRET_NAME says the name holds a secret)
+_VALUE = rb"""("[^"\n]*"|'[^'\n]*'|[^\s"',;)}\]]+)"""
+SET_BY_NAME = (re.compile(rb"""(?<![\w.-])([A-Za-z_][\w.-]*)["']?[ \t]*[:=][ \t]*\[?[ \t]*""" + _VALUE),
+               re.compile(rb"""(?<![\w-])--([A-Za-z][\w-]*)(?:=|[ \t]+)""" + _VALUE))
+URL_USER = re.compile(rb"://([^/\s@'\"]+)@")   # a URL's user and password (pip freeze's git+https://<token>@...)
+# the environment snapshot's variables: these prefixes and names (LLM plan, question 11)
+ENV_PREFIXES = ("RASCAL_", "SLURM_", "CUDA_", "VLLM_", "FLASHINFER_", "TRITON_")
+ENV_NAMES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "PATH", "TMPDIR")
+LOG_HEAD_LINES = 500   # a log is copied as its head: version, non-default arguments, KV-cache memory
+LEFT_OUT = b"[secret left out]"
+SECRET_MIN = 8   # a secret-named variable's value is left out wherever it is only from this length: "1" is not
+
+
+def leave_out(data: bytes, secrets: set[bytes]) -> tuple[bytes, int]:
+    """`data` with LEFT_OUT for each stretch that holds a secret: each occurrence of a value in `secrets`, each
+    value set by a secret-named name (SET_BY_NAME) and each URL's user and password. Stretches that overlap or
+    hold one another are left out as one, so no part of a secret stays whatever the order. Returns the data and
+    the count of stretches left out."""
+    spans = []
+    for s in secrets:
+        i = data.find(s)
+        while i >= 0:
+            spans.append((i, i + len(s)))
+            i = data.find(s, i + 1)
+    for pattern in SET_BY_NAME:
+        at = 0
+        while m := pattern.search(data, at):
+            if not SECRET_NAME.search(m.group(1).decode()):
+                at = m.start(2)   # its value may set a name itself (args: api_key=..., --port --api-key ...)
+                continue
+            (a, b), at = m.span(2), m.end()
+            if data[a:a + 1] in (b'"', b"'"):   # a quoted value: its inside
+                a, b = a + 1, b - 1
+            if b > a:
+                spans.append((a, b))
+    spans += [m.span(1) for m in URL_USER.finditer(data)]
+    merged: list[list[int]] = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    parts, at = [], 0
+    for a, b in merged:
+        parts += [data[at:a], LEFT_OUT]
+        at = b
+    return b"".join(parts) + data[at:], len(merged)
+
+
+def copy_model_service(endpoints_file: Path, api_key_file: str | None, out: Path) -> dict:
+    """record.extras with --llm openai: the model servers' setup files, from the folder of the model job's endpoints
+    file (AUTONMI's FLEET_DIR: endpoints, gpu.csv, each server's vllm-<i>.log, and what a launch script puts
+    there), copied into out/model_service/ with every secret left out:
+    - not copied: the servers' key (api-key, and the --api-key-file), any file whose name says it holds a secret
+      (SECRET_FILE), and anything that is not a plain file;
+    - a log (.log, .out, .err) is copied as its first LOG_HEAD_LINES lines;
+    - environment.txt, this process's environment: only the variables of ENV_PREFIXES and ENV_NAMES, and none
+      whose name says it holds a secret (VLLM_API_KEY among them);
+    - in every copied file each secret is replaced by LEFT_OUT (leave_out): the servers' key and the value
+      (SECRET_MIN characters or more) of every environment variable whose name says it holds a secret, wherever
+      they are; any value set by a secret-named name (HF_TOKEN=..., "api_key": "...", --api-key ...), whatever
+      its length; and a URL's user and password. A secret under a name that does not say so, in a file whose
+      name does not say so, and not in this process's environment, cannot be known, and is copied.
+    Then every copied file is checked for the key and those variables' values, and one that still holds one is
+    removed. No secret is printed or returned. Returns, for the record: the files copied, those not copied, the
+    secrets left out (a count of stretches) and the files the check removed (none expected)."""
+    src, dest = endpoints_file.parent, out / "model_service"
+    dest.mkdir(parents=True, exist_ok=True)
+    key_files = {src / "api-key", *([Path(api_key_file)] if api_key_file else [])}
+    secrets = {os.fsencode(v) for k, v in os.environ.items() if SECRET_NAME.search(k) and len(v) >= SECRET_MIN}
+    for f in key_files:
+        with contextlib.suppress(OSError):
+            secrets.add(f.read_bytes().strip())
+    secrets.discard(b"")
+    copied, skipped, left_out = [], [], 0
+
+    def put(name: str, data: bytes) -> None:
+        nonlocal left_out
+        data, n = leave_out(data, secrets)
+        left_out += n
+        (dest / name).write_bytes(data)
+        copied.append(name)
+    for f in sorted(src.iterdir()):
+        if f.is_symlink() or not f.is_file() or SECRET_FILE.search(f.name) or \
+                any(f.resolve() == k.resolve() for k in key_files):
+            skipped.append(f.name)
+            continue
+        data = f.read_bytes()
+        if f.suffix in (".log", ".out", ".err"):
+            data = b"".join(data.splitlines(keepends=True)[:LOG_HEAD_LINES])
+        put(f.name, data)
+    env = sorted(f"{k}={v}" for k, v in os.environ.items()
+                 if (k.startswith(ENV_PREFIXES) or k in ENV_NAMES) and not SECRET_NAME.search(k))
+    put("environment.txt", os.fsencode("\n".join(env) + "\n"))
+    removed = [f.name for f in sorted(dest.iterdir()) if any(s in f.read_bytes() for s in secrets)]
+    for name in removed:
+        (dest / name).unlink()
+    return {"folder": "model_service", "files": sorted(set(copied) - set(removed)), "not_copied": skipped,
+            "secrets_left_out": left_out, "removed_by_the_check": removed}
+
+
 # --- the mini-app ----------------------------------------------------------------------------------------
 
 def parse(argv=None) -> argparse.Namespace:
@@ -1827,10 +1995,11 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
         if live.sampler is None and not a.no_vllm_metrics:
             print(f"[fusion/autonmi] warning: the model servers' decoding counts are not recorded "
                   f"({live.why_no_sampler})", file=sys.stderr, flush=True)
-    live.servers = len(model["endpoints"]) if model else 1   # the stub: one replica (PopulationConfig)
+    live.servers = list(model["endpoints"]) if model else None   # each fleet's replicas, in order (None: the stub)
     definition = importlib.import_module(MODULE).Fusion(knobs, a.sim, out, work_root)
     definition.live = live.counts
     definition.context = min(context) if context else None   # the prompt-length check (Script._ask)
+    definition.transport = transport_settings(model)   # record.extras: the request settings sent
     # locally, the populations' simulations run on run.py's pools; under Dragon, on RHAPSODY's native backend
     executor = f"{MODULE}:{'sim_pool' if a.sim == 'real' else 'fixture_pool'}" if a.runtime == "local" else None
     campaign = Campaign(
@@ -1955,8 +2124,9 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     """Population `index` as record.write takes an agent process of run.py (run.Services.part): its campaign
     lines, and its counts, from them and from AUTONMI's population.json (written when it ends; an
     interrupted population has none). The counts from the lines are those of the campaigns that reported. The
-    model calls not in the lines (CallSums) count in llm_service, and their times (`call_times`) in record.write's
-    client-side counts."""
+    model calls not in the lines (CallSums) count in llm_service, and their times and tokens (`call_times`) in
+    record.write's client-side counts and tokens per second; with record.extras its requests' settings
+    (`requests`)."""
     lines = [json.loads(x) for x in lines_file.read_text().splitlines() if x]
     sums = CallSums.read(sums_file(lines_file, index))   # the calls not in the lines
     done = [r for r in lines if "error" not in r]
@@ -1969,6 +2139,7 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
         "agents_file": str(lines_file), "llm_service": llm_service(knobs, lines, sums),
         "call_times": None if sums is None else {"calls": sums["n"].get("calls", 0),
                                                  "retried": sums["n"].get("retried", 0), "times": sums["times"]},
+        "requests": (sums or {}).get("requests"),   # record.extras: the request settings sent (write_record)
         "tool_calls": dict(Counter(what for _ in done for what in decide.lookups(knobs))),
         "sim_tasks": runner.get("simulations", sum(r["n_sims"] for r in done)),
         # one memory write per generation, or per Coordinator cycle in the asynchronous mode
@@ -2060,13 +2231,10 @@ def telemetry_verdict(summary: dict) -> dict:
             "populations": pops}
 
 
-def references(a, knobs: dict, live: LiveLine | None) -> dict:
+def references(knobs: dict) -> dict:
     """What the counts of agents and model requests are measured against: the hosted agents (3 +
-    campaign.slots per campaign), and the admission capacity, the requests the fleets admit at once (llm.max_in_flight per
-    server, split over the populations as Flowgentic splits it; None when the servers are unknown)."""
-    n, cap, servers = a.populations, knobs["llm"]["max_in_flight"], live.servers if live is not None else None
-    return {"hosted_agents": agents_per_campaign(knobs) * knobs["agents"]["count"],
-            "admission_capacity": n * max(1, int(cap * (1.0 / n))) * servers if servers else None}
+    campaign.slots per campaign). (No comparison against the client's admission caps: Matt's round-4 answer 11.)"""
+    return {"hosted_agents": agents_per_campaign(knobs) * knobs["agents"]["count"]}
 
 
 def _rows(out: Path) -> list[dict]:
@@ -2256,8 +2424,12 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     """run_record.json and agents.jsonl by record.write, one part per population; then AUTONMI's verdict
     (summary.json, by autonmi.assemble), its telemetry check with the populations' task counts
     (`telemetry_verdict`), and the framework's commit against its pin (`pin`, autonmi_pin) in its `autonmi`
-    section; and the decoding metric's other counts in `speed` (decoding_metric). A run whose AUTONMI checks
-    fail fails."""
+    section; and the decoding metric's other counts in `speed` (decoding_metric). With record.extras also: each
+    role's share of time in a model call (record.write's `model_call_share`), the request settings sent, by role
+    and counted (`llm_service.requests`), the model servers in the order of a call's `server` (`llm_service.servers`)
+    and a copy of their setup files without their secrets (`model_service/`: copy_model_service). With
+    workers.gpu_per_worker, the GPUs the inner-loop workers were placed on (`autonmi.inner_loop_gpus`). A run
+    whose AUTONMI checks fail fails."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -2267,9 +2439,10 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
             parts.append(part(a, knobs, i, f, loop_lag=loop_lag, device=device, threads=threads))
         else:   # the population never started
             failed.append(i)
-    refs = references(a, knobs, live)
+    refs = references(knobs)
+    roles = {**dict.fromkeys(ROLES[:3], 1), "monitor": knobs["campaign"]["slots"]}   # agents per campaign
     rec = record.write(out, knobs=knobs, layer="autonmi", sim=a.sim, parts=parts, failed=failed, wall_s=wall_s,
-                       interrupted=interrupted, t_run=t_run, model_refs=refs)
+                       interrupted=interrupted, t_run=t_run, model_refs=refs, roles=roles)
     for i in range(a.populations):   # summed into the record (part): not kept beside it
         sums_file(out / f"agents-p{i:03d}.jsonl", i).unlink(missing_ok=True)
     try:
@@ -2300,6 +2473,23 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                                       "begin_margin_s": begin_margin_s(rows)}
     if live is not None and live.served is not None:   # what each server's /v1/models said serves llm.model
         rec["llm_service"]["served_models"] = live.served
+    if knobs["record"]["extras"]:
+        sent_n = Counter()
+        for p in parts:
+            sent_n.update(p.get("requests") or {})
+        rec["llm_service"]["requests"] = [{**json.loads(k), "requests": v} for k, v in
+                                          sorted(sent_n.items(), key=lambda kv: (json.loads(kv[0])["role"], -kv[1]))]
+        rec["llm_service"]["servers"] = live.servers if live is not None else None
+        if knobs["llm"]["mode"] == "openai" and a.endpoints_file:
+            try:
+                rec["llm_service"]["model_service"] = copy_model_service(Path(a.endpoints_file), a.api_key_file, out)
+            except Exception as exc:   # a run refused or cut short before its servers' folder was there, or a file
+                # that cannot be read: the record is still written, and names no path
+                rec["llm_service"]["model_service"] = {"folder": None, "error": type(exc).__name__}
+    if knobs["workers"]["gpu_per_worker"]:   # the GPUs the inner-loop workers were placed on (sim_pool)
+        mod = importlib.import_module(MODULE)
+        rec["autonmi"]["inner_loop_gpus"] = {"gpus": list(mod._GPUS), "workers_placed":
+                                             mod._GPU_COUNTER.value if mod._GPU_COUNTER is not None else 0}
     if rec["status"] == "pass" and not ok:
         rec["status"] = "fail"
     tmp = out / "run_record.json.tmp"
@@ -2336,6 +2526,7 @@ def main(argv=None) -> int:
     live = LiveLine(local=a.runtime == "local")
     try:   # the campaign configures the OpenTelemetry export (CampaignConfig.telemetry's defaults)
         device = probe(a)   # first: a broken torch or device stops the run before any campaign starts
+        importlib.import_module(MODULE)._GPUS[:] = inner_loop_gpus(knobs, device)   # sim_pool's (gpu_per_worker)
         rc, interrupted, loop_lag = asyncio.run(run_until_signalled(a, knobs, out, work_root, live))
     except KeyboardInterrupt:   # SIGTERM or Ctrl-C before the event loop took the signals over
         interrupted = True

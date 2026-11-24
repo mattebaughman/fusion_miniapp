@@ -136,7 +136,7 @@ def test_the_decoding_metric_leaves_out_stale_readings_and_missing_gauges(tmp_pa
                                                              "series": {"http://a": a, "http://b": b}}))
     knobs = {"llm": {"mode": "openai", "stub_latency_s": 0.001}}
     rec = {"speed": {"agent_phase_s": 10.0, "loop_lag": []}, "wall_seconds": 12.0}
-    got = layer.decoding_metric(knobs, tmp_path, rec, {}, {"hosted_agents": 1, "admission_capacity": 1024}, None)
+    got = layer.decoding_metric(knobs, tmp_path, rec, {}, {"hosted_agents": 1}, None)
     d = got["decoding_at_servers"]
     assert d["hold_s"] == 5.0 and d["stale_s"] == [0.0, 3.0] and d["sample_errors"] == 4
     assert d["running"]["max"] == 105 and d["running"]["mean"] == (105 * 7 + 5 * 3) / 10

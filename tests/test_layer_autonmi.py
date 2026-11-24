@@ -445,6 +445,32 @@ def test_real_evaluate_through_the_autonmi_layer_on_cpu(tmp_path):
         assert against_reference(tmp_path / layer, rec, ref) == [], layer
 
 
+# the AUTONMI layer's main() with its device probe reporting 3 FAKE GPUs (the probe itself still runs)
+FAKE_GPUS_MAIN = """import sys
+from fusion_miniapp import layer_autonmi as L
+real = L.probe
+L.probe = lambda a: {**(real(a) or {}), "gpus": ["FAKE-GPU"] * 3}
+sys.exit(L.main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.skipif(bool(_missing("torch")), reason="needs torch")
+def test_the_gpu_knob_places_the_real_inner_loops_workers_from_the_device_probe(tmp_path):
+    """workers.gpu_per_worker on, --sim real on this machine's CPU (sim.device cpu), with the device probe made to
+    report 3 FAKE GPUs: main() hands the probe's GPUs to sim_pool, both inner-loop workers are placed
+    (autonmi.inner_loop_gpus), and the results are the real_cpu reference's. No GPU is used: real placement on
+    GPUs is unverified until the ladder's machine step 3."""
+    knobs = {**REAL_KNOBS, "workers": {**REAL_KNOBS["workers"], "gpu_per_worker": True}}
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    proc = subprocess.run([sys.executable, "-c", FAKE_GPUS_MAIN, *REAL_ARGS, "--knobs", knob_file(tmp_path, knobs),
+                           "--out", str(tmp_path / "autonmi")], cwd=tmp_path, env=env, check=False, timeout=900,
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    rec = json.loads((tmp_path / "autonmi" / "run_record.json").read_text())
+    assert rec["autonmi"]["inner_loop_gpus"] == {"gpus": ["0", "1", "2"], "workers_placed": 2}
+    assert against_reference(tmp_path / "autonmi", rec, reference("real_cpu")) == []
+
+
 def run_both_on_a_model_server(tmp_path, server: FakeVllm, code: int = 0):
     """Both layers with --llm openai on the server: AUTONMI's from the model job's endpoints file, the
     LangGraph layer's from OPENAI_BASE_URL. Their records and their requests."""
@@ -482,28 +508,82 @@ def test_both_layers_send_the_model_the_same_requests(tmp_path):
     assert_agents_per_campaign(tmp_path / "autonmi", a)
 
 
-def test_a_campaign_whose_model_call_fails_is_an_error_line_in_both_layers(tmp_path):
-    """The server rejects some campaigns' summary calls (HTTP 400, which neither layer retries): those
-    campaigns fail, each is a line with its error and its failed call, and both runs fail alike."""
+def test_a_failed_summary_falls_back_on_the_autonmi_layer_and_fails_its_campaign_on_langgraph(tmp_path):
+    """The server rejects some campaigns' summary calls (HTTP 400, which no layer's transport retries). The
+    LangGraph layer (frozen) ends each such campaign at its first failed call: a line with its error and that
+    call, and the run fails. The AUTONMI layer tries the call 3 times (TRIES), then leaves the summary out (""),
+    counted as the Coordinator's fallback, and the campaign completes (Matt's round-4 answer 12): its line has the
+    refills, then the 3 failed tries; with the fake server's summary put back it is the reference's campaign, so
+    the fallback changed nothing else; every other campaign is the reference's; the run passes."""
     def fail(body):
         text = body["messages"][-1]["content"]
         return text.endswith("found.") and int(hashlib.sha256(text.encode()).hexdigest(), 16) % 3 == 0
+    common = (*SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS))
     with FakeVllm(fail) as server:
-        a, b, _, _ = run_both_on_a_model_server(tmp_path, server, code=1)
-    failed = {layer: sorted(r["agent_id"] for r in lines(tmp_path, layer) if "error" in r) for layer in ENTRY}
-    assert failed["autonmi"] and failed["autonmi"] == failed["langgraph"]
-    assert a["status"] == b["status"] == "fail"
-    assert a["counts"]["agents"] == 12 and a["counts"]["agents_failed"] == len(failed["autonmi"])
-    theirs = {r["agent_id"]: r["llm_call_details"] for r in lines(tmp_path, "langgraph") if "error" in r}
-    ours = {r["agent_id"]: r["llm_call_details"] for r in lines(tmp_path, "autonmi") if "error" in r}
-    for campaign, calls in ours.items():
-        assert calls[-1]["error"] and calls[-1]["empty"] is None
-        # the line has every role's calls: the Generator's refills, then the Coordinator's failed summary, as
-        # the LangGraph layer's line lists them
-        assert [c["role"] for c in calls] == ["generator"] * (len(calls) - 1) + ["coordinator"], calls
-        assert [c["reply_tokens"] for c in calls] == [c["reply_tokens"] for c in theirs[campaign]], campaign
-    assert any(len(calls) > 1 for calls in ours.values())
-    assert not a["autonmi"]["ok"]   # every_campaign_reports
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        a = run("autonmi", tmp_path, *common, "--populations", "2", "--endpoints-file", str(tmp_path / "endpoints"))
+        rejected = [b for b in server.take() if fail(b)]
+        b = run("langgraph", tmp_path, *common, code=1, env={**os.environ, "OPENAI_BASE_URL": server.url + "/v1"})
+    failed = sorted(r["agent_id"] for r in lines(tmp_path, "langgraph") if "error" in r)
+    assert failed and b["status"] == "fail" and b["counts"]["agents_failed"] == len(failed)
+    assert (a["status"], a["autonmi"]["ok"], a["counts"]["agents"], a["counts"]["agents_failed"]) == (
+        "pass", True, 12, 0)
+    ours = {r["agent_id"]: r for r in lines(tmp_path, "autonmi")}
+    fell = sorted(c for c, r in ours.items() if r["summary"] == "")
+    assert fell == failed and len(rejected) == 3 * len(fell)
+    for c in fell:   # the refills, then the summary's 3 failed tries
+        calls = ours[c]["llm_call_details"]
+        assert [x["role"] for x in calls] == ["generator"] * (len(calls) - 3) + ["coordinator"] * 3, calls
+        assert all(x["error"] and x["empty"] is None for x in calls[-3:])
+        assert not any(x.get("error") for x in calls[:-3])
+    co, ge = a["counts"]["by_role"]["coordinator"], a["counts"]["by_role"]["generator"]
+    assert (co["model_asks"], co["model_tries"], co["model_fallbacks"], co["model_calls"]) == (
+        12, 12 + 2 * len(fell), len(fell), 12 - len(fell))
+    assert ge["model_fallbacks"] == 0 and ge["model_asks"] == ge["model_tries"] == ge["model_calls"] > 0
+    assert a["llm_service"]["errors"] == 3 * len(fell) and a["llm_check"]["fail"] == []
+    ref = reference("model_server")["campaign_sha256"]
+    got = campaign_hashes(tmp_path / "autonmi")
+    assert {c: h for c, h in got.items() if c not in fell} == {c: h for c, h in ref.items() if c not in fell}
+    summaries = {"Summary: " + x["messages"][-1]["content"].splitlines()[0] for x in rejected}
+    for c in fell:   # the fake server's summary put back: the reference's campaign
+        put_back = [hashlib.sha256(json.dumps(record.comparable({**ours[c], "summary": s}), sort_keys=True,
+                                              default=str).encode()).hexdigest() for s in summaries]
+        assert ref[c] in put_back, c
+
+
+def test_a_failed_refill_keeps_the_parents_mutants_on_the_autonmi_layer(tmp_path):
+    """The generations mode, --llm openai: the server rejects every refill call (HTTP 400). Each is tried 3 times
+    (TRIES), then falls back, counted as its Generator's: the parent's mutants stay, so every campaign completes
+    with the results of the same campaign under outer.generator: mutation (the parent's loop, no refill call;
+    the stub), its candidates all the parent's. The model filled none of the refill slots it was asked for, so
+    the run fails its model check (llm.min_model_share), while AUTONMI's checks pass."""
+    def fail(body):
+        return "reply with a JSON list of" in body["messages"][-1]["content"].splitlines()[-1]
+    with FakeVllm(fail) as server:
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        a = run("autonmi", tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, SERVER_KNOBS), "--populations", "2",
+                "--endpoints-file", str(tmp_path / "endpoints"), code=1)
+        sent = server.take()
+    mutation = tmp_path / "mutation"
+    mutation.mkdir()
+    knobs = {"outer": {**SERVER_KNOBS["outer"], "generator": "mutation"}}
+    m = run("autonmi", mutation, *SERVER_ARGS, "--knobs", knob_file(mutation, knobs), "--populations", "2")
+    refills = 12 * (SERVER_KNOBS["outer"]["generations"] - 1)
+    assert len([b for b in sent if fail(b)]) == 3 * refills and len(sent) == 3 * refills + 12   # and 12 summaries
+    ge = a["counts"]["by_role"]["generator"]
+    assert (ge["model_asks"], ge["model_tries"], ge["model_fallbacks"], ge["model_calls"]) == (
+        refills, 3 * refills, refills, 0)
+    assert a["counts"]["by_role"]["coordinator"]["model_fallbacks"] == 0
+    assert a["counts"]["refill_slots"]["filled_by_model"] == 0 < a["counts"]["refill_slots"]["asked"]
+    assert a["counts"]["candidates_by_source"]["model"] == 0
+    assert (a["status"], a["autonmi"]["ok"], a["counts"]["agents"], a["counts"]["agents_failed"]) == (
+        "fail", True, 12, 0)
+    assert len(a["llm_check"]["fail"]) == 1 and "refill slots" in a["llm_check"]["fail"][0]
+    assert m["status"] == "pass"
+    differ = ("refill", "n_llm_calls", "summary")   # the calls asked, and the summary's text (server, stub)
+    ours, theirs = ({r["agent_id"]: {k: v for k, v in record.comparable(r).items() if k not in differ}
+                     for r in lines_of(d)} for d in (tmp_path / "autonmi", mutation / "autonmi"))
+    assert ours == theirs
 
 
 LIVE_LINE = re.compile(r"^agents live=(\S+) model_requests_open=(\S+) queued=(\S+) decoding_at_servers=(\S+) "
@@ -544,8 +624,8 @@ def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
     opened, queued = s["model_requests_in_flight"], s["model_requests_queued"]
     assert opened["side"] == "client" and opened["emulated"]
     assert opened["calls_timed"] == rec["counts"]["llm_calls"] == 40
-    cap = opened["time_ge_pct_s"]["admission_capacity"]
-    assert opened["max"] == cap["of"] == 4 and cap["95"] > 0 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 100
+    assert opened["max"] == 4 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 100
+    assert set(opened["time_ge_pct_s"]) == {"hosted_agents"}   # no comparison against the client's caps (answer 11)
     assert queued["max"] > 0 and queued["time_s"]["max"] > 0 and queued["autonmi_built_in"]["agent_seconds"] > 0
     little = opened["littles_law"]
     figures = [little[k] for k in ("autonmi_agent_seconds_per_s", "fusion_calls_per_s_x_mean_time_in_flight",
@@ -609,7 +689,8 @@ def test_an_openai_run_over_two_model_servers_records_their_decoding_counts(tmp_
     d = rec["speed"]["decoding_at_servers"]
     assert (d["servers"], d["sample_errors"], d["interval_s"]) == (2, 0, 2.0) and d["running"]["samples"] >= 4
     assert 1 <= d["running"]["max"] <= 4 and d["waiting"]["max"] >= 1 and 0 < d["kv_cache_usage"]["max"] < 1
-    assert d["running"]["time_ge_pct_s"]["admission_capacity"]["of"] == 2 * 512   # 2 servers, 512 each by default
+    ge = d["running"]["time_ge_pct_s"]   # against the hosted agents (12 x 5) alone: no client cap (answer 11)
+    assert list(ge) == ["hosted_agents"] and ge["hosted_agents"]["of"] == 60
     assert d["stale_s"] == [0.0, 0.0] and d["gauges_missing"] is None   # both answered every reading
     headline = rec["speed"]["headline"]
     assert headline["figure"] == "decoding_at_servers" and not headline["emulated"]
@@ -1365,7 +1446,13 @@ def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, 
         "cycles.coordinator", "cycles.generator", "cycles.evaluator", "cycles.monitor", "survivor_waits",
         "parameters_filled"))}, added
     assert not {p for p in paths(gen) - paths(off) if not p.startswith(skip)}
-    assert paths(on) == paths(off)
+    # the toggle's record figures (package 4): the request settings sent (none here), the servers (none: the stub)
+    # and each role's share of time in a model call (0 here)
+    assert paths(on) - paths(off) == {"llm_service.requests", "llm_service.servers", *(
+        f"speed.model_call_share.{k}" for k in ("window", "source", "agents_in_a_call_per_campaign")), *(
+        f"speed.model_call_share.by_role.{role}" for role in ROLES)} and not paths(off) - paths(on)
+    assert on["speed"]["model_call_share"]["by_role"] == dict.fromkeys(ROLES, 0.0)
+    assert on["llm_service"]["requests"] == []
     assert not any({"monitor", "asynchronous"} & set(r) for r in lines_of(tmp_path / "off" / "autonmi"))
     off_lines, gen_lines = lines_of(tmp_path / "off" / "autonmi"), lines_of(tmp_path / "gen" / "autonmi")
     assert {k for r in off_lines for k in r} - {k for r in gen_lines for k in r} == {"n_cycles", "survival", "t_submit"}
@@ -1525,7 +1612,8 @@ def test_the_stellarai_settings_reach_every_request(tmp_path, mode, thinking):
     JSON schema as response_format; in the generations mode (with campaign.notes) the refills, summaries, notes
     and assessments carry the same settings and no schema. With llm.thinking on: no chat_template_kwargs, the
     thinking budget (agents.thinking_budget, 64 here) sent and added to the cap. Without record.extras a line
-    holds only the generations mode's refill and summary calls' details; the record counts every call."""
+    holds only the generations mode's refill and summary calls' details; the record counts every call, and its
+    tokens per second over the steady window are the fixture's usage counts (100 prompt, 50 generated a reply)."""
     knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], **STELLAR_LLM, "thinking": thinking},
              "campaign": {"mode": "async"} if mode == "async" else {"notes": True}}
     with FakeVllm() as server:
@@ -1547,12 +1635,210 @@ def test_the_stellarai_settings_reach_every_request(tmp_path, mode, thinking):
             assert "response_format" not in body
     if mode == "async":
         assert sum("response_format" in body for body in sent) == by["generator"]["model_calls"] == 12 * 6
+    # tokens per second (on by default; in the asynchronous mode from the calls summed per population, CallSums):
+    # the fixture's 100 prompt and 50 generated tokens a reply
+    tokens = rec["speed"]["model_tokens_per_s"]
+    assert tokens["calls"] > 0 and not tokens["emulated"]
+    assert tokens["prompt_per_s"] == pytest.approx(2 * tokens["generated_per_s"], rel=1e-3)
+    assert tokens["generated_per_s"] * tokens["window_s"] == pytest.approx(50 * tokens["calls"], rel=1e-3)
     details = [c for r in lines(tmp_path, "autonmi") for c in r["llm_call_details"]]
     if mode == "async":
         assert details == []
     else:
         assert {c["role"] for c in details} == {"generator", "coordinator"}
         assert len(details) == by["generator"]["model_calls"] + by["coordinator"]["model_calls"] < len(sent)
+
+
+PLANTED = {"key": "planted-servers-key-5d1e9c", "VLLM_API_KEY": "planted-vllm-env-key-77ab", "HF_TOKEN":
+           "planted-hf-token-0c3f", "RASCAL_EXTRA_KEY": "planted-rascal-key-91e2"}   # FAKE secrets, for the tests
+
+
+def fake_fleet(folder: Path, urls: list[str]) -> Path:
+    """A fake model job's folder (AUTONMI's FLEET_DIR; FIXTURE files): its endpoints file, its key (api-key, the
+    planted key), gpu.csv, a server log of 800 lines that holds the key and the environment's planted secrets (as a
+    careless launch script might write them), a job output that holds one, and a token file. Returns the endpoints
+    file."""
+    folder.mkdir()
+    (folder / "endpoints").write_text("".join(u + "\n" for u in urls))
+    (folder / "api-key").write_text(PLANTED["key"] + "\n")
+    (folder / "gpu.csv").write_text("2026/11/24 00:00:00.000, 0, 97, 150000\n")
+    log = [f"INFO line {i}" for i in range(800)]
+    log[3] = f"non-default args: {{'api_key': '{PLANTED['key']}', 'port': 8100}}"
+    log[5] = f"env VLLM_API_KEY={PLANTED['VLLM_API_KEY']} RASCAL_EXTRA_KEY={PLANTED['RASCAL_EXTRA_KEY']}"
+    (folder / "vllm-0.log").write_text("\n".join(log) + "\n")
+    (folder / "model-123.out").write_text(f"model job 123, token {PLANTED['HF_TOKEN']}\n")
+    (folder / "hf_token").write_text(PLANTED["HF_TOKEN"] + "\n")
+    return folder / "endpoints"
+
+
+# FAKE secrets that only the model job's files hold (not this process's environment), one of them short; and one
+# FAKE secret of the environment that holds another (set in the environment too)
+IN_FILES_ONLY = {"WANDB_API_KEY": "planted-wandb-file-only-a1", "--hf-token": "planted-flag-b2",
+                 "--api-key": "planted-flag-c3", "OTHER_TOKEN": "s3cr7", "hf_token": "planted-json-d4",
+                 "url": "planted-url-token-e5", "GITHUB_TOKEN": "planted-after-a-name-f6"}
+NESTED = {"OUTER_TOKEN": "planted-outer-NESTEDVAL-tail9", "INNER_KEY": "NESTEDVAL"}
+
+
+def test_a_planted_secret_never_reaches_a_copied_setup_file(tmp_path, monkeypatch):
+    """copy_model_service (record.extras, --llm openai) on a fake model job's folder, with planted FAKE secrets in
+    its files and in the environment: the key file and the files named for secrets (also in the plural: secrets.json,
+    tokens.txt, api_keys.txt) are not copied; the log is copied as its first 500 lines; environment.txt keeps only
+    the allowed variables (not VLLM_API_KEY, HF_TOKEN or a RASCAL_ variable named as a key, nor one of another
+    prefix); every planted secret in a copied file is left out (each stretch counted): the environment's wherever
+    they are, also one that holds another (no part of it stays, in either order), and those only the files hold
+    where a secret-named name sets them (NAME=, "name":, --name, a URL's user; also as another name's value,
+    args: NAME=...), a short one too. So no copied file, and nothing the record keeps, holds a planted secret or a
+    part of one. A setting named for tokens (--max-num-batched-tokens) is kept, and a secret-named variable's short
+    value ("1", under 8 characters) is not looked for wherever it is: gpu.csv is copied as it is."""
+    from fusion_miniapp.layer_autonmi import LEFT_OUT, LOG_HEAD_LINES, SECRET_NAME, copy_model_service, leave_out
+
+    endpoints = fake_fleet(tmp_path / "fleet", ["http://node1:8100"])
+    f = IN_FILES_ONLY
+    (tmp_path / "fleet" / "launch.sh").write_text(
+        f"export WANDB_API_KEY={f['WANDB_API_KEY']}\n"
+        f"vllm serve stand-in --max-num-batched-tokens 8192 --hf-token {f['--hf-token']} --api-key={f['--api-key']}\n"
+        f"OTHER_TOKEN={f['OTHER_TOKEN']}\n"
+        f"args: GITHUB_TOKEN={f['GITHUB_TOKEN']}\n"
+        f"echo {NESTED['OUTER_TOKEN']}\n")
+    (tmp_path / "fleet" / "config.json").write_text(f'{{"hf_token": "{f["hf_token"]}", "port": 8100}}\n')
+    (tmp_path / "fleet" / "pip-freeze.txt").write_text(
+        f"autonmi @ git+https://{f['url']}@github.com/org/autonmi@e20861a\n")
+    for name in ("secrets.json", "tokens.txt", "api_keys.txt"):
+        (tmp_path / "fleet" / name).write_text("planted-in-a-secret-named-file\n")
+    for k in [k for k in os.environ if SECRET_NAME.search(k)]:   # this machine's own: the planted ones alone
+        monkeypatch.delenv(k)
+    for k in ("VLLM_API_KEY", "HF_TOKEN", "RASCAL_EXTRA_KEY"):
+        monkeypatch.setenv(k, PLANTED[k])
+    for k, v in NESTED.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("SHORT_TOKEN", "1")
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("RASCAL_MODEL_NAME", f"stand-in {PLANTED['key']}")   # an allowed variable holding the key
+    monkeypatch.setenv("UNLISTED_SETTING", "not in the snapshot")
+    got = copy_model_service(endpoints, None, tmp_path / "run")
+    copied = tmp_path / "run" / "model_service"
+    assert got["files"] == sorted(["endpoints", "gpu.csv", "vllm-0.log", "model-123.out", "environment.txt",
+                                   "launch.sh", "config.json", "pip-freeze.txt"])
+    assert sorted(p.name for p in copied.iterdir()) == got["files"]
+    assert got["not_copied"] == ["api-key", "api_keys.txt", "hf_token", "secrets.json", "tokens.txt"]
+    assert got["removed_by_the_check"] == []
+    # the log's 3, the job output's 1, RASCAL_MODEL_NAME's 1; launch.sh's 6 (the nested pair as one), config.json's
+    # 1, pip-freeze.txt's 1
+    assert got["secrets_left_out"] == 13
+    planted = [*PLANTED.values(), *IN_FILES_ONLY.values(), *NESTED.values(), "planted-in-a-secret-named-file"]
+    for p in copied.iterdir():
+        data = p.read_bytes()
+        assert not any(s.encode() in data for s in planted), p.name
+        assert not any(s[:8].encode() in data or s[-5:].encode() in data for s in planted), p.name   # no part
+    assert not any(s in json.dumps(got) for s in planted)
+    log = (copied / "vllm-0.log").read_text().splitlines()
+    assert len(log) == LOG_HEAD_LINES and log[3].count(LEFT_OUT.decode()) == 1 and log[0] == "INFO line 0"
+    env = dict(x.split("=", 1) for x in (copied / "environment.txt").read_text().splitlines())
+    assert env["SLURM_JOB_ID"] == "123" and env["CUDA_VISIBLE_DEVICES"] == "0,1" and "PATH" in env
+    assert env["RASCAL_MODEL_NAME"] == "stand-in " + LEFT_OUT.decode()
+    assert not {"VLLM_API_KEY", "HF_TOKEN", "RASCAL_EXTRA_KEY", "UNLISTED_SETTING"} & set(env)
+    assert (copied / "endpoints").read_text() == "http://node1:8100\n"
+    assert (copied / "gpu.csv").read_bytes() == (tmp_path / "fleet" / "gpu.csv").read_bytes()   # "1" not looked for
+    launch = (copied / "launch.sh").read_text()
+    assert "--max-num-batched-tokens 8192 --hf-token " + LEFT_OUT.decode() in launch
+    assert (copied / "pip-freeze.txt").read_text() == f"autonmi @ git+https://{LEFT_OUT.decode()}@github.com/org/autonmi@e20861a\n"
+    # one secret inside another: one stretch left out whichever is taken first (not hash-seed dependent)
+    text = f"x {NESTED['OUTER_TOKEN']} y".encode()
+    outer, inner = (v.encode() for v in NESTED.values())
+    assert leave_out(text, [outer, inner]) == leave_out(text, [inner, outer]) == (b"x " + LEFT_OUT + b" y", 1)
+
+
+def test_the_record_toggle_adds_the_model_calls_extras(tmp_path):
+    """The asynchronous mode, --llm openai with the StellarAI settings over two fake vLLM servers (FIXTURES: each
+    reply 100 prompt and 50 generated tokens) with a key, record.extras on, from a fake model job's folder with
+    planted FAKE secrets (also in the environment): each call's details name the server that answered, the index
+    of llm_service.servers (as many calls for each as it received); llm_service.requests holds, per role, exactly
+    the settings of the requests the servers received (their bodies besides the messages), counted; each role's
+    share of time in a model call over the steady window is what a recount from the lines gives, and the shares
+    add up to the campaign's agents in a call; model_service/
+    holds the setup files with every secret left out, and no file of the run holds a planted secret. Tokens per
+    second over the steady window: generated half of prompt (the fixture's 50 and 100)."""
+    from fusion_miniapp.layer_autonmi import SECRET_NAME
+
+    key = PLANTED["key"]
+    with FakeVllm(api_key=key) as one, FakeVllm(api_key=key) as two:
+        endpoints = fake_fleet(tmp_path / "fleet", [one.url, two.url])
+        knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], **STELLAR_LLM}, "campaign": {"mode": "async"},
+                 "record": {"extras": True}}
+        env = {**{k: v for k, v in os.environ.items() if not SECRET_NAME.search(k)},   # the planted ones alone
+               **{k: PLANTED[k] for k in ("VLLM_API_KEY", "HF_TOKEN", "RASCAL_EXTRA_KEY")}}
+        rec = run("autonmi", tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "2",
+                  "--endpoints-file", str(endpoints), "--api-key-file", str(tmp_path / "fleet" / "api-key"), env=env)
+        from_one, from_two = one.take(), two.take()
+        sent = from_one + from_two
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    svc = rec["llm_service"]
+    assert svc["servers"] == [one.url, two.url]
+    rows = lines(tmp_path, "autonmi")
+    details = [c for r in rows for c in r["llm_call_details"]]
+    # call details' server i is the server at llm_service.servers[i]: as many calls as it received
+    assert len(details) == len(sent) == svc["calls"] and from_one and from_two
+    assert Counter(c["server"] for c in details) == {0: len(from_one), 1: len(from_two)}
+    # the settings each role's requests carried, as the servers received them, and as the record counts them
+    by_role = Counter()
+    for b in sent:
+        last = b["messages"][-1]["content"].splitlines()[-1]
+        role = {decide.NOTE_ASK: "monitor", decide.SCORES_ASK: "evaluator", decide.GUIDANCE_ASK: "coordinator"}.get(
+            last, "generator")
+        body = {k: v for k, v in b.items() if k != "messages"}
+        by_role[json.dumps({"role": role, "body": body}, sort_keys=True)] += 1
+    assert {json.dumps({"role": x["role"], "body": x["body"]}, sort_keys=True): x["requests"]
+            for x in svc["requests"]} == dict(by_role)
+    assert {x["role"] for x in svc["requests"]} == set(ROLES)
+    assert all(x["body"]["chat_template_kwargs"] == {"enable_thinking": False} and x["body"]["model"] == "stand-in"
+               for x in svc["requests"])
+    share = rec["speed"]["model_call_share"]
+    assert share["window"] == [0.15, 0.85] and set(share["by_role"]) == set(ROLES)
+    assert all(0 < x <= 1 for x in share["by_role"].values()), share
+    assert share["agents_in_a_call_per_campaign"] == pytest.approx(
+        sum(x * (2 if role == "monitor" else 1) for role, x in share["by_role"].items()), abs=1e-3)
+    # recounted from the lines: each role's seconds in a call within the window, over the window and its agents
+    lo, hi = min(r["t_start"] for r in rows), max(r["t_end"] for r in rows)
+    w_lo, w_hi = lo + 0.15 * (hi - lo), lo + 0.85 * (hi - lo)
+    in_call = Counter()
+    for c in details:
+        in_call[c["role"]] += max(0.0, min(c["t_end"], w_hi) - max(c["t_end"] - c["service_s"], w_lo))
+    assert share["by_role"] == pytest.approx(
+        {role: in_call[role] / (w_hi - w_lo) / ((2 if role == "monitor" else 1) * 12) for role in ROLES}, abs=2e-4)
+    tokens = rec["speed"]["model_tokens_per_s"]
+    assert tokens["calls"] > 0 and not tokens["emulated"]
+    assert tokens["prompt_per_s"] == pytest.approx(2 * tokens["generated_per_s"], rel=1e-3)
+    assert tokens["generated_per_s"] == pytest.approx(50 * tokens["calls"] / tokens["window_s"], rel=1e-3)
+    ms = svc["model_service"]
+    assert ms["files"] == sorted(["endpoints", "gpu.csv", "vllm-0.log", "model-123.out", "environment.txt"])
+    assert ms["not_copied"] == ["api-key", "hf_token"] and ms["removed_by_the_check"] == []
+    assert ms["secrets_left_out"] == 4   # the log's 3 (the key, VLLM_API_KEY's, RASCAL_EXTRA_KEY's), the job output's 1
+    leaked = [str(f) for f in (tmp_path / "autonmi").rglob("*") if f.is_file()
+              and any(s.encode() in f.read_bytes() for s in PLANTED.values())]
+    assert leaked == []
+
+
+def test_the_record_keeps_tokens_per_second_by_default(tmp_path):
+    """record.extras off (the default), the generations mode with the stub (emulated) at 1 s a call: the record
+    gains the model calls' prompt and generated tokens per second over the steady window (15% to 85% of the agent
+    phase), which a recount from the lines' call details (the refills' and summaries') gives, and nothing of the
+    toggle's; the results are the reference's."""
+    knobs = {**fixture_knobs("llm refills, one random stream, all live"), "llm": {"stub_latency_s": 1.0}}
+    rec = run("autonmi", tmp_path, *FIXTURE_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "2")
+    assert rec["results_sha256"] == reference("fixture_llm_refills")["results_sha256"]
+    rows = lines(tmp_path, "autonmi")
+    lo, hi = min(r["t_start"] for r in rows), max(r["t_end"] for r in rows)
+    w_lo, w_hi = lo + 0.15 * (hi - lo), lo + 0.85 * (hi - lo)
+    inside = [c for r in rows for c in r["llm_call_details"] if w_lo <= c["t_end"] <= w_hi]
+    tokens = rec["speed"]["model_tokens_per_s"]
+    assert tokens["emulated"] and tokens["calls"] == len(inside) > 0 and tokens["window"] == [0.15, 0.85]
+    assert tokens["prompt_per_s"] == pytest.approx(sum(c["prompt_tokens"] for c in inside) / (w_hi - w_lo), rel=1e-3)
+    assert tokens["generated_per_s"] == pytest.approx(sum(c["completion_tokens"] for c in inside) / (w_hi - w_lo),
+                                                      rel=1e-3)
+    assert "model_call_share" not in rec["speed"]
+    assert not {"requests", "servers", "model_service"} & set(rec["llm_service"])
+    assert not any("server" in c for r in rows for c in r["llm_call_details"])
 
 
 def test_a_model_run_in_the_asynchronous_mode_needs_llm_thinking(tmp_path):

@@ -240,8 +240,9 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
     file (None = smoke preset; a partial dict is merged over it). monitor: the `monitor` section (a
     partial dict is merged over the smoke preset's); with capture on, the record gains `trace` (trace.py).
     None, as the LangGraph and Academy layers call it, records none. Calls in one process run one at a
-    time (a lock); parallelism comes from processes. The worker never sets CUDA_VISIBLE_DEVICES:
-    the launcher exposes the GPU and the device rule picks it up.
+    time (a lock); parallelism comes from processes. evaluate sets no device: the launcher exposes the GPU,
+    or (the AUTONMI layer with workers.gpu_per_worker) the worker's initializer gives each worker one through
+    CUDA_VISIBLE_DEVICES (pool.on_gpu), and the device rule picks it up.
     """
     sim, watch = sim_section(knobs), monitor_section(monitor)
     if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):

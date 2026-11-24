@@ -3,8 +3,8 @@
     python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json [--tol 0.25]
 
 Results must agree: the counts and the knobs other than the machine's own (sim.device, sim.work_root,
-sim.threads_per_worker, workers.sim_workers; agents.per_process, max_live and start_together, and
-campaign.slots: the layout) and the model service's (llm.stub_latency_s, llm.max_in_flight,
+sim.threads_per_worker, workers.sim_workers, workers.gpu_per_worker; agents.per_process, max_live and
+start_together, and campaign.slots: the layout) and the model service's (llm.stub_latency_s, llm.max_in_flight,
 llm.admission_tokens, llm.outage_s) and the Monitor's trace (monitor.capture, monitor.fixture_trace: no result reads it)
 and record.extras (what the record writes), and the campaigns. A record older than a knob ran with the value
 ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_worker"), ("workers", "sim_workers"),
+                 ("workers", "gpu_per_worker"),   # where the inner loops run
                  ("agents", "per_process"), ("agents", "max_live"), ("agents", "start_together"),   # the layout
                  ("campaign", "slots"),   # the layout too: in the generations mode the Monitor slots change no result
                  ("llm", "stub_latency_s"), ("llm", "max_in_flight"), ("llm", "admission_tokens"),   # the model's
@@ -45,7 +46,7 @@ MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_w
 ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False, ("campaign", "mode"): "generations",
                ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25, ("campaign", "notes"): False,
                ("llm", "thinking"): None, ("llm", "reply_cap"): None, ("llm", "temperature"): None,
-               ("llm", "top_p"): None, ("llm", "outage_s"): 1800}
+               ("llm", "top_p"): None, ("llm", "outage_s"): 1800, ("workers", "gpu_per_worker"): False}
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",
                 "candidates_by_source", "refill_slots", "sim_tasks", "memory_writes", "reports", "feasible_agents")
 ASYNC_VARY = ("feasible_agents", "memory_writes", "llm_calls")   # counts that follow the order of arrival in the
@@ -56,7 +57,8 @@ SPEED = (("campaigns_live", "max"), ("campaigns_live", "mean"), ("agent_phase_s"
          ("queue_wait_s", "p95"), ("generation_s", "p95"), ("model_latency_s", "p95"), ("sim_bound_ratio",),
          ("rates_per_s", "model_calls_all_agents"), ("agents_live", "max"), ("model_requests_in_flight", "max"),
          ("model_requests_in_flight", "mean"), ("model_requests_queued", "max"),
-         ("decoding_at_servers", "running", "max"), ("decoding_at_servers", "running", "mean"))
+         ("decoding_at_servers", "running", "max"), ("decoding_at_servers", "running", "mean"),
+         ("model_tokens_per_s", "prompt_per_s"), ("model_tokens_per_s", "generated_per_s"))
 
 
 def _get(d, path):

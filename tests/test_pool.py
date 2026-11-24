@@ -184,3 +184,61 @@ def test_stop_rebuilds_suppresses_recovery():
         pool.shutdown(wait=True)
     st = pool.stats()
     assert st["rebuilds"] == 0 and st["resubmitted"] == 0
+
+
+def _placed(barrier) -> tuple:
+    """A task: once as many workers run it as the barrier's parties (so each pool's workers have all started),
+    this worker's number and GPU (pool.PLACED, set by on_gpu) and the GPUs it sees."""
+    from fusion_miniapp import pool
+
+    barrier.wait(timeout=120)
+    return pool.PLACED, os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
+def test_each_inner_loop_worker_sees_gpu_i_mod_the_gpu_count_across_populations(monkeypatch):
+    """workers.gpu_per_worker on the AUTONMI layer, with a faked count of 3 GPUs (FIXTURE: no GPU is used here):
+    two populations' pools (layer_autonmi.sim_pool, 2 workers each) take their workers' numbers from one counter, so
+    the 4 workers are 0 .. 3, the second pool's after the first's, and worker i sees GPU i mod 3 alone
+    (CUDA_VISIBLE_DEVICES). Real placement on GPUs is unverified until the ladder's machine step 3."""
+    layer = pytest.importorskip("fusion_miniapp.layer_autonmi")
+    monkeypatch.setattr(layer, "_GPUS", ["0", "1", "2"])
+    monkeypatch.setattr(layer, "_GPU_COUNTER", None)
+    monkeypatch.setattr(layer, "_POOLS", [])
+    pools, got = [layer.sim_pool(2), layer.sim_pool(2)], []
+    with mp.get_context("spawn").Manager() as manager:
+        try:
+            for p in pools:   # each pool's 2 workers busy at once, so both start, before the next pool's
+                barrier = manager.Barrier(2)
+                got.append(sorted(f.result(timeout=180) for f in [p.submit(_placed, barrier) for _ in range(2)]))
+        finally:
+            for p in pools:
+                p.shutdown(wait=True)
+    assert got == [[((0, "0"), "0"), ((1, "1"), "1")], [((2, "2"), "2"), ((3, "0"), "0")]]
+    assert layer._GPU_COUNTER.value == 4
+
+
+def test_no_worker_is_placed_at_default_knobs_or_without_a_gpu(monkeypatch):
+    """workers.gpu_per_worker off (the default), or on where the device probe saw no GPU (this laptop, the fixture,
+    Dragon): no GPU list, so sim_pool's workers get run.py's initializer alone and set no device. On, with GPUs:
+    CUDA_VISIBLE_DEVICES's entries where it is set, else 0 .. n - 1."""
+    layer = pytest.importorskip("fusion_miniapp.layer_autonmi")
+    from fusion_miniapp import knobs as knob_files, run
+
+    off = knob_files.base()
+    on = knob_files.validate({"workers": {"gpu_per_worker": True}}, modes=("generations", "async"))
+    assert off["workers"]["gpu_per_worker"] is False
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    assert layer.inner_loop_gpus(off, {"gpus": ["B200"] * 8}) == []
+    assert layer.inner_loop_gpus(on, {"gpus": []}) == layer.inner_loop_gpus(on, None) == []
+    assert layer.inner_loop_gpus(on, {"gpus": ["B200"] * 3}) == ["0", "1", "2"]
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
+    assert layer.inner_loop_gpus(on, {"gpus": ["B200"] * 4}) == ["4", "5", "6", "7"]
+    monkeypatch.setattr(layer, "_GPUS", [])
+    monkeypatch.setattr(layer, "_POOLS", [])
+    p = layer.sim_pool(1)
+    try:
+        assert (p._initializer, p._initargs) == (run._worker_init, ())
+    finally:
+        p.shutdown(wait=True)
+    with pytest.raises(knob_files.KnobError, match="workers.gpu_per_worker"):   # run.py's layers refuse it set
+        knob_files.validate({"workers": {"gpu_per_worker": True}})

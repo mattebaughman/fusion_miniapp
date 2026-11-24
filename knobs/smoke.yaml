@@ -59,6 +59,9 @@ llm:
 
 workers:
   sim_workers: 2              # simulation worker processes in all; each agent process gets sim_workers // processes
+  gpu_per_worker: false       # the AUTONMI layer with --sim real: true gives inner-loop worker i (counted over
+                              # every population's pool) GPU i mod the GPUs it sees (CUDA_VISIBLE_DEVICES);
+                              # no effect without a GPU. run.py's layers refuse it set
 
 outer:                        # each campaign's IGNOS outer loop: the parent's run_evolutionary_loop (smoke: 8 evaluations per campaign)
   population: 4               # P, candidates per generation, all evaluated at once
@@ -94,5 +97,8 @@ campaign:                     # the AUTONMI layer: each campaign's Monitor slots
 
 record:
   extras: false               # true: each candidate's Monitor numbers and note, the Evaluator's scores, the
-                              # Coordinator's guidance and the roles' model calls' details in its campaign's
-                              # line (agents.jsonl); false: counts only
+                              # Coordinator's guidance and the roles' model calls' details (each with the
+                              # server that answered) in its campaign's line (agents.jsonl); in the record
+                              # the request settings sent, each role's share of time in a model call, and
+                              # (--llm openai) a copy of the model servers' setup files without their
+                              # secrets (model_service/); false: counts only (and tokens per second)

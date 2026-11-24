@@ -6,13 +6,33 @@ Subclasses `ProcessPoolExecutor` so RHAPSODY takes its cloudpickle process path
   break and resubmits lost tasks at most once each.
 - Bounded `shutdown(wait=True)`: waits briefly for clean exit, sends SIGTERM to leftovers, then
   SIGKILLs any workers still alive before the deadline so `session.close()` can never hang.
+
+`on_gpu` is a worker initializer that gives each worker one GPU (the AUTONMI layer's workers.gpu_per_worker).
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import Future, InvalidStateError, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
+
+PLACED: tuple[int, str] | None = None   # in a worker that on_gpu placed: its number and its GPU
+
+
+def on_gpu(counter, gpus: list[str], init=None) -> None:
+    """A worker initializer: this worker takes the next number i from `counter` (a multiprocessing Value that
+    every pool placing its workers shares), and sees GPU gpus[i % len(gpus)] alone (CUDA_VISIBLE_DEVICES, set
+    before this process starts CUDA; its cold-start children inherit it); then `init` (the pool's own
+    initializer)."""
+    global PLACED
+    with counter.get_lock():
+        i = counter.value
+        counter.value += 1
+    PLACED = (i, gpus[i % len(gpus)])
+    os.environ["CUDA_VISIBLE_DEVICES"] = PLACED[1]
+    if init is not None:
+        init()
 
 
 def _safe_set_result(fut: Future, value) -> None:
