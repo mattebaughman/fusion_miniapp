@@ -207,7 +207,9 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
       for up to 6.7 s each.
     - Measured on a laptop on AC, with fixture simulations and one population: the same results, wall time and memory.
       At 10,000 campaigns there is one full collection of 0.2 s (Flowgentic's freeze) instead of four.
-    - The loop lag still grows about 7× from 2,000 to 10,000 campaigns, for reasons not yet found.
+    - The loop lag still grows about 7× from 2,000 to 10,000 campaigns. Most of that comes from
+      `agents.start_together` releasing every Coordinator at the same moment: with it off, the growth was 1.56×
+      with the same results (one run each). The release is unchanged for now.
   - Under Dragon (`--runtime dragon`), each population is a Dragon process, its simulations run on
     RHAPSODY's native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not
     place populations on nodes yet, and refuses more.

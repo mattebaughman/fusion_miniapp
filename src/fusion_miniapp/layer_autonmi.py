@@ -162,11 +162,11 @@ def bound_full_collections() -> tuple[int, int, int]:
     """Turn off CPython's automatic full (generation 2) collections in this process, unless full_gc_auto().
 
     While agents run, each full collection scans every live object, so its pause grows with the run: at 10,000
-    campaigns one stalled the event loop for 3.6 s, and the loop lag's 99th percentile grew 3.1x from 2,000
-    campaigns (`reports/overnight_2026-11-23/packages/P1/upstream_asks_draft.md`). Flowgentic's host raises only
-    the first threshold and keeps the other two it finds when its first host starts, so this runs before that,
-    in each population's process (Fusion.build). Explicit collections still run, Flowgentic's freeze included;
-    young objects are still collected as before. main() puts the thresholds back after the run."""
+    campaigns four of them stalled the event loop for up to 6.7 s each (measured on a laptop; see the README).
+    Flowgentic's host raises only the first threshold and keeps the other two it finds when its first host
+    starts, so this runs before that, in each population's process (Fusion.build). Explicit collections still
+    run, Flowgentic's freeze included; young objects are still collected as before. main() puts the thresholds
+    back after the run."""
     t = gc.get_threshold()
     if not full_gc_auto() and t[2] < FULL_GC_THRESHOLD:
         gc.set_threshold(t[0], t[1], FULL_GC_THRESHOLD)
