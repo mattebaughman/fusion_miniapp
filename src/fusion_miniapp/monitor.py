@@ -9,7 +9,8 @@ the fixed-point cap). The scan rows, hand-off ranges and stage timings are summa
 Each campaign keeps one `Rolling`: for every step and value an exponentially weighted mean and variance, one
 side for good candidates and one for bad ones (`Side`). A side's n-th trace has weight max(1/n, 1/window):
 its plain running mean and variance until it holds `window` traces, then each new trace counts 1/window.
-Who is good is the caller's (the AUTONMI layer labels a generation's traces at its barrier).
+Who is good is the caller's (the AUTONMI layer labels a generation's traces at its barrier, or in the
+asynchronous mode each trace as the Evaluator scores its result).
 
 For one trace (`Rolling.score`), with d_good and d_bad its distance at a step from each side's mean, in units
 of the two sides' pooled spread there (root mean square over the step's values):
@@ -72,7 +73,10 @@ class Side:
 
 class Rolling:
     """One campaign's trace statistics (see the module's docstring), and the traces held until labelled: the
-    Monitors hold each trace they score, and the caller takes a generation's to label them."""
+    Monitors hold each trace they score, and the caller takes a generation's to label them (or, in the
+    asynchronous mode, each one as its result is scored). In the asynchronous mode it also holds the campaign's
+    window: its last `window` scored results in arrival order (`recent`, decide.async_score's), and each one's
+    last trace step when its trace is synthetic (`ends`, for the next labels; else None)."""
 
     def __init__(self, warmup: int, window: int) -> None:
         self.warmup, self.window = warmup, window
@@ -80,12 +84,22 @@ class Rolling:
         self.bad: Side | None = None
         self.held: dict[int, dict[int, tuple[np.ndarray, bool]]] = {}   # generation -> candidate -> (steps, synthetic)
         self._fit: tuple | None = None   # what score needs, made at the first score after an add
+        self.recent: list[dict] = []
+        self.ends: list[np.ndarray | None] = []
 
     def hold(self, generation: int, candidate: int, x: np.ndarray, synthetic: bool) -> None:
         self.held.setdefault(generation, {})[candidate] = (x, synthetic)
 
     def take(self, generation: int) -> dict[int, tuple[np.ndarray, bool]]:
         return self.held.pop(generation, {})
+
+    def take_one(self, generation: int, candidate: int) -> tuple[np.ndarray, bool] | None:
+        """One held trace (the asynchronous mode), or None."""
+        held = self.held.get(generation)
+        out = held.pop(candidate, None) if held else None
+        if held is not None and not held:
+            del self.held[generation]
+        return out
 
     def add(self, x: np.ndarray, good: bool) -> None:
         if self.good is None:

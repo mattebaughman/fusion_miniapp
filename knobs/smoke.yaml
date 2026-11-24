@@ -56,6 +56,7 @@ outer:                        # each campaign's IGNOS outer loop: the parent's r
   generations: 2              # G; evaluations per campaign = P x G, model calls = G
   generator: llm              # llm: one model call per refill replaces mutants; mutation: the parent's loop exactly
   rng: shared                 # shared: one generator, as run_evolutionary_loop; per_agent: two streams, as evo_agents.py
+                              # (the generations mode; the asynchronous mode always has the two streams)
   logs: per_agent             # per_agent: the parent's evolution_log.csv/.jsonl, config.json, best_result.json per campaign
   wall_weight: 0.7            # the parent's DEFAULT_WALL_WEIGHT
   noise: 0.1                  # the parent's mutation amplitude
@@ -66,15 +67,18 @@ monitor:                      # the inner-loop trace for the Monitor: added inst
                               # Academy layers never ask for one). It changes no result
   fixture_trace: smooth       # --sim fixture, which has no inner loop: smooth (a function of the parameters with
                               # one planted split) or hash (random, ending at the record's values); synthetic
-  weight: 0.25                # the Monitor's m in a result's score in the asynchronous mode (not built yet); the
-                              # generation-by-generation mode selects on the inner loop's numbers alone
+  weight: 0.25                # the Monitor's m in a result's score in the asynchronous mode (q + weight x m,
+                              # clipped to 0..1); the generations mode selects on the inner loop's numbers alone
 
 campaign:                     # the AUTONMI layer: each campaign's Monitor slots and its candidate queue
   slots: 2                    # Monitor agents per campaign (3 + slots hosted agents): each takes the next
                               # candidate from its campaign's queue, runs its inner loop and scores its trace
   mode: generations           # generations: the parent's generation barrier, as IGNOS; results equal IGNOS's
-                              # at any slot count
-  warmup: 4                   # traces the good side and the bad side each hold before the Monitor's m is not 0
+                              # at any slot count. async (the AUTONMI layer only): no barrier, each result
+                              # scored and kept or dropped as it arrives, so results differ from run to run;
+                              # for now it makes no model calls, whatever llm.mode says (numbers alone)
+  warmup: 4                   # traces the good side and the bad side each hold before the Monitor's m is not 0;
+                              # in the asynchronous mode also the results kept whatever their score
 
 record:
   extras: false               # true: each candidate's Monitor numbers in its campaign's line (agents.jsonl);

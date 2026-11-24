@@ -109,6 +109,27 @@ def test_compare_records_skips_suspensions_across_the_monitor_slots():
         "counts.suspensions: 1000 != 16000"]
 
 
+def test_compare_records_compares_asynchronous_records_on_counts_and_invariants():
+    """Two records of the asynchronous mode (whose results differ from run to run with the order of arrival)
+    agree when both pass (AUTONMI's checks of the mode's invariants are in the status), and their knobs, their
+    exact counts other than those that follow the order (feasible_agents, memory_writes) and their results
+    scored agree; their digests are not compared. An asynchronous and a generations record differ in the mode."""
+    knobs = {"outer": {"population": 16}, "campaign": {"slots": 2, "mode": "async", "warmup": 4}}
+    a = {"status": "pass", "agent_layer": "autonmi", "results_sha256": "x", "knobs": knobs,
+         "counts": {"sims": 32, "feasible_agents": 0, "memory_writes": 30, "suspensions": 32,
+                    "asynchronous": {"results_scored": 32, "results_kept": 17}}}
+    b = {**a, "results_sha256": "y", "counts": {**a["counts"], "feasible_agents": 1, "memory_writes": 28,
+                                                "asynchronous": {"results_scored": 32, "results_kept": 15}}}
+    assert compare_records.compare(a, b)["results"] == []
+    c = {**b, "counts": {**b["counts"], "sims": 31, "asynchronous": {"results_scored": 31}}}
+    assert compare_records.compare(a, c)["results"] == ["counts.asynchronous.results_scored: 32 != 31",
+                                                        "counts.sims: 32 != 31"]
+    assert compare_records.compare(a, {**b, "status": "fail"})["results"] == [
+        "the second run's status is 'fail', not 'pass'"]
+    g = {**b, "knobs": {**knobs, "campaign": {**knobs["campaign"], "mode": "generations"}}}
+    assert "knobs.campaign.mode: 'async' != 'generations'" in compare_records.compare(a, g)["results"]
+
+
 def test_compare_records_tolerates_last_digit_differences(tmp_path):
     assert run.main(["--agents", "5", "--sim", "fixture", "--out", str(tmp_path / "a")]) == 0
     rec = json.loads((tmp_path / "a" / "run_record.json").read_text())

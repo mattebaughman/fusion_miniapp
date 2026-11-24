@@ -75,6 +75,7 @@ SCHEMA = {
         "generations": ("int", 1, None),      # G
         "generator": ("choice", ("llm", "mutation")),   # llm: the model replaces mutants; mutation: the parent's loop
         "rng": ("choice", ("shared", "per_agent")),     # shared: run_evolutionary_loop; per_agent: evo_agents.py
+                                                        # (the asynchronous mode always has per_agent's two streams)
         "logs": ("choice", ("per_agent", "none")),      # the parent's evolution_log.csv/.jsonl, config.json, best_result.json
         "wall_weight": ("num", 0, 1),
         "noise": ("num", 0, None),
@@ -83,12 +84,15 @@ SCHEMA = {
     "monitor": {                              # the inner-loop trace (trace.py): added instrumentation, not in IGNOS
         "capture": ("bool",),                 # each evaluation's record carries `trace` (the AUTONMI layer)
         "fixture_trace": ("choice", ("smooth", "hash")),   # --sim fixture: its synthetic trace
-        "weight": ("num", 0, 1),              # the Monitor's m in a result's score (the asynchronous mode, not built yet)
+        "weight": ("num", 0, 1),              # the Monitor's m in a result's score (the asynchronous mode)
     },
     "campaign": {                             # the AUTONMI layer: each campaign's Monitor slots and candidate queue
         "slots": ("int", 1, None),            # Monitor agents per campaign, so 3 + slots hosted agents
-        "mode": ("choice", ("generations",)),  # generations: the parent's generation barrier, as IGNOS
-        "warmup": ("int", 1, None),           # traces the good and the bad side each hold before m is not 0
+        # generations: the parent's generation barrier, as IGNOS; async (the AUTONMI layer only, validate's
+        # `modes`): each result applied as it arrives, and for now no model calls, whatever llm.mode says
+        "mode": ("choice", ("generations", "async")),
+        "warmup": ("int", 1, None),           # traces the good and the bad side each hold before m is not 0; in
+                                              # the asynchronous mode also the first results, kept whatever their score
     },
     "record": {
         "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers); false: counts only
@@ -184,9 +188,15 @@ def base() -> dict:
     return copy.deepcopy(_base_cached())
 
 
-def validate(knobs: dict | None, where: str = "knobs") -> dict:
-    """Check a (possibly partial) knob dict and return it merged over the smoke preset."""
-    return _merge_checked(base(), knobs or {}, where)
+def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generations",)) -> dict:
+    """Check a (possibly partial) knob dict and return it merged over the smoke preset. `modes`: the
+    campaign.mode values the caller runs (run.py's layers the generations mode alone; the AUTONMI layer also
+    async)."""
+    out = _merge_checked(base(), knobs or {}, where)
+    if out["campaign"]["mode"] not in modes:
+        raise KnobError(f"campaign.mode {out['campaign']['mode']} is not run by this layer (it runs "
+                        f"{', '.join(modes)}); the asynchronous mode runs on the AUTONMI layer (layer_autonmi)")
+    return out
 
 
 def load(path: str | Path | None = None, preset: str | None = None, paths=()) -> dict:

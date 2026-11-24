@@ -19,6 +19,7 @@ Needs the AUTONMI framework (the package `autonmi`, installed separately) and Fl
 (requirements-autonmi.txt); skipped without them.
 """
 import asyncio
+import copy
 import csv
 import hashlib
 import importlib.util
@@ -657,14 +658,16 @@ def test_a_server_without_vllms_metrics_runs_without_decoding_counts(tmp_path, h
                                         "label": "client side", "emulated": False}
 
 
-def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(tmp_path):
+@pytest.mark.parametrize("mode", ("generations", "async"))
+def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(tmp_path, mode):
     """SIGTERM (scancel, a time limit) while campaigns run, as test_lifecycle.py sends it to run.py: the run
     is cancelled through its event loop, its record says interrupted and keeps the campaigns that had
     finished, and it exits 143. 50 live campaigns per population of 16 candidates keep hundreds of
     evaluations queued when the first campaign finishes: the signal cuts them off, and the record gives
     AUTONMI's telemetry verdict (complete: the populations are waited for) with every population's task
-    counts, those abandoned included, and AUTONMI's check every_population_ran failed."""
-    knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 50},
+    counts, those abandoned included, and AUTONMI's check every_population_ran failed. In both modes (in the
+    asynchronous one a campaign's line has no generations, and each evaluation's submission time)."""
+    knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 50}, "campaign": {"mode": mode},
              "outer": {"population": 16, "generations": 2, "parent_stdout": "drop", "logs": "none"}}
     out = tmp_path / "autonmi"
     with open(tmp_path / "stderr.txt", "w") as err:
@@ -687,7 +690,12 @@ def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(t
     assert rec["counts"]["agents_failed"] == 0   # a cancelled campaign is not a failed one
     assert before <= {r["agent_id"] for r in rows}
     exp = decide.expected(rec["knobs"])
-    assert all(r["n_sims"] == exp["sims"] and len(r["generations"]) == 2 for r in rows)   # each one whole
+    per = 2 if mode == "generations" else 0
+    assert all(r["n_sims"] == exp["sims"] == len(r["sim_s"]) and len(r["generations"]) == per for r in rows)   # whole
+    if mode == "async":
+        assert all(len(r["t_submit"]) == exp["sims"] for r in rows)
+    if mode == "async":   # the finished campaigns' results scored
+        assert rec["counts"]["asynchronous"]["results_scored"] == rec["counts"]["sims"]
     # each population reported into the run before it was verified, its telemetry written whole
     tel = rec["autonmi"]["telemetry"]
     assert (tel["complete"], tel["reasons"]) == (True, []), tel["reasons"]
@@ -937,6 +945,76 @@ def test_the_candidate_queue_gives_each_item_to_the_next_taker():
     asyncio.run(check())
 
 
+def test_an_inbox_gives_everything_that_has_arrived():
+    """The asynchronous mode's receives: take_all waits for one message, then gives it and every one delivered
+    meanwhile, in the order sent; with messages there it gives them at once; with wait=False it gives what is there,
+    or none, at once. emptied returns at once when no item waits on the queue and otherwise when the last is taken;
+    `most` counts the items a queue or inbox held at once, not those handed straight to a waiting taker. fail(a1)
+    fails a1's inbox and emptied waits, now and later, and counts a1's inbox leftovers as dropped for their agent
+    (its queue's under the queue's key); a take_all woken before the failure gets only the message that woke it,
+    the rest counted dropped once, so every message sent is received or dropped, once."""
+    from fusion_miniapp.layer_autonmi import CampaignFailed, Mailbox
+
+    async def check():
+        box = Mailbox(agents=5)
+        waiting = asyncio.ensure_future(box.take_all("a1/evaluator", "report"))
+        await asyncio.sleep(0)
+        box.deliver("a1/monitor0", "evaluator", "report", {"c": 1})   # wakes it, handed straight over
+        box.deliver("a1/monitor1", "evaluator", "report", {"c": 2})   # arrives before it resumes
+        assert await waiting == [{"c": 1}, {"c": 2}] and box.queues == {}
+        assert box.most["a1/evaluator/report"] == 1
+        assert await box.take_all("a1/generator", "digest", wait=False) == [] and box.queues == {}
+        for n in (1, 2, 3):
+            box.deliver("a1/coordinator", "generator", "survivors", {"n": n})
+        assert box.left() == {"a1/generator": 3} and box.most["a1/generator/survivors"] == 3
+        assert await box.take_all("a1/generator", "survivors", wait=False) == [{"n": 1}, {"n": 2}, {"n": 3}]
+        box.deliver("a1/evaluator", "coordinator", "scored", {"results": []})
+        assert await box.take_all("a1/coordinator", "scored") == [{"results": []}] and box.left() == {}
+
+        await box.emptied("a1/generator", "candidates")   # nothing waits: at once
+        taker = asyncio.ensure_future(box.take("a1/monitor0", "candidates"))
+        await asyncio.sleep(0)
+        box.put("a1/generator", "candidates", {"id": "c0"})   # to the waiting taker: not held
+        assert await taker == {"id": "c0"} and box.most["a1/candidates"] == 0
+        for k in (1, 2):
+            box.put("a1/generator", "candidates", {"id": f"c{k}"})
+        emptied = asyncio.ensure_future(box.emptied("a1/generator", "candidates"))
+        await asyncio.sleep(0)
+        assert await box.take("a1/monitor0", "candidates") == {"id": "c1"}
+        await asyncio.sleep(0)
+        assert not emptied.done()
+        assert await box.take("a1/monitor1", "candidates") == {"id": "c2"}
+        await emptied
+        assert box.most["a1/candidates"] == 2 and box.queues == {}
+
+        box.put("a1/generator", "candidates", {"id": "c3"})
+        box.deliver("a1/coordinator", "generator", "survivors", {"n": 4})
+        box.deliver("a1/evaluator", "generator", "digest", {})
+        emptied = asyncio.ensure_future(box.emptied("a1/generator", "candidates"))
+        waiting = asyncio.ensure_future(box.take_all("a1/coordinator", "scored"))
+        await asyncio.sleep(0)
+        box.fail("a1", "a1/monitor1 failed")
+        for f in (emptied, waiting):
+            with pytest.raises(CampaignFailed):
+                await f
+        with pytest.raises(CampaignFailed):
+            await box.take_all("a1/generator", "survivors", wait=False)
+        with pytest.raises(CampaignFailed):
+            box.deliver("a1/evaluator", "coordinator", "scored", {})
+        assert box.dropped == {"a1/generator": 2, "a1/candidates": 1} and box.left() == {} and box.queues == {}
+
+        waiting = asyncio.ensure_future(box.take_all("a2/evaluator", "report"))
+        await asyncio.sleep(0)
+        box.deliver("a2/monitor0", "evaluator", "report", {"c": 1})   # wakes it
+        box.deliver("a2/monitor1", "evaluator", "report", {"c": 2})
+        box.fail("a2", "a2/monitor1 failed")                          # before it resumes
+        assert await waiting == [{"c": 1}]
+        assert (box.received["a2/evaluator"], box.dropped["a2/evaluator"]) == (1, 1)
+        a1 = [a for a in {*box.sent, *box.received, *box.dropped} if a.startswith("a1/")]
+        assert sum(box.sent[a] for a in a1) == sum(box.received[a] + box.dropped[a] for a in a1) == 12
+    asyncio.run(check())
+
+
 def test_every_id_seen_outside_the_agents_is_the_campaigns(tmp_path):
     """Whichever of campaign a4's agents asks, the evaluate task's agent_id (cold starts, work folders), the
     lookups (the abstract differs for a4 and a4/generator) and the store key of its memory are a4's."""
@@ -1094,3 +1172,328 @@ def test_a_run_off_the_pin_warns_once_and_records_it(tmp_path):
     rec = json.loads((out / "run_record.json").read_text())["autonmi"]["framework_commit"]
     assert rec["pin"] == "0" * 40 and rec["matches_pin"] is False and "path" not in rec, rec
     assert rec["commit"] or rec["from"] is None, rec   # unknown only when neither git nor the installer says
+
+
+# --- the asynchronous mode (campaign.mode: async) ------------------------------------------------------------
+
+ASYNC_KNOBS = {"campaign": {"mode": "async"}, "agents": {"start_together": True},
+               "outer": {"population": 4, "generations": 4, "parent_stdout": "drop"}}   # 16 candidates a campaign
+ASYNC_ARGS = ("--preset", "smoke", "--sim", "fixture", "--agents", "20", "--populations", "2")
+ASYNC_CHECKS = ("every_campaign_reports", "every_agent_finishes", "evaluations_and_model_calls_as_planned",
+                "every_message_received", "lookups_match_autonmi", "store_holds_only_the_memories",
+                "each_candidate_evaluated_once", "survivors_within_the_population", "inner_loops_within_the_slots",
+                "candidates_waiting_within_take", "every_agent_has_a_row")
+
+
+@pytest.fixture(scope="module")
+def async_run(tmp_path_factory):
+    """One asynchronous run with record.extras: 20 fixture campaigns of 16 candidates (population 4), all agents
+    starting together, in 2 populations, with each campaign's arrivals reordered (tests/async_replay.py run as a
+    script: every fourth candidate's report and each Coordinator cycle wait on the event loop), so results reach
+    the Evaluator out of candidate order and the Coordinator takes several Evaluator cycles at once. Its folder
+    and run record."""
+    d = tmp_path_factory.mktemp("async")
+    proc = subprocess.run([sys.executable, str(Path(__file__).with_name("async_replay.py")), *ASYNC_ARGS, "--knobs",
+                           knob_file(d, {**ASYNC_KNOBS, "record": {"extras": True}}), "--out", str(d / "autonmi")],
+                          cwd=d, check=False, timeout=900, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    return d / "autonmi", json.loads((d / "autonmi" / "run_record.json").read_text())
+
+
+def test_the_asynchronous_mode_keeps_its_invariants(async_run):
+    """campaign.mode async, no model calls: each campaign's 16 candidates are evaluated once each by its Monitors,
+    every message is received, the survivors stay within the population, at most campaign.slots inner loops run
+    and at most decide.TAKE candidates wait at once, and AUTONMI's checks hold them all; each role's counts are
+    within messages()' bounds and tied to its cycles (the Generator's 8 takes of 2); the counters behind those
+    bounds are live (both slots ran at once, the survivors reached the population); all 100 agents are live at
+    once (agents.start_together); the record marks the mode and counts the results scored and kept, the first
+    campaign.warmup of each campaign kept whatever their score; a campaign's line has no generations, and its
+    evaluations' submission times beside their sim_s and wait_s."""
+    out, rec = async_run
+    knobs, n, B, S = rec["knobs"], 20, 16, 2
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"] and rec["campaign_mode"] == "async", rec["autonmi"]
+    checks = {c["name"]: c for c in json.loads((out / "app" / "checks.json").read_text())}
+    assert {k: c["ok"] for k, c in checks.items()} == dict.fromkeys(ASYNC_CHECKS, True), checks
+    c = rec["counts"]
+    assert (c["sims"], c["llm_calls"], c["generations"], c["agents_failed"]) == (n * B, 0, 0, 0)
+    assert c["candidates_by_source"] == {"start": n * 4, "survivor": 0, "mutation": n * 12, "model": 0, "restart": 0}
+    assert {role: c["by_role"][role]["model_calls"] for role in ROLES} == dict.fromkeys(ROLES, 0)
+    assert c["by_role"]["monitor"]["simulations"] == c["by_role"]["monitor"]["reports"] == n * B == c["suspensions"]
+    a = c["asynchronous"]
+    assert a["results_scored"] == n * B and a["results_scored_after_warmup"] == n * (B - 4)
+    assert a["results_kept"] == a["results_kept_after_warmup"] + n * 4 and 0 < a["results_kept_after_warmup"] < n * (B - 4)
+    assert a["cycles"]["generator"] == n * B // 2 and a["cycles"]["monitor"] == n * B
+    assert n <= a["cycles"]["coordinator"] <= a["cycles"]["evaluator"] <= n * B
+    assert c["memory_writes"] == a["cycles"]["coordinator"]
+    exp = c["expected_by_role"]
+    assert (exp["coordinator"]["sent"], exp["generator"]["received"], exp["evaluator"]["sent"]) == \
+        ([3, B + 2], [3, 2 * B + 1], [2, 2 * B])
+    rows = app_rows(out)
+    assert len(rows) == n * (3 + S) and all(r["finished"] and not r["messages_left"] and not r["messages_dropped"]
+                                            for r in rows)
+    lines = {r["agent_id"]: r for r in lines_of(out)}
+    for campaign in lines:
+        x = {r["role"] if r["role"] != "monitor" else r["agent_id"]: r for r in rows if r["campaign"] == campaign}
+        co, ge, ev = x["coordinator"], x["generator"], x["evaluator"]
+        mons = [x[f"{campaign}/monitor{k}"] for k in range(S)]
+        assert sum(r["simulations"] for r in mons) == B and all(r["simulations"] == r["cycles"] for r in mons)
+        assert (co["candidates_distinct"], co["candidate_max"], co["candidates_repeated"]) == (B, B - 1, 0)
+        assert co["survivors_max"] == 4 and co["running_max"] == S and 1 <= co["waiting_max"] <= 2, co
+        assert co["messages_sent"] == co["cycles"] + 2 and ev["messages_sent"] == 2 * ev["cycles"]
+        assert ge["messages_received"] == co["cycles"] + ev["cycles"] + 1 and co["messages_received"] == ev["cycles"]
+        assert (ge["cycles"], ge["messages_sent"], ev["messages_received"]) == (B // 2, B + S, B + 1)
+        assert co["results_scored"] == B and co["results_kept"] >= 4
+        line = lines[campaign]
+        assert (line["n_sims"], line["n_llm_calls"], line["summary"], line["n_cycles"]) == (B, 0, "", co["cycles"])
+        assert line["survival"] == {k: co[k] for k in line["survival"]}
+        assert line["generations"] == [] and len(line["t_submit"]) == len(line["sim_s"]) == len(line["wait_s"]) == B
+    live = rec["speed"]["agents_live"]
+    assert live["max"] == n * (3 + S) and live["all_live_s"] > 0 and rec["speed"]["start_together"]["begin_margin_s"] >= 0
+    s = rec["speed"]   # the evaluations' times, from t_submit
+    assert s["sim_s"]["n"] == s["queue_wait_s"]["n"] == n * B and s["generation_s"] == {"n": 0}
+    assert 1 <= s["sims_in_flight"]["max"] <= n * (2 + S) and 1 <= s["sims_executing"]["max"]   # waiting and running
+
+
+def test_a_recorded_order_replays_to_the_same_campaign(async_run):
+    """With record.extras each campaign's line has the orders its results reached the Evaluator and the
+    Coordinator (one list per cycle) and the survivors message its Generator held at each profile: replayed
+    through decide.py's pure functions (tests/async_replay.py), with the Monitor's m as recorded and the fixture
+    evaluating the same profiles, they give the same campaign: every result's q, m, score, draw and kept flag,
+    the survivors at the end and best-so-far. The run's arrivals are reordered (async_run), and the orders it
+    recorded show it: results out of candidate order, and Coordinator cycles that took more than one Evaluator
+    cycle, so the replay meets both (and the candidate order would not replay)."""
+    from async_replay import fixture, replay
+
+    out, rec = async_run
+    knobs = rec["knobs"]
+    lines = lines_of(out)
+    assert len(lines) == 20
+    for line in lines:
+        x, seed = line["asynchronous"], line["seed"]
+        assert sorted(sum(x["evaluator"], [])) == sorted(sum(x["coordinator"], [])) == list(range(16))
+        assert len(x["held"]) == 16 and x["held"] == sorted(x["held"])
+        m = {r["candidate"]: r["m"] for r in x["results"]}
+        cst, rows, _ = replay(seed, knobs, x["evaluator"], x["coordinator"], x["held"], m, fixture(knobs, seed))
+        assert rows == x["results"], line["agent_id"]
+        assert [s["candidate"] for s in cst["survivors"]] == x["survivors"], line["agent_id"]
+        assert json.loads(json.dumps(cst["best"])) == line["best"], line["agent_id"]
+    evaluator = [line["asynchronous"]["evaluator"] for line in lines]
+    assert sum(sum(x, []) != sorted(sum(x, [])) for x in evaluator) > 0   # out of candidate order
+    assert sum(line["asynchronous"]["evaluator"] != line["asynchronous"]["coordinator"] for line in lines) > 0
+    assert sum(len(x) < 16 for x in (line["asynchronous"]["coordinator"] for line in lines)) > 0
+
+    def by_candidate(rows):
+        return {r["candidate"]: (r["q"], r["score"], r["kept"]) for r in rows}
+    changed = 0   # the out-of-order campaigns replayed in candidate order, one result a cycle: other q, scores, kept
+    for line in lines:
+        x, seed = line["asynchronous"], line["seed"]
+        if sum(x["evaluator"], []) != list(range(16)):
+            one, m = [[k] for k in range(16)], {r["candidate"]: r["m"] for r in x["results"]}
+            _, rows, _ = replay(seed, knobs, one, one, sorted(x["held"]), m, fixture(knobs, seed))
+            changed += by_candidate(rows) != by_candidate(x["results"])
+    assert changed > 0
+
+
+def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, async_run):
+    """record.extras off: no campaign line has per-result detail, and the record gains only the mark of the mode
+    and its counts (counts.asynchronous) beside a generations-mode record of the same campaigns; a line gains
+    only counts (n_cycles, survival) and its evaluations' submission times (t_submit, beside sim_s and wait_s,
+    which replace the generations' t0), and its lists are no longer than P x G (its generations none); on: each
+    line gains `monitor` (the Monitor's numbers, q and label of each candidate) and `asynchronous` (each result's row:
+    arrival, candidate, q, m, score, draw, kept; and the replay's orders), outside results_sha256. Two
+    asynchronous records agree in compare_records on their counts and invariants, not their (differing) digests."""
+    def paths(d, prefix=""):
+        return {p for k, v in d.items() for p in (paths(v, f"{prefix}{k}.") if isinstance(v, dict) and v else
+                                                  [f"{prefix}{k}"])}
+    on_out, on = async_run
+    gen_knobs = {**ASYNC_KNOBS, "campaign": {"mode": "generations"}}
+    for name, knobs in (("off", ASYNC_KNOBS), ("gen", gen_knobs)):
+        (tmp_path / name).mkdir()
+        rec = run("autonmi", tmp_path / name, *ASYNC_ARGS, "--knobs", knob_file(tmp_path / name, knobs))
+        assert rec["status"] == "pass"
+    off, gen = (json.loads((tmp_path / x / "autonmi" / "run_record.json").read_text()) for x in ("off", "gen"))
+    # the speed figures, knob echo, per-role bounds and model calls' figures (none here) of either mode
+    skip = ("speed.", "knobs.", "counts.expected_by_role.", "llm_service.")
+    added = {p for p in paths(off) - paths(gen) if not p.startswith(skip)}
+    assert added == {"campaign_mode", *(f"counts.asynchronous.{k}" for k in (
+        "results_scored", "results_kept", "results_scored_after_warmup", "results_kept_after_warmup",
+        "cycles.coordinator", "cycles.generator", "cycles.evaluator", "cycles.monitor", "survivor_waits"))}, added
+    assert not {p for p in paths(gen) - paths(off) if not p.startswith(skip)}
+    assert paths(on) == paths(off)
+    assert not any({"monitor", "asynchronous"} & set(r) for r in lines_of(tmp_path / "off" / "autonmi"))
+    off_lines, gen_lines = lines_of(tmp_path / "off" / "autonmi"), lines_of(tmp_path / "gen" / "autonmi")
+    assert {k for r in off_lines for k in r} - {k for r in gen_lines for k in r} == {"n_cycles", "survival", "t_submit"}
+    assert {k for r in gen_lines for k in r} - {k for r in off_lines for k in r} == set()
+    assert {k for r in off_lines for k in r["survival"]} == {f"results_{x}" for x in (
+        "scored", "kept", "scored_after_warmup", "kept_after_warmup")}
+
+    def lists(rows):   # each list in a campaign's line, with its length
+        return {(k, len(v)) for r in rows for k, v in r.items() if isinstance(v, list)}
+    assert lists(gen_lines) == {("generations", 4), ("llm_call_details", 4), ("sim_s", 16), ("wait_s", 16)}
+    assert lists(off_lines) == {("generations", 0), ("llm_call_details", 0), ("sim_s", 16), ("wait_s", 16),
+                                ("t_submit", 16)}
+    for r in lines_of(on_out):
+        assert set(r["asynchronous"]) == {"evaluator", "coordinator", "held", "results", "survivors"}
+        assert [x["arrival"] for x in r["asynchronous"]["results"]] == list(range(16))
+        assert all(set(x) == {"arrival", "candidate", "q", "m", "score", "draw", "kept"} for x in r["asynchronous"]["results"])
+        assert [x["candidate_idx"] for x in r["monitor"]] == [x["candidate"] for x in r["asynchronous"]["results"]]
+        assert {x["label_from"] for x in r["monitor"]} == {"trace_end_synthetic"}
+    assert record.digest((on_out / "agents.jsonl").read_text().splitlines()) == on["results_sha256"]
+    assert compare_records.compare(on, off)["results"] == []   # record.extras is what the record writes
+    assert compare_records.compare(off, gen)["results"][:1] != []
+    worse = {**off, "counts": {**off["counts"], "sims": off["counts"]["sims"] - 1}}
+    assert compare_records.compare(on, worse)["results"] == [f"counts.sims: {on['counts']['sims']} != {worse['counts']['sims']}"]
+
+
+def test_verify_catches_each_broken_invariant(async_run):
+    """AUTONMI's checks on the asynchronous run's own rows pass; each invariant broken in a copy of them fails
+    its check (and only the checks that read it): evaluations per campaign, each candidate once, every message
+    received, the survivors, inner loops and candidates waiting within their bounds, and each role's counts
+    within their bounds, tied to its cycles, with no model calls."""
+    from rascal.store import MemoryStore
+
+    from fusion_miniapp.layer_autonmi import Fusion
+
+    out, rec = async_run
+    rows, store = app_rows(out), MemoryStore()
+    for c in {r["campaign"] for r in rows}:
+        store.put(f"campaign/{c}", "{}")
+    definition = Fusion(rec["knobs"], "fixture", out)
+
+    def failing(edit) -> set:
+        broken = copy.deepcopy(rows)
+        for r in broken:
+            if r["campaign"] == "a5":
+                edit(r)
+        return {c.name for c in definition.verify(broken, store) if not c.ok}
+    assert failing(lambda r: None) == set()
+
+    def one_more_evaluation(r):   # a Monitor that evaluated (and reported) one candidate more
+        if r["agent_id"] == "a5/monitor0":
+            for k in ("simulations", "reports", "messages_sent", "messages_received", "cycles"):
+                r[k] += 1
+    planned = {"evaluations_and_model_calls_as_planned"}
+    breaks = {
+        "evaluations per campaign": (one_more_evaluation, planned),
+        "a candidate evaluated twice": (lambda r: r.update(candidates_repeated=1) if r["role"] == "coordinator"
+                                        else None, {"each_candidate_evaluated_once"}),
+        "a candidate never evaluated": (lambda r: r.update(candidates_distinct=15) if r["role"] == "coordinator"
+                                        else None, {"each_candidate_evaluated_once"}),
+        "a message left": (lambda r: r.update(messages_left=1) if r["role"] == "evaluator" else None,
+                           {"every_message_received"}),
+        "survivors over the population": (lambda r: r.update(survivors_max=5) if r["role"] == "coordinator"
+                                          else None, {"survivors_within_the_population"}),
+        "inner loops over the slots": (lambda r: r.update(running_max=3) if r["role"] == "coordinator" else None,
+                                       {"inner_loops_within_the_slots"}),
+        "candidates waiting over two": (lambda r: r.update(waiting_max=3) if r["role"] == "coordinator" else None,
+                                        {"candidates_waiting_within_take"}),
+        "a model call": (lambda r: r.update(model_calls=1) if r["role"] == "evaluator" else None, planned),
+        "the Coordinator past its bound": (lambda r: r.update(messages_received=17) if r["role"] == "coordinator"
+                                           else None, planned),
+        "the Generator's takes": (lambda r: r.update(cycles=9) if r["role"] == "generator" else None, planned),
+        "the Evaluator's sends and cycles": (lambda r: r.update(messages_sent=r["messages_sent"] + 1)
+                                             if r["role"] == "evaluator" else None, planned),
+        "a survivors message not received": (lambda r: r.update(messages_received=r["messages_received"] - 1)
+                                             if r["role"] == "generator" else None, planned),
+    }
+    for what, (edit, want) in breaks.items():
+        assert failing(edit) == want, what
+
+
+@pytest.mark.parametrize("role, at", (("coordinator", "2"), ("generator", "3"), ("evaluator", "2"),
+                                      ("monitor0", "c5")))
+def test_an_agent_that_fails_ends_its_campaign_alone_in_the_asynchronous_mode(tmp_path, role, at):
+    """A Coordinator before its third survivors message, a Generator before its fourth take, an Evaluator before
+    its third cycle's sends, or a Monitor, the campaign's only slot, before its report of candidate 5
+    (FUSION_AUTONMI_FAIL): its campaign is one error line with the failing role; the campaign's other agents end
+    with an error instead of waiting, each message it sent received or dropped; the other 19 campaigns end whole.
+    The run ends on its own and fails."""
+    env = {**os.environ, "FUSION_AUTONMI_FAIL": f"a3/{role}:{at}"}
+    slots = 1 if role == "monitor0" else 2
+    knobs = {**ASYNC_KNOBS, "campaign": {**ASYNC_KNOBS["campaign"], "slots": slots}}
+    rec = run("autonmi", tmp_path, *ASYNC_ARGS, "--knobs", knob_file(tmp_path, knobs), env=env, code=1)
+    out, name = tmp_path / "autonmi", role.rstrip("0")
+    errors = [r for r in lines_of(out) if "error" in r]
+    assert [(r["agent_id"], r["role"]) for r in errors] == [("a3", name)]
+    assert "InjectedFailure" in errors[0]["error"] and f"a3/{role}" in errors[0]["error"]
+    assert (rec["status"], rec["counts"]["agents"], rec["counts"]["agents_failed"]) == ("fail", 20, 1)
+    assert all(r["n_sims"] == 16 for r in lines_of(out) if "error" not in r)
+    rows = {r["agent_id"]: r for r in app_rows(out)}
+    assert [rows[f"a3/{x}"]["status"] for x in names(slots)] == ["failed"] * (3 + slots)
+    assert all("CampaignFailed" in rows[f"a3/{x}"]["error"] for x in names(slots) if x != role)
+    assert all(r["finished"] for a, r in rows.items() if not a.startswith("a3/")) and len(rows) == 20 * (3 + slots)
+    assert not any(r["messages_left"] for r in rows.values())
+    if role == "monitor0":   # candidates 0 to 5 ran
+        assert rows["a3/monitor0"]["simulations"] == 6
+    a3 = [rows[f"a3/{x}"] for x in names(slots)]
+    assert sum(r["messages_sent"] for r in a3) == sum(r["messages_received"] + r["messages_dropped"] for r in a3)
+    assert rec["autonmi"]["failed_checks"] == ["every_campaign_reports", "every_agent_finishes"]
+
+
+@pytest.mark.parametrize("layer", ("langgraph", "academy"))
+def test_the_other_layers_refuse_the_asynchronous_mode(tmp_path, layer):
+    """run.py's layers run the generations mode alone: campaign.mode async is refused before anything starts."""
+    args = ["--use-academy"] if layer == "academy" else []
+    out = tmp_path / "out"
+    proc = subprocess.run([sys.executable, "-m", ENTRY["langgraph"], *args, *FIXTURE_ARGS, "--knobs",
+                           knob_file(tmp_path, {"campaign": {"mode": "async"}}), "--out", str(out)], cwd=tmp_path,
+                          capture_output=True, text=True, timeout=300, check=False)
+    assert proc.returncode != 0 and "campaign.mode async is not run by this layer" in proc.stderr, proc.stderr[-2000:]
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("population, generations, slots", ((1, 3, 2), (3, 3, 1), (5, 2, 16)))
+def test_odd_shapes_run_in_the_asynchronous_mode(tmp_path, population, generations, slots):
+    """A population of 1 (whose second candidate needs a survivor before any result exists), an odd population and
+    budget (a take of one), and more Monitor slots than candidates: every campaign completes and AUTONMI's checks
+    of the mode pass."""
+    knobs = {"campaign": {"mode": "async", "slots": slots},
+             "outer": {"population": population, "generations": generations, "parent_stdout": "drop"}}
+    rec = run("autonmi", tmp_path, "--preset", "smoke", "--sim", "fixture", "--agents", "6", "--knobs",
+              knob_file(tmp_path, knobs))
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    assert rec["counts"]["sims"] == 6 * population * generations
+    assert rec["counts"]["asynchronous"]["cycles"]["generator"] >= 6 * -(-population * generations // 2)
+
+
+def test_the_asynchronous_mode_makes_no_model_call_whatever_llm_mode_says(tmp_path):
+    """llm.mode openai, with a model server: in the asynchronous mode (model calls off in this package) no request
+    reaches the server, no model call is counted, and the run passes."""
+    knobs = {**SERVER_KNOBS, "campaign": {"mode": "async"}}
+    with FakeVllm() as server:
+        (tmp_path / "endpoints").write_text(f"http://127.0.0.1:{server.port}\n")
+        rec = run("autonmi", tmp_path, *SERVER_ARGS, "--knobs", knob_file(tmp_path, knobs), "--populations", "2",
+                  "--endpoints-file", str(tmp_path / "endpoints"))
+        sent, answered = server.take(), server.successes
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"] and rec["knobs"]["llm"]["mode"] == "openai", rec["autonmi"]
+    assert (sent, answered, rec["counts"]["llm_calls"], rec["llm_service"]["calls"]) == ([], 0, 0, 0)
+    assert rec["counts"]["sims"] == 12 * 4 * 3
+    assert {role: v["model_calls"] for role, v in rec["counts"]["by_role"].items()} == dict.fromkeys(ROLES, 0)
+    assert all(r["llm_call_details"] == [] for r in lines(tmp_path, "autonmi"))
+
+
+def test_the_asynchronous_mode_labels_each_trace_as_its_result_is_scored():
+    """_label_async: as each result is scored, its trace (held by its Monitor) joins the good side when q is 0.5 or
+    more, else the bad side (label_from q); a synthetic trace is labelled instead from its own last step among the
+    window's synthetic traces, it last (trace_end_synthetic); a result whose Monitor held no trace has no label.
+    The window's last steps keep the last outer.population results'. With record.extras each candidate's q, label
+    and label_from are kept, in the order scored."""
+    import numpy as np
+
+    from fusion_miniapp import monitor
+    from fusion_miniapp.layer_autonmi import Script
+
+    sc = Script.__new__(Script)   # only what _label_async reads
+    sc.P, sc.extras, sc.numbers = 4, True, {}
+    stats = monitor.Rolling(warmup=1, window=4)
+    xs = {k: np.full((3, 4), float(k)) for k in range(4)}
+    for k, x in xs.items():   # candidates 2 and 3 synthetic (the wall at the last step: 2 below 3)
+        stats.hold(0, k, x, synthetic=k >= 2)
+    for k, q in ((1, 0.5), (0, 0.25), (2, 0.0), (3, 1.0), (4, 0.9)):   # in arrival order; 4 holds no trace
+        sc._label_async("a0", stats, {"numbers": None}, {"candidate": k, "q": q})
+    assert [(x["candidate_idx"], x["q"], x["label"], x["label_from"]) for x in sc.numbers["a0"]] == [
+        (1, 0.5, "good", "q"), (0, 0.25, "bad", "q"), (2, 0.0, "good", "trace_end_synthetic"),
+        (3, 1.0, "bad", "trace_end_synthetic"), (4, 0.9, None, None)]
+    assert (stats.good.traces, stats.bad.traces) == (2, 2) and stats.held == {}
+    assert np.allclose(stats.good.mean, 1.5) and np.allclose(stats.bad.mean, 1.5)
+    assert [None if e is None else float(e[-1, 1]) for e in stats.ends] == [None, 2.0, 3.0, None]

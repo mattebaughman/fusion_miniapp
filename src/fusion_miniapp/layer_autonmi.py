@@ -8,7 +8,9 @@
 Every campaign is the same three roles as in the other two layers (decide.py's Coordinator, Generator
 and Evaluator), with Monitor slots that run the Evaluator's inner loops, and the parent's whole-generation
 selection on the inner loop's numbers alone, so its result is the same: `results_sha256` equals the other
-layers' for the same knobs, at any campaign.slots. What runs them is AUTONMI's:
+layers' for the same knobs, at any campaign.slots. With campaign.mode async (this layer only) there is no
+generation barrier and, for now, no model call: each agent applies each result as it arrives (Script), so
+results differ from run to run and the checks are invariants (verify). What runs them is AUTONMI's:
 - The mini-app is an AsyncFlow application. Its campaigns are split into populations (`--populations`;
   by default one per agent process of run.py, or the next count up that divides the campaigns: layout),
   each an AsyncFlow node with an engine of its own for its simulations, a fleet for its model calls, and
@@ -178,7 +180,8 @@ def bound_full_collections() -> tuple[int, int, int]:
 
 ROLES = ("coordinator", "generator", "evaluator", "monitor")   # a campaign's roles; agent_names gives its agents
 FAIL_ENV = "FUSION_AUTONMI_FAIL"   # tests only: "<agent id>:<g>" fails that agent before its generation-g message
-                                   # (a Monitor's g is its candidate's call id, g<g>c<i>: before that report)
+                                   # (a Monitor's g is its candidate's call id, g<g>c<i>: before that report; in
+                                   # the asynchronous mode g is the agent's cycle from 0, a Monitor's call id c<k>)
 QUEUE = "candidates"   # each campaign's candidate queue: the Generator puts, a free Monitor takes the next
 
 
@@ -207,8 +210,21 @@ def messages(knobs: dict) -> dict:
     Monitor slots (the Monitors' together): each generation the Coordinator sends make/g, the Generator
     population/g and the generation's P candidates on the campaign's queue, each Monitor that takes one a
     report, and the Evaluator results/g; at the end the Coordinator sends done to the Generator and the
-    Evaluator, and the Generator puts one stop on the queue for each Monitor. 3G + 2 + 2PG + S in all."""
+    Evaluator, and the Generator puts one stop on the queue for each Monitor. 3G + 2 + 2PG + S in all.
+
+    In the asynchronous mode the counts depend on the order of arrival, so they are bounds [low, high] where
+    they vary. With B = P x G candidates: the Generator puts B candidates and S stops; each Monitor reports
+    each candidate it takes; each Evaluator cycle (1 to B of them, E) sends the Coordinator its scored results
+    and the Generator a digest; each Coordinator cycle (1 to E of them, C) sends the Generator the survivors,
+    and at the end done to the Generator and the Evaluator. So the Coordinator sends C + 2 (3 to B + 2) and
+    receives E (1 to B), the Generator receives C + E + 1 (3 to 2B + 1), the Evaluator sends 2E (2 to 2B)."""
     G, P, S = knobs["outer"]["generations"], knobs["outer"]["population"], knobs["campaign"]["slots"]
+    if decide.asynchronous(knobs):
+        B = P * G
+        return {"coordinator": {"sent": [3, B + 2], "received": [1, B]},
+                "generator": {"sent": B + S, "received": [3, 2 * B + 1]},
+                "evaluator": {"sent": [2, 2 * B], "received": B + 1},
+                "monitor": {"sent": B, "received": B + S}}
     return {"coordinator": {"sent": G + 2, "received": 2 * G},
             "generator": {"sent": G + P * G + S, "received": G + 1},
             "evaluator": {"sent": G, "received": P * G + 1},
@@ -224,13 +240,21 @@ class InjectedFailure(RuntimeError):
 
 
 class _Queue:
-    """A campaign's queue: its items in the order put, and its takers waiting, in the order they asked."""
+    """A campaign's queue (or an agent's inbox): its items in the order put, its takers waiting, in the order
+    they asked, and an agent waiting for it to hold no item (`emptied`)."""
 
-    __slots__ = ("items", "waiting")
+    __slots__ = ("items", "waiting", "emptied")
 
     def __init__(self) -> None:
         self.items: deque[str] = deque()
         self.waiting: deque[asyncio.Future] = deque()
+        self.emptied: asyncio.Future | None = None
+
+
+def _owner(key: str) -> str:
+    """Who a queue's leftovers count for: an inbox <campaign>/<agent>/<kind> its agent's, a campaign's queue
+    <campaign>/<kind> its own key."""
+    return key.rsplit("/", 1)[0] if key.count("/") == 2 else key
 
 
 class Mailbox:
@@ -240,16 +264,20 @@ class Mailbox:
     asked yet), `receive` awaits it and deletes it. A second send of a key not yet received raises (a send
     after its receipt would stay in the box, which rows() reports). Beside the exact keys, each campaign has
     queues <campaign>/<kind>: `put` adds an item, `take` gives the next one to whichever agent asks (the
-    first that waits), so the sender addresses no one. A waiting agent awaits inside its own step, counted
+    first that waits), so the sender addresses no one, and `emptied` waits until none is left on it (`most`:
+    the most items it held at once). Each agent has inboxes <campaign>/<agent>/<kind> (the asynchronous
+    mode): `deliver` adds a message, `take_all` takes every one that has arrived, in the order sent, waiting
+    for one if there is none (or, with wait=False, none). A waiting agent awaits inside its own step, counted
     by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken once, never polled. `fail(campaign)` fails
     that campaign's waits, now and later, and drops its messages not yet received (counted per receiver in
-    `dropped`, a queue's under its own key). With agents.start_together, `all_started` is set when every
-    agent of the population has started."""
+    `dropped`, a campaign queue's under its own key). With agents.start_together, `all_started` is set when
+    every agent of the population has started."""
 
     def __init__(self, agents: int) -> None:
         self.agents, self.started, self.all_started = agents, 0, asyncio.Event()
         self.box: dict[str, asyncio.Future] = {}
-        self.queues: dict[str, _Queue] = {}   # <campaign>/<kind>, while it holds items or takers
+        self.queues: dict[str, _Queue] = {}   # <campaign>/<kind> and inboxes, while it holds items or waits
+        self.most: Counter = Counter()        # per queue: the most items it held at once
         self.failed: dict[str, str] = {}   # campaign -> why
         self.sent, self.received, self.waited = Counter(), Counter(), Counter()   # per agent; waited: seconds
         self.dropped = Counter()   # per receiving agent (or queue): messages not received when its campaign failed
@@ -305,6 +333,8 @@ class Mailbox:
                 break
         else:
             q.items.append(text)
+            if len(q.items) > self.most[key]:
+                self.most[key] = len(q.items)
         self.sent[sender] += 1
 
     async def take(self, me: str, kind: str):
@@ -317,6 +347,8 @@ class Mailbox:
         try:
             if q.items:
                 text = q.items.popleft()
+                if not q.items and q.emptied is not None and not q.emptied.done():
+                    q.emptied.set_result(None)
             else:
                 f = asyncio.get_running_loop().create_future()
                 q.waiting.append(f)
@@ -328,6 +360,50 @@ class Mailbox:
             del self.queues[key]
         self.received[me] += 1
         return json.loads(text)
+
+    async def emptied(self, me: str, kind: str) -> None:
+        """Wait until no item is left on my campaign's queue <campaign>/<kind> (at once if none is)."""
+        campaign = campaign_of(me)
+        if campaign in self.failed:
+            raise CampaignFailed(self.failed[campaign])
+        q = self.queues.get(f"{campaign}/{kind}")
+        if q is None or not q.items:
+            return
+        q.emptied, t = asyncio.get_running_loop().create_future(), time.perf_counter()
+        try:
+            with activity(AgentState.TOOL_WAIT):
+                await q.emptied
+        finally:
+            self.waited[me] += time.perf_counter() - t
+
+    def deliver(self, sender: str, to: str, kind: str, value) -> None:
+        """A message for agent <campaign>/<to>'s inbox of `kind` (take_all)."""
+        self.put(sender, f"{to}/{kind}", value)
+
+    async def take_all(self, me: str, kind: str, wait: bool = True) -> list:
+        """Every message in my inbox of `kind`, in the order sent; if there is none, wait for one (or, with
+        wait=False, none)."""
+        campaign = campaign_of(me)
+        if campaign in self.failed:
+            raise CampaignFailed(self.failed[campaign])
+        key, texts = f"{me}/{kind}", []
+        q = self.queues.get(key)
+        if (q is None or not q.items) and wait:
+            q = q or self.queues.setdefault(key, _Queue())
+            f, t = asyncio.get_running_loop().create_future(), time.perf_counter()
+            q.waiting.append(f)
+            try:
+                with activity(AgentState.TOOL_WAIT):
+                    texts.append(await f)
+            finally:
+                self.waited[me] += time.perf_counter() - t
+        if q is not None:
+            texts += q.items
+            q.items.clear()
+            if not q.waiting and self.queues.get(key) is q:
+                del self.queues[key]
+        self.received[me] += len(texts)
+        return [json.loads(x) for x in texts]
 
     def fail(self, campaign: str, why: str) -> None:
         if campaign in self.failed:
@@ -341,16 +417,19 @@ class Mailbox:
                 self.dropped[key.rsplit("/", 2)[0]] += 1
         for key in [k for k in self.queues if k.startswith(campaign + "/")]:
             q = self.queues.pop(key)
-            for f in q.waiting:
-                if not f.done():
+            for f in (*q.waiting, q.emptied):
+                if f is not None and not f.done():
                     f.set_exception(CampaignFailed(why))
-            if q.items:
-                self.dropped[key] += len(q.items)
+            if q.items:   # dropped, and cleared: a take_all woken before the failure does not also receive them
+                self.dropped[_owner(key)] += len(q.items)
+                q.items.clear()
 
     def left(self) -> Counter:
-        """Messages never received, per receiving agent; a queue's items never taken under the queue's key."""
+        """Messages never received, per receiving agent; a campaign queue's items never taken under its key."""
         out = Counter(key.rsplit("/", 2)[0] for key in self.box)
-        out.update({key: len(q.items) for key, q in self.queues.items() if q.items})
+        for key, q in self.queues.items():
+            if q.items:
+                out[_owner(key)] += len(q.items)
         return out
 
 
@@ -512,6 +591,16 @@ class Fusion:
                     queue = f"{campaign}/{QUEUE}"
                     row["messages_left"] += left[queue]
                     row["messages_dropped"] += mail.dropped[queue]
+            if sc.asynchronous:   # each agent's cycles; the campaign's counts and invariants on its Coordinator's row
+                row["cycles"] = sc.cycles[a]
+                if role == "coordinator":
+                    seen = sc.seen.get(campaign, 0)
+                    row.update(sc.tally.get(campaign, {}), survivors_max=sc.survivors_max[campaign],
+                               waiting_max=mail.most[f"{campaign}/{QUEUE}"], running_max=sc.running_max[campaign],
+                               candidates_distinct=seen.bit_count(), candidate_max=seen.bit_length() - 1,
+                               candidates_repeated=sc.repeated[campaign])
+                elif role == "generator":
+                    row["survivor_waits"] = sc.survivor_waits[a]
             out.append(row)
         return out
 
@@ -523,10 +612,13 @@ class Fusion:
         is the queue's), and each Monitor one evaluation, one report and one message sent per candidate it
         took; every message received (none left); the lookups against AUTONMI's own count; and the store at
         the end: no agent's saved state (ScriptRunner's script/p<index>/<agent>, kept while it is
-        suspended), and each reported campaign's memory under its campaign id, campaign/a<i>."""
+        suspended), and each reported campaign's memory under its campaign id, campaign/a<i>. In the
+        asynchronous mode the counts are bounds, with that mode's invariants (_verify_async)."""
         n, exp, msgs = self.knobs["agents"]["count"], decide.expected_by_role(self.knobs), messages(self.knobs)
         coordinators = {r["campaign"]: r for r in rows if r.get("role") == "coordinator"}
         slots = self.knobs["campaign"]["slots"]
+        if decide.asynchronous(self.knobs):
+            return self._verify_async(rows, store, exp, msgs)
 
         def planned(r: dict) -> bool:
             e, m = exp[r["role"]], msgs[r["role"]]
@@ -549,6 +641,11 @@ class Fusion:
             total = [sum(r[k] for r in rs) for k in ("simulations", "messages_sent", "messages_received")]
             if len(rs) == slots and total != [e["sims"], m["sent"], m["received"]]:
                 off += [r["agent_id"] for r in rs]
+        return self._common_checks(rows, store, off, exp, msgs)
+
+    def _common_checks(self, rows: list[dict], store, off: list[str], exp: dict, msgs: dict) -> list[Check]:
+        """The checks of both modes, with `off`: the agents whose counts are not as planned."""
+        n, done = self.knobs["agents"]["count"], [r for r in rows if r["finished"]]
         finished = {role: sum(r["finished"] for r in rows if r.get("role") == role) for role in ROLES}
         runners = [Path(self.out) / "populations" / f"p{i:03d}" / "population.json"
                    for i in sorted({r["population"] for r in rows})]
@@ -569,6 +666,70 @@ class Fusion:
                 Check("lookups_match_autonmi", ours == autonmi, {"rows": ours, "autonmi": autonmi}),
                 Check("store_holds_only_the_memories", saved == 0 and memories == len(reported),
                       {"saved_states_left": saved, "memories": memories, "campaigns_reported": len(reported)})]
+
+    def _verify_async(self, rows: list[dict], store, exp: dict, msgs: dict) -> list[Check]:
+        """verify() in the asynchronous mode, where the counts depend on the order of arrival. Per agent that
+        ended normally: no model calls, its lookups, and its counts within messages()' bounds and tied to its
+        cycles (the Coordinator sends cycles + 2 and receives at least cycles; the Generator takes
+        ceil(B / decide.TAKE) times, or once more when a take stops at candidate P for want of a survivor (an odd
+        P), and puts B candidates and S stops; the Evaluator sends 2 per cycle and
+        receives B reports and done; each Monitor one evaluation, report and message sent per candidate
+        taken, one cycle each). Per campaign whose agents all finished: the Monitors' B evaluations, B reports
+        and B + S messages received; the Generator received every survivors message and digest sent it and
+        done, the Coordinator every scored message; each candidate 0 .. B - 1 evaluated exactly once; at most
+        outer.population survivors; at most campaign.slots inner loops running; at most decide.TAKE candidates
+        waiting on the queue. Then the checks of both modes."""
+        o, S, take = self.knobs["outer"], self.knobs["campaign"]["slots"], decide.TAKE
+        P, B = o["population"], o["population"] * o["generations"]
+        takes = (-(-B // take), -(-P // take) + -(-(B - P) // take))   # the Generator's cycles: in one take, or split at P
+
+        def within(x: int, bound) -> bool:
+            return bound[0] <= x <= bound[1] if isinstance(bound, list) else x == bound
+
+        def planned(r: dict) -> bool:
+            role, m, c = r["role"], msgs[r["role"]], r.get("cycles", 0)
+            if r["model_calls"] != 0 or r["lookups"] != len(exp[role]["lookups"]):
+                return False
+            if role == "monitor":
+                return r["simulations"] == r["reports"] == r["messages_sent"] == r["messages_received"] - 1 == c
+            if r["simulations"] != 0 or not (within(r["messages_sent"], m["sent"])
+                                             and within(r["messages_received"], m["received"])):
+                return False
+            return {"coordinator": r["messages_sent"] == c + 2 and 1 <= c <= r["messages_received"],
+                    "generator": takes[0] <= c <= takes[1],
+                    "evaluator": r["messages_sent"] == 2 * c and 1 <= c <= B}[role]
+        done = [r for r in rows if r["finished"]]
+        off = [r["agent_id"] for r in done if not planned(r)]
+        by: dict[str, dict] = {}
+        for r in rows:
+            if "campaign" in r:   # (not a population that ended before its agents were built)
+                by.setdefault(r["campaign"], {}).setdefault(r["role"], []).append(r)
+        whole = {c: x for c, x in by.items() if all(r["finished"] for rs in x.values() for r in rs)
+                 and all(role in x for role in ROLES) and len(x["monitor"]) == S}
+        e, m = exp["monitor"], msgs["monitor"]
+        once, survivors, running, waiting = [], [], [], []
+        for c, x in whole.items():
+            (co,), (ge,), (ev,), mons = x["coordinator"], x["generator"], x["evaluator"], x["monitor"]
+            total = [sum(r[k] for r in mons) for k in ("simulations", "messages_sent", "messages_received")]
+            if total != [e["sims"], m["sent"], m["received"]] or \
+                    ge["messages_received"] != (co["messages_sent"] - 2) + ev["messages_sent"] // 2 + 1 or \
+                    co["messages_received"] != ev["messages_sent"] // 2:
+                off += [r["agent_id"] for rs in x.values() for r in rs]
+            if not (co["candidates_distinct"] == B and co["candidate_max"] == B - 1 and co["candidates_repeated"] == 0):
+                once.append(c)
+            if co["survivors_max"] > o["population"]:
+                survivors.append(c)
+            if co["running_max"] > S:
+                running.append(c)
+            if co["waiting_max"] > take:
+                waiting.append(c)
+        return [*self._common_checks(rows, store, off, exp, msgs),
+                Check("each_candidate_evaluated_once", not once, {"candidates": B, "campaigns_checked": len(whole),
+                                                                  "not_once": once[:10]}),
+                Check("survivors_within_the_population", not survivors,
+                      {"most": o["population"], "over": survivors[:10]}),
+                Check("inner_loops_within_the_slots", not running, {"most": S, "over": running[:10]}),
+                Check("candidates_waiting_within_take", not waiting, {"most": take, "over": waiting[:10]})]
 
 
 class Script:
@@ -605,7 +766,24 @@ class Script:
     change no result in this mode:
     selection is the parent's, on the inner loop's numbers alone. AsyncFlow and RHAPSODY keep each evaluate
     task's returned record, trace included, and RHAPSODY a text copy of it (its `stdout`), until the
-    population ends, so the traces are held per population."""
+    population ends, so the traces are held per population.
+
+    In the asynchronous mode (campaign.mode: async) there is no generation and no barrier, and no agent makes
+    a model call yet: each repeats one cycle on what has arrived, its decisions decide.async_*'s pure
+    functions, its messages in the inboxes of the population's Mailbox (take_all):
+
+        Generator                   once no candidate waits on the queue: the next decide.TAKE profiles onto
+                                    it (candidates c0 .. c<B-1>); it waits only for its first survivors
+        Monitor (each free slot)    the next candidate, as in the generations mode
+        Monitor -> Evaluator        report        the result and the Monitor's numbers
+        Evaluator -> Coordinator    scored        each result that has arrived, with its q and score
+        Evaluator -> Generator      digest        their candidates and scores
+        Coordinator -> Generator    survivors     after each cycle: survival, survivors, best-so-far and log
+
+    then, once the budget's last result is in, done/G to the Generator and the Evaluator and the Coordinator's
+    Report; the Generator takes what is left for it and puts the Monitors' stops. The campaign's statistics
+    object also holds its window of the last outer.population scored results (the Evaluator's), and each trace
+    is labelled as its result is scored (`_label_async`)."""
 
     def __init__(self, definition: Fusion, pop) -> None:
         self.knobs, self.sim, self.out, self.pop = definition.knobs, definition.sim, definition.out, pop
@@ -628,6 +806,20 @@ class Script:
         self.numbers: dict[str, list] = {}       # each campaign's per-candidate Monitor numbers (record.extras)
         self.traced: Counter = Counter()         # the traces each Monitor got
         self.reports: Counter = Counter()        # the reports each Monitor sent
+        # the asynchronous mode: each agent's cycles, and per campaign its Coordinator's counts, the most
+        # survivors and inner loops running at once, the candidates evaluated (a bit each) and repeated, the
+        # Generator's waits for survivors, and with record.extras what a replay needs (`replay`)
+        self.asynchronous = decide.asynchronous(self.knobs)
+        self.B = decide.async_budget(self.knobs)
+        self.cycles: Counter = Counter()
+        self.tally: dict[str, dict] = {}
+        self.survivors_max: Counter = Counter()
+        self.running: Counter = Counter()
+        self.running_max: Counter = Counter()
+        self.seen: dict[str, int] = {}
+        self.repeated: Counter = Counter()
+        self.survivor_waits: Counter = Counter()
+        self.replay: dict[str, dict] = {}
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
@@ -659,19 +851,27 @@ class Script:
                 "todo": self.roles[role]["lookups"], "ctx": {}}
 
     async def step(self, s: dict, event, ask):
+        if self.asynchronous:
+            return await {"coordinator": self._coordinator_async, "generator": self._generator_async,
+                          "evaluator": self._evaluator_async, "monitor": self._monitor}[s["role"]](s, event, ask)
         return await {"coordinator": self._coordinator, "generator": self._generator,
                       "evaluator": self._evaluator, "monitor": self._monitor}[s["role"]](s, event, ask)
+
+    async def _begin(self, me: str) -> None:
+        """With agents.start_together, wait until every agent of the population has started, so every one is
+        live at once (the Coordinator's wait is recorded); then the campaign begins (`began`)."""
+        if self.together:
+            t = time.perf_counter()
+            with activity(AgentState.TOOL_WAIT):
+                await self.mail.all_started.wait()
+            self.start_wait[me] = round(time.perf_counter() - t, 6)
+        self.began[me] = time.time()
 
     async def _coordinator(self, s: dict, event, ask):
         me, campaign, phase = s["agent_id"], s["campaign"], s["phase"]
         run_dir = decide.campaign_dir(self.out, self.knobs, campaign)
         if phase == "start":
-            if self.together:   # every agent of the population started, so every one is live at once
-                t = time.perf_counter()
-                with activity(AgentState.TOOL_WAIT):
-                    await self.mail.all_started.wait()
-                self.start_wait[me] = round(time.perf_counter() - t, 6)
-            self.began[me] = time.time()
+            await self._begin(me)
             s, phase = {**s, "phase": "look"}, "look"
         if phase == "look":
             todo, ctx = s["todo"], s["ctx"]
@@ -736,7 +936,8 @@ class Script:
         call decide.evaluation_calls names, as the Evaluator submitted it before: the same results),
         suspended until it ends; then its trace, taken out of the result, scored against the campaign's
         statistics and held there for the barrier's label; its report (the result, `t0` and the numbers) to
-        the Evaluator; then the next candidate, until its stop."""
+        the Evaluator; then the next candidate, until its stop. In the asynchronous mode the report goes to the
+        Evaluator's inbox (take_all), and its trace is labelled when the Evaluator scores its result."""
         me, campaign = s["agent_id"], s["campaign"]
         if s["phase"] == "running":   # resumed: its candidate's inner loop ended
             if campaign in self.mail.failed:
@@ -746,12 +947,19 @@ class Script:
             numbers = None
             if tr is not None:
                 self.traced[me] += 1
-                stats = self.stats.get(campaign) or self.stats.setdefault(
-                    campaign, monitor.Rolling(self.knobs["campaign"]["warmup"], self.P))
+                stats = self._stats(campaign)
                 x = monitor.steps(tr)
                 stats.hold(call["generation"], call["candidate_idx"], x, bool(tr["synthetic"]))
                 numbers = stats.score(x)
-            self._send(me, "evaluator", "report", call["id"], {"result": result, "t0": call["t0"], "numbers": numbers})
+            if self.asynchronous:   # to the Evaluator's inbox, which takes every report that has arrived
+                self.running[campaign] -= 1
+                self._hook(me, call["id"])
+                self.mail.deliver(me, "evaluator", "report", {
+                    "candidate": call["candidate_idx"], "result": result, "t0": call["t0"], "source": call["source"],
+                    "m": numbers["m"] if numbers else None, "numbers": numbers})
+            else:
+                self._send(me, "evaluator", "report", call["id"],
+                           {"result": result, "t0": call["t0"], "numbers": numbers})
             self.reports[me] += 1
         call = await self.mail.take(me, QUEUE)
         if campaign in self.mail.failed:   # it failed after the item reached me: start no inner loop for it
@@ -759,7 +967,16 @@ class Script:
         if call is None:   # its stop: the campaign has ended
             return _state(s, "done"), Done()
         self.sims[me] += 1
-        return _state(s, "running", call={k: call[k] for k in ("id", "generation", "candidate_idx", "t0")}), \
+        keep = ("id", "generation", "candidate_idx", "t0")
+        if self.asynchronous:   # its cycle; each candidate's evaluations and the inner loops running, counted
+            keep += ("source",)
+            self.cycles[me] += 1
+            bit, seen = 1 << call["candidate_idx"], self.seen.get(campaign, 0)
+            self.repeated[campaign] += bool(seen & bit)
+            self.seen[campaign] = seen | bit
+            self.running[campaign] += 1
+            self.running_max[campaign] = max(self.running_max[campaign], self.running[campaign])
+        return _state(s, "running", call={k: call[k] for k in keep}), \
             Simulate({"params": call["params"], "candidate_idx": call["candidate_idx"],
                       "generation": call["generation"], "seed": s["seed"]}, call_id=call["id"])
 
@@ -800,6 +1017,152 @@ class Script:
                  "label": None if i not in label else "good" if label[i] else "bad",
                  "label_from": None if i not in label else "trace_end_synthetic" if i in label_q else "q"}
                 for i in range(len(results)))
+
+    # --- the asynchronous mode (campaign.mode: async): each agent's cycle, its decisions decide.async_* ------
+
+    async def _coordinator_async(self, s: dict, event, ask):
+        """Its start and lookups as in the generations mode; then its cycle until the budget's last result is
+        in: every scored message that has arrived (waiting for one), their results in arrival order
+        (decide.async_on_scored: survival, the survivors, best-so-far, the log), the newest survivors to the
+        Generator, and its memory; at the end done to the Generator and the Evaluator, and its Report (no
+        summary call in this mode)."""
+        me, campaign, phase = s["agent_id"], s["campaign"], s["phase"]
+        run_dir = decide.campaign_dir(self.out, self.knobs, campaign)
+        if phase == "start":
+            await self._begin(me)
+            s, phase = {**s, "phase": "look"}, "look"
+        if phase == "look":
+            todo, ctx = s["todo"], s["ctx"]
+            if event is not None:                               # the previous lookup's result
+                todo, ctx = todo[1:], {**ctx, todo[0]: event}
+            if todo:
+                return {**s, "todo": todo, "ctx": ctx}, Lookup(todo[0])
+            cst = decide.async_coordinator_state(campaign, s["seed"], self.knobs, ctx, s["t_start"])
+            decide.start(cst, self.knobs, run_dir, self.sim)   # config.json (outer.logs)
+            s, phase = _state(s, "cycle", cst=cst), "cycle"
+        if phase == "cycle":
+            scored = [x for msg in await self.mail.take_all(me, "scored") for x in msg["results"]]
+            cst, rows = decide.async_on_scored(s["cst"], scored, self.knobs, run_dir)
+            self.cycles[me] += 1
+            self.tally[campaign] = {"results_scored": cst["arrived"], "results_kept": cst["kept"],
+                                    "results_scored_after_warmup": cst["scored_after_warmup"],
+                                    "results_kept_after_warmup": cst["kept_after_warmup"]}
+            self.survivors_max[campaign] = max(self.survivors_max[campaign], len(cst["survivors"]))
+            replay = self._replay(campaign)
+            if replay is not None:
+                replay["coordinator"].append([x["candidate"] for x in scored])
+                replay["results"] += rows
+                replay["survivors"] = [x["candidate"] for x in cst["survivors"]]
+            self._hook(me, self.cycles[me] - 1)
+            self.mail.deliver(me, "generator", "survivors", decide.async_survivors(cst))
+            return _state(s, "cycle" if cst["arrived"] < self.B else "ending", cst=cst), \
+                Remember(decide.async_memory(cst))
+        if phase == "ending":
+            for to in ("generator", "evaluator"):
+                self._send(me, to, "done", self.G, None)
+            return _state(s, "reporting"), Report(decide.async_finish(s["cst"], run_dir))
+        if phase == "reporting":
+            return s, Done()
+        raise ValueError(f"unknown phase {phase!r}")
+
+    async def _generator_async(self, s: dict, event, ask):
+        """Its lookups; then (with agents.start_together, once every agent of its population has started) its
+        cycle until the budget's candidates are made: once no candidate waits on the campaign's queue, the
+        survivors and digests that have arrived (taken without waiting), its first survivors if the take needs
+        one and none has come (its only wait), and the next decide.TAKE profiles onto the queue (`t0`: when they
+        were put there). Then done, every message still left for it, and one stop on the queue per Monitor."""
+        me, campaign, todo, ctx = s["agent_id"], s["campaign"], s["todo"], s["ctx"]
+        if event is not None:
+            todo, ctx = todo[1:], {**ctx, todo[0]: event}
+        if todo:
+            return {**s, "todo": todo, "ctx": ctx}, Lookup(todo[0])
+        if self.together:
+            with activity(AgentState.TOOL_WAIT):
+                await self.mail.all_started.wait()
+        gst, replay = decide.async_generator_state(campaign, s["seed"], self.knobs), self._replay(campaign)
+        while gst["made"] < self.B:
+            await self.mail.emptied(me, QUEUE)
+            gst = decide.async_on_survivors(gst, await self.mail.take_all(me, "survivors", wait=False))
+            await self.mail.take_all(me, "digest", wait=False)   # read; no model call reads them yet
+            if decide.async_waits(gst, self.knobs):
+                self.survivor_waits[me] += 1
+                gst = decide.async_on_survivors(gst, await self.mail.take_all(me, "survivors"))
+            gst, calls = decide.async_profiles(gst, self.knobs)
+            self._hook(me, self.cycles[me])
+            t0 = time.time()
+            for call in calls:
+                self.mail.put(me, QUEUE, {**call, "t0": t0})
+            if replay is not None:
+                replay["held"] += [gst["held"]] * len(calls)
+            self.cycles[me] += 1
+        await self.mail.receive(me, "done", self.G)
+        for kind in ("survivors", "digest"):   # all sent before done
+            await self.mail.take_all(me, kind, wait=False)
+        for _ in range(self.slots):
+            self.mail.put(me, QUEUE, None)
+        return s, Done()
+
+    async def _evaluator_async(self, s: dict, event, ask):
+        """Its cycle until the budget's results are scored: every report that has arrived (waiting for one),
+        scored in arrival order against the campaign's window, which its statistics hold
+        (decide.async_evaluate), each trace labelled (`_label_async`); the scored results to the Coordinator
+        and a digest to the Generator. Then done."""
+        me, campaign = s["agent_id"], s["campaign"]
+        scored_n, replay = 0, self._replay(campaign)
+        while scored_n < self.B:
+            reports = await self.mail.take_all(me, "report")
+            stats = self._stats(campaign)
+            stats.recent, scored, digest = decide.async_evaluate(stats.recent, reports, self.knobs)
+            for r, sc in zip(reports, scored):
+                self._label_async(campaign, stats, r, sc)
+            scored_n += len(scored)
+            self._hook(me, self.cycles[me])
+            self.mail.deliver(me, "coordinator", "scored", {"results": scored})
+            self.mail.deliver(me, "generator", "digest", digest)
+            if replay is not None:
+                replay["evaluator"].append([sc["candidate"] for sc in scored])
+            self.cycles[me] += 1
+        await self.mail.receive(me, "done", self.G)
+        return s, Done()
+
+    def _label_async(self, campaign: str, stats: monitor.Rolling, report: dict, sc: dict) -> None:
+        """As a result is scored, its trace (held by its Monitor) joins the campaign's good side when q is 0.5
+        or more, else the bad side; a synthetic trace (the fixture's) is labelled instead from its own end
+        values among the window's synthetic traces, it last (monitor.end_keep), marked synthetic. With
+        record.extras, the candidate's numbers, q and label, for its campaign's line."""
+        k = sc["candidate"]
+        held, label, label_from = stats.take_one(k // self.P, k), None, None
+        if held is not None:
+            x, synthetic = held
+            if synthetic:
+                label = monitor.end_keep([e for e in stats.ends if e is not None] + [x[-1:]])[-1] >= 0.5
+                label_from = "trace_end_synthetic"
+            else:
+                label, label_from = sc["q"] >= 0.5, "q"
+            stats.add(x, label)
+        stats.ends = (stats.ends + [held[0][-1:] if held is not None and held[1] else None])[-self.P:]
+        if self.extras:
+            self.numbers.setdefault(campaign, []).append(
+                {"generation": k // self.P, "candidate_idx": k, "q": round(sc["q"], 6), **(report["numbers"] or {}),
+                 "label": None if label is None else "good" if label else "bad", "label_from": label_from})
+
+    def _stats(self, campaign: str) -> monitor.Rolling:
+        """The campaign's statistics object, made by whichever agent needs it first."""
+        return self.stats.get(campaign) or self.stats.setdefault(
+            campaign, monitor.Rolling(self.knobs["campaign"]["warmup"], self.P))
+
+    def _replay(self, campaign: str) -> dict | None:
+        """With record.extras, what a replay of the campaign needs, for its line: the order results reached the
+        Evaluator and the Coordinator (one list per cycle), the survivors message held at each profile, each
+        result's row (decide.async_on_scored) and the survivors at the end."""
+        if not self.extras:
+            return None
+        return self.replay.get(campaign) or self.replay.setdefault(
+            campaign, {"evaluator": [], "coordinator": [], "held": [], "results": [], "survivors": []})
+
+    def _hook(self, me: str, tag) -> None:
+        if self.fail_at == f"{me}:{tag}":   # the tests' injected failure (FAIL_ENV)
+            raise InjectedFailure(f"{me} failed before its sends of {tag} ({FAIL_ENV})")
 
     def _send(self, me: str, to: str, kind: str, g: int, value) -> None:
         if self.fail_at == f"{me}:{g}":   # the tests' injected failure (FAIL_ENV)
@@ -845,6 +1208,8 @@ class Script:
         self.reported.add(campaign)
         self.llm_calls[campaign] = result["n_llm_calls"]
         extras = {"monitor": self.numbers.pop(campaign, [])} if self.extras else {}   # record.extras: outside the digest
+        if self.extras and self.asynchronous:   # each result's row, and what a replay needs
+            extras["asynchronous"] = self.replay.pop(campaign, {})
         self._line({**result, "llm_call_details": self.calls.pop(campaign, []), **extras})
 
     def on_call(self, rec, reply: Reply) -> None:
@@ -876,6 +1241,7 @@ class Script:
                 self._line({"agent_id": campaign, "error": result.error or result.status,
                             "role": role_of(result.id), "llm_call_details": self.calls.pop(campaign, [])})
                 self.numbers.pop(campaign, None)
+                self.replay.pop(campaign, None)
             self.mail.fail(campaign, f"{result.id} failed: {result.error}")
 
     def _line(self, line: dict) -> None:
@@ -1089,7 +1455,8 @@ def load_knobs(a: argparse.Namespace) -> dict:
     """As run.py loads them."""
     knobs = knob_files.load(preset=a.preset, paths=a.knobs)
     over = {"agents": {"count": a.agents} if a.agents is not None else {}, "llm": {"mode": a.llm} if a.llm else {}}
-    knobs = knob_files.validate({**knobs, **{s: {**knobs[s], **v} for s, v in over.items()}})
+    knobs = knob_files.validate({**knobs, **{s: {**knobs[s], **v} for s, v in over.items()}},
+                                modes=("generations", "async"))   # the asynchronous mode runs on this layer only
     if knobs["llm"]["mode"] == "openai" and knobs["llm"]["model"] == "stub":
         raise knob_files.KnobError('llm.mode is openai but llm.model is still "stub"; set llm.model in a knob file')
     return knobs
@@ -1343,11 +1710,15 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     stats_file = Path(a.out) / "populations" / f"p{index:03d}" / "population.json"
     stats = json.loads(stats_file.read_text()) if stats_file.exists() else {}
     runner, local = stats.get("runner") or {}, a.runtime == "local"
-    return {
+    survival = {"survival": {k: sum(r["survival"][k] for r in done) for k in ASYNC_COUNTS}} \
+        if decide.asynchronous(knobs) else {}   # the reported campaigns' results scored and kept
+    return {**survival,
         "agents_file": str(lines_file), "llm_service": llm_service(knobs, lines),
         "tool_calls": dict(Counter(what for _ in done for what in decide.lookups(knobs))),
         "sim_tasks": runner.get("simulations", sum(r["n_sims"] for r in done)),
-        "memory_writes": sum(len(r["generations"]) for r in done), "reports": len(done),
+        # one memory write per generation, or per Coordinator cycle in the asynchronous mode
+        "memory_writes": sum(r["n_cycles"] if "n_cycles" in r else len(r["generations"]) for r in done),
+        "reports": len(done),
         "layer": {"layer": "autonmi", "population": index, "runtime": a.runtime, "complete": bool(stats),
                   "suspensions": runner.get("suspensions"), "runner": runner, "tasks": stats.get("tasks"),
                   "outcomes": stats.get("outcomes"), "wall_s": stats.get("wall_s"),
@@ -1467,6 +1838,21 @@ def by_role(rows: list[dict]) -> dict:
                                                                      "reports")},
                      "message_wait_s": {"sum": round(sum(waits), 3), **record._pct(waits)}}
     return out
+
+
+ASYNC_COUNTS = ("results_scored", "results_kept", "results_scored_after_warmup", "results_kept_after_warmup")
+
+
+def asynchronous_counts(parts: list[dict], rows: list[dict]) -> dict:
+    """counts.asynchronous: the results scored and kept, in all and after warm-up (campaign.warmup: the first
+    results are kept whatever their score), of the campaigns that reported (their lines, as counts.sims);
+    and from AUTONMI's rows each role's cycles and the Generators' waits for their first survivors (None
+    without rows: a population the run's interruption cancelled writes none)."""
+    out = {k: sum(p["survival"][k] for p in parts) for k in ASYNC_COUNTS}
+    if not rows:
+        return {**out, "cycles": None, "survivor_waits": None}
+    return {**out, "cycles": {role: sum(r.get("cycles") or 0 for r in rows if r.get("role") == role) for role in ROLES},
+            "survivor_waits": sum(r.get("survivor_waits") or 0 for r in rows if r.get("role") == "generator")}
 
 
 def begin_margin_s(rows: list[dict]) -> float | None:
@@ -1643,6 +2029,9 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                          roles=list(ROLES), by_role=by_role(rows),
                          expected_by_role={role: {**e, "lookups": len(e["lookups"]), **messages(knobs)[role]}
                                            for role, e in decide.expected_by_role(knobs).items()})
+    if decide.asynchronous(knobs):   # the mode, and its counts
+        rec["campaign_mode"] = "async"
+        rec["counts"]["asynchronous"] = asynchronous_counts(parts, rows)
     rec["speed"].update(decoding_metric(knobs, out, rec, summary, refs, live, rows))
     waits = [r["start_wait_s"] for r in rows if r.get("start_wait_s") is not None]
     rec["speed"]["start_together"] = {"on": knobs["agents"]["start_together"], "coordinator_wait_s": record._pct(waits),

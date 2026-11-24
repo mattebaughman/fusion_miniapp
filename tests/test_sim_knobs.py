@@ -49,7 +49,8 @@ def test_partial_file_merges_over_smoke(tmp_path):
     ({"monitor": {"fixture_trace": "random"}}, "monitor.fixture_trace must be one of"),
     ({"monitor": {"weight": 1.5}}, "monitor.weight must be in [0, 1]"),
     ({"campaign": {"slots": 0}}, "campaign.slots must be in [1, inf]"),
-    ({"campaign": {"mode": "async"}}, "campaign.mode must be one of ['generations']"),
+    ({"campaign": {"mode": "steady"}}, "campaign.mode must be one of ['generations', 'async']"),
+    ({"campaign": {"mode": "async"}}, "campaign.mode async is not run by this layer"),   # (run.py's layers)
     ({"campaign": {"warmup": 0}}, "campaign.warmup must be in [1, inf]"),
     ({"record": {"extras": "yes"}}, "record.extras must be true or false"),
 ])
@@ -77,3 +78,14 @@ def test_load_errors(tmp_path):
     assert (base["campaign"], base["record"]) == ({"slots": 2, "mode": "generations", "warmup": 4}, {"extras": False})
     with pytest.raises(KnobError, match="'monitor' section as a dict"):
         knobs.monitor_section([1, 2])
+
+
+def test_the_asynchronous_mode_is_the_autonmi_layers(tmp_path):
+    """campaign.mode async loads, and validate takes it only from a caller that runs it (the AUTONMI layer's
+    modes); run.py's layers, which call validate as it is, refuse it."""
+    (tmp_path / "a.yaml").write_text("campaign: {mode: async}\n")
+    k = knobs.load(tmp_path / "a.yaml")
+    assert k["campaign"]["mode"] == "async"
+    assert knobs.validate(k, modes=("generations", "async"))["campaign"]["mode"] == "async"
+    with pytest.raises(KnobError, match="runs on the AUTONMI layer"):
+        knobs.validate(k)

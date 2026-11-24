@@ -146,7 +146,8 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
 ```
 
 - **The same campaigns.** Each campaign is `decide.py`'s three roles, with Monitor slots that run the
-  inner loops, and the parent's whole-generation selection on the inner loop's numbers alone. Its results are
+  inner loops, and (in the default `campaign.mode: generations`) the parent's whole-generation selection on
+  the inner loop's numbers alone. Its results are
   the other layers' results at any `campaign.slots`: `results_sha256` is the same, and so are the parent's
   per-campaign files.
 - **3 + `campaign.slots` agents per campaign** (5 by default). On this layer each role is a hosted AUTONMI
@@ -155,11 +156,12 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   and end, row in AUTONMI's records (`app/agents-p*.jsonl`), model calls (under its own id, so its own
   routing and call records) and lookups. They share one AUTONMI agent definition, so they share its list of
   actions and one model-call limit (the largest role's); fusion checks each role's exact counts (the
-  Monitors' together per campaign). Model calls are whole replies: no token streaming, and no tools chosen
-  by a model.
+  Monitors' together per campaign; bounds in the asynchronous mode). Model calls are whole replies: no token
+  streaming, and no tools chosen by a model.
   - They talk only through messages, JSON copies kept in a mailbox per population
     (`layer_autonmi.Mailbox`) under the key `a<i>/<to>/<kind>/<g>`, and through each campaign's candidate
-    queue (`a<i>/candidates`: the Generator puts, a free Monitor takes the next item). Each generation:
+    queue (`a<i>/candidates`: the Generator puts, a free Monitor takes the next item). Each generation (in
+    the generations mode; the asynchronous mode is below):
     Coordinator -> Generator `make/g`; Generator -> Coordinator `population/g`, and the generation's P
     candidates onto the queue; each Monitor that takes one -> Evaluator `report/<call id>` (the result and
     the Monitor's numbers); Evaluator -> Coordinator `results/g`, the P results in candidate order once all
@@ -192,11 +194,12 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
     ended normally, model calls, lookups, messages sent, received and dropped (a failed campaign's messages
     not yet received), suspensions, evaluations, traces, Monitor reports (one per inner loop) and each
     agent's seconds waiting for messages. `counts.llm_calls` keeps
-    counting the outer loop's calls. AUTONMI's checks include each role's exact counts, every message
+    counting the outer loop's calls. AUTONMI's checks include each role's exact counts (bounds in the
+    asynchronous mode), every message
     received once with none left, the lookups against AUTONMI's own count, and the store at the end
     (`store_holds_only_the_memories`: no agent's saved state, each reported campaign's memory under
     `campaign/a<i>`).
-- **The Monitor slots** (`campaign.slots`, default 2; `campaign.mode: generations`, the only mode so far).
+- **The Monitor slots** (`campaign.slots`, default 2), in both modes.
   Each Monitor takes the next candidate from its campaign's queue and runs its inner loop as one suspending
   `evaluate` task tool, with the same arguments and call id as before (so the same results); the slots run a
   generation's P candidates `slots` at a time (16: a generation of 16 at once). It then scores the
@@ -211,7 +214,7 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   follow a hash unrelated to its trace, the label comes from the trace's own end values (the wall at its last
   step, ranked as the parent ranks the wall term) and is marked synthetic. In this mode the Monitor's numbers
   change no result: selection is the parent's, on the inner loop's numbers alone (`monitor.weight` is for
-  the asynchronous mode, not built yet). The record counts the Monitor reports; each candidate's numbers,
+  the asynchronous mode, below). The record counts the Monitor reports; each candidate's numbers,
   `q` and label are written only with `record.extras: true`, as `monitor` in its campaign's line in
   `agents.jsonl`, outside `results_sha256`.
   - Its cost, measured on a laptop on AC power (2026-11-24; hundredk shape, fixture, stub at 1 ms, one
@@ -221,6 +224,49 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
     8,872 MiB against 652, 2,189 and 8,221 MiB. The extra time is
     the event loop's: one suspension, one queue item and one report per inner loop instead of one fan-out
     per generation, on the thread that shares Python's lock with the fixture's evaluation threads.
+- **The asynchronous mode** (`campaign.mode: async`; the AUTONMI layer only, `run.py`'s layers refuse it).
+  No generations and no barrier: each agent repeats one cycle on what has arrived, its decisions pure
+  functions of its state and what arrived (`decide.async_*`). For now no agent makes a model call, whatever
+  `llm.mode` says: each decides on numbers alone, the path that becomes each role's fallback once the calls
+  are added.
+  - **Generator:** once no candidate waits on the campaign's queue, it puts the next 2 of the P x G
+    candidates on it (numbered 0 to P x G - 1 as made). The first P are the parent's `initialize_population`;
+    each later one is the parent's `mutate_params` of a survivor chosen at random, from stream 0, from the
+    newest survivors it holds. Its only wait is for its first survivors, when candidate P is due.
+  - **Monitor slots:** as above; each report goes to the Evaluator's inbox (`Mailbox.take_all` takes every
+    message that has arrived).
+  - **Evaluator:** every report that has arrived, in arrival order: `q`, the parent's keep-probability of
+    the result among the campaign's last P scored results and itself (`decide.keep_probabilities`; the
+    window is kept in the campaign's statistics object), and its score, q + `monitor.weight` x m, clipped
+    to 0..1. The trace is labelled good when q is 0.5 or more (the fixture's from its own end values,
+    synthetic). The scores go to the Coordinator, a digest to the Generator.
+  - **Coordinator:** every scored result that has arrived: kept when its draw from stream 1 is below its
+    score, and always for the first `campaign.warmup`; at most P survivors, the oldest leaving; best-so-far
+    by the parent's `update_best_result` over the window and the result, their top-ranked as its survivor;
+    one parent `log_generation` row per result, its arrival number as the generation. Then the newest
+    survivors to the Generator. After the last result: `done` and its report, with no summary call.
+  - It always uses the two random streams of `outer.rng: per_agent`. A campaign's line has no generations
+    (`counts.generations` is 0): beside each evaluation's `sim_s` and `wait_s` it has its submission time
+    (`t_submit`, where the generations mode has one `t0` per generation), and the counts `n_cycles` and
+    `survival`.
+  - **Results differ from run to run** with the order of arrival. One order, one seed and the Monitors' m
+    give one campaign; at `monitor.weight` 0 the order and the seed alone. (Each m is scored against the
+    trace statistics as they stand when its inner loop ends, so it too follows the interleaving.) The tests
+    replay recorded orders and m through the pure functions. AUTONMI's checks are its
+    invariants: P x G evaluations per campaign, each candidate once, every message received, at most P
+    survivors, `campaign.slots` inner loops running and 2 candidates waiting; each role's messages are
+    bounds tied to its cycles (`layer_autonmi.messages`). The record marks the mode (`campaign_mode`) and
+    counts the results scored and kept and each role's cycles (`counts.asynchronous`; the cycles are null
+    after SIGTERM, which leaves no agent rows); with `record.extras`
+    each campaign's line also has each result's arrival number, q, m, score, draw and kept flag, and the
+    orders a replay needs. `compare_records` compares two such records on their counts and invariants,
+    not their digests.
+  - Measured on a laptop on AC power (2026-11-24; hundredk shape, fixture, stub, one population): 500,
+    2,000 and 10,000 campaigns took 21.8 s, 86.6 s and 445.8 s, against 17.9 s, 69.0 s and 359.0 s in the
+    generations mode on the same code (1.22 to 1.26 times; 760 to 795 evaluations per second against 960 to
+    1,000), with peak memory 621, 2,096 and 8,428 MiB against 709, 2,449 and 9,220 MiB. About half of the
+    results scored after warm-up were kept: 49.8% at `monitor.weight` 0 (500 campaigns) and 50.0 to 50.7% at
+    0.25 (500 to 10,000).
 - **What runs the campaigns is AUTONMI's.** The campaigns are split into populations
   (`--populations`; by default one per agent process of `run.py`), each an AsyncFlow node with an engine
   of its own for its simulations.
@@ -335,9 +381,16 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   with a cap), the mailbox's own contract, that the ids seen outside the agents are the campaign's, and that
   an injected Generator, Evaluator or Monitor failure (`FUSION_AUTONMI_FAIL=<agent id>:<g>`, a Monitor's
   `<g>` its candidate's call id `g<g>c<i>`; tests only) ends its campaign alone, as one error line with every
-  role's model calls. The model server is
-  `tests/fake_vllm.py`, a FIXTURE (not a model) standing in for a vLLM server; `tests/test_decode_metric.py`
-  checks the metric's arithmetic against brute-force recounts.
+  role's model calls. In the asynchronous mode it checks the invariants and the record's counts, a replay
+  of each campaign's recorded orders through the pure functions (`tests/async_replay.py`; the run's arrivals
+  are reordered on purpose, so results arrive out of candidate order and a Coordinator cycle takes several
+  Evaluator cycles), the inboxes' own contract, the trace labels, no model call with `llm.mode: openai`,
+  that verify() catches each broken invariant, a failure of each role, SIGTERM, odd shapes and the other
+  layers' refusal;
+  `tests/test_async.py` checks the mode's rule itself (q against the parent's `select_survivors`, survival,
+  warm-up, the Generator's profiles, one order, one seed and the Monitors' m giving one campaign). The model
+  server is `tests/fake_vllm.py`, a FIXTURE (not a model) standing in for a vLLM server;
+  `tests/test_decode_metric.py` checks the metric's arithmetic against brute-force recounts.
   Both layers' runs are also compared with references recorded from the LangGraph layer
   (`tests/references/*.json`: results_sha256, each campaign's hash, counts, parent files and model
   requests, with the commit, command and date that made them). `python tests/references/record_references.py`
@@ -508,13 +561,13 @@ One YAML file with nine sections. A preset and any number of knob files are merg
 |---|---|
 | `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`; sets OMP, OpenBLAS, MKL and torch threads) |
 | `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer: generation 0 waits until every hosted agent of the population has started; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
-| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
+| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub or openai), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server) |
 | `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one) |
-| `monitor` | `capture` (each evaluation's record carries the inner-loop trace; the AUTONMI layer only; default true), `fixture_trace` (`smooth` or `hash`: the fixture's synthetic trace), `weight` (the Monitor's `m` in a result's score in the asynchronous mode, not built yet; default 0.25). Added instrumentation, not in IGNOS; no result reads it |
-| `campaign` | the AUTONMI layer: `slots` (Monitor agents per campaign; default 2), `mode` (`generations`: the parent's generation barrier), `warmup` (traces each side holds before the Monitor's `m` is not 0; default 4). In this mode no result depends on them |
-| `record` | `extras` (each candidate's Monitor numbers in its campaign's line; default false: counts only) |
+| `monitor` | `capture` (each evaluation's record carries the inner-loop trace; the AUTONMI layer only; default true), `fixture_trace` (`smooth` or `hash`: the fixture's synthetic trace), `weight` (the Monitor's `m` in a result's score in the asynchronous mode; default 0.25). Added instrumentation, not in IGNOS; no result of the generations mode reads it |
+| `campaign` | the AUTONMI layer: `slots` (Monitor agents per campaign; default 2), `mode` (`generations`, the default: the parent's generation barrier; `async`: each result applied as it arrives, the AUTONMI layer only, no model calls yet), `warmup` (traces each side holds before the Monitor's `m` is not 0, and in the asynchronous mode the first results kept whatever their score; default 4). In the generations mode no result depends on them |
+| `record` | `extras` (each candidate's Monitor numbers in its campaign's line, and in the asynchronous mode each result's row and the orders a replay needs; default false: counts only) |
 
 | Preset | Campaigns | P | G | Simulations per campaign | Simulations in all | Notes |
 |---|---|---|---|---|---|---|

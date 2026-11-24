@@ -15,6 +15,14 @@ unlike digests are unverifiable and fail. Suspensions are compared only between 
 (Academy has none), and on the AUTONMI layer not between a record from before its Monitor slots and one
 from after (same_suspensions). Speed numbers are compared within --tol and reported, never failed on.
 Exit 0 when the results agree.
+
+Two records of the asynchronous mode (campaign.mode: async) are not compared on their results: those differ
+from run to run with the order of arrival, so results_sha256, the campaigns and the counts that follow from
+the results (feasible_agents, memory_writes: one per Coordinator cycle, and counts.asynchronous's kept and
+cycles) are left out. They agree when both pass (which includes AUTONMI's checks of the mode's invariants:
+P x G evaluations per campaign, each candidate once, every message received, the survivors, inner loops and
+candidates waiting within their bounds), their knobs agree, and so do the other exact counts and the results
+scored (counts.asynchronous.results_scored).
 """
 from __future__ import annotations
 
@@ -35,6 +43,7 @@ ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False, ("ca
                ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25}
 EXACT_COUNTS = ("agents", "agents_requested", "agents_failed", "sims", "llm_calls", "tool_calls", "generations",
                 "candidates_by_source", "refill_slots", "sim_tasks", "memory_writes", "reports", "feasible_agents")
+ASYNC_VARY = ("feasible_agents", "memory_writes")   # counts that follow the order of arrival in the asynchronous mode
 SPEED = (("campaigns_live", "max"), ("campaigns_live", "mean"), ("agent_phase_s",), ("rates_per_s", "evaluations"),
          ("rates_per_s", "model_calls"), ("sims_in_flight", "max"), ("sims_executing", "max"), ("sim_s", "p50"),
          ("queue_wait_s", "p95"), ("generation_s", "p95"), ("model_latency_s", "p95"), ("sim_bound_ratio",),
@@ -105,6 +114,11 @@ def _verify(rec: dict, lines) -> list[str]:
     return out
 
 
+def asynchronous(rec: dict) -> bool:
+    """Whether a record is of the asynchronous mode (its knobs say so; older records are not)."""
+    return (rec.get("knobs", {}).get("campaign") or {}).get("mode") == "async"
+
+
 def same_suspensions(a: dict, b: dict) -> bool:
     """Whether two runs suspend alike: the same layer and, on the AUTONMI layer, both from before the Monitor
     slots or both from after (2026-11-24: one suspension per generation before, one per inner loop after; a
@@ -123,7 +137,12 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
             bad.append(f"the {name} run's status is {r.get('status')!r}, not 'pass'")
         if r.get("touch_check", {}).get("fail") or r.get("llm_check", {}).get("fail"):
             bad.append(f"the {name} run has failed touch or model checks")
-    if a.get("results_sha256") != b.get("results_sha256"):
+    both_async = asynchronous(a) and asynchronous(b)   # counts and invariants, not results (the docstring)
+    if both_async:
+        x, y = (_get(r["counts"], ("asynchronous", "results_scored")) for r in (a, b))
+        if x != y:
+            bad.append(f"counts.asynchronous.results_scored: {x} != {y}")
+    elif a.get("results_sha256") != b.get("results_sha256"):
         agents_a, agents_b = (None if x is None else list(x) for x in
                               (x() if callable(x) else x for x in (agents_a, agents_b)))
         problems = [f"the {name} run's agents.jsonl: {p}" for name, rec, lines in
@@ -133,6 +152,8 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
     if same_suspensions(a, b) and a["counts"].get("suspensions") != b["counts"].get("suspensions"):
         bad.append(f"counts.suspensions: {a['counts'].get('suspensions')} != {b['counts'].get('suspensions')}")
     for k in EXACT_COUNTS:
+        if both_async and k in ASYNC_VARY:
+            continue
         if a["counts"].get(k) != b["counts"].get(k):
             bad.append(f"counts.{k}: {a['counts'].get(k)} != {b['counts'].get(k)}")
     for section in sorted(set(a["knobs"]) | set(b["knobs"])):

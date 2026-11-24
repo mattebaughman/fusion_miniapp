@@ -36,6 +36,9 @@ The Generator (knob outer.generator):
   proposes candidates for the slots repopulate filled with mutants (or with a restart sample). Each parsed
   proposal overwrites the mutable values of one of those, in order; the rest of its parameters stay. This
   is the seam evo_agents.py names: "a directed proposer ... can replace random repopulation".
+
+The AUTONMI layer's asynchronous mode (campaign.mode: async, the end of this file) has no generations: each
+agent's cycle on the results as they arrive, with the same parent functions.
 """
 from __future__ import annotations
 
@@ -118,8 +121,11 @@ def sim_knobs(knobs: dict, seed: int) -> dict:
 
 
 def expected(knobs: dict) -> dict:
-    """Per campaign: evaluations, and model calls when every refill has a slot to fill."""
+    """Per campaign: evaluations, and model calls when every refill has a slot to fill (none in the
+    asynchronous mode, which makes no model calls yet)."""
     o = knobs["outer"]
+    if asynchronous(knobs):
+        return {"sims": async_budget(knobs), "llm_calls": 0}
     refills = o["generations"] - 1 if o["generator"] == "llm" and o["population"] > 1 else 0
     return {"sims": o["population"] * o["generations"], "llm_calls": refills + 1}
 
@@ -136,6 +142,11 @@ def expected_by_role(knobs: dict) -> dict:
     refill with no slot to fill is not called) and lookups (their names, in order)."""
     exp, mine = expected(knobs), lookups(knobs)
     by = {role: [w for w in mine if LOOKUP_ROLE[w] == role] for role in ("coordinator", "generator")}
+    if asynchronous(knobs):   # no model calls in this mode yet, and no summary call
+        return {"coordinator": {"sims": 0, "llm_calls": 0, "lookups": by["coordinator"]},
+                "generator": {"sims": 0, "llm_calls": 0, "lookups": by["generator"]},
+                "evaluator": {"sims": 0, "llm_calls": 0, "lookups": []},
+                "monitor": {"sims": exp["sims"], "llm_calls": 0, "lookups": []}}
     return {"coordinator": {"sims": 0, "llm_calls": 1, "lookups": by["coordinator"]},
             "generator": {"sims": 0, "llm_calls": exp["llm_calls"] - 1, "lookups": by["generator"]},
             "evaluator": {"sims": 0, "llm_calls": 0, "lookups": []},
@@ -366,7 +377,9 @@ def campaign_config(cst: dict, knobs: dict, sim: str) -> dict:
             "conditioned_ckpt": stand_in, "conditioned_ckpt_sha256": None, "conditioned_yaml": stand_in,
             "conditioned_yaml_sha256": None, "conditioned_config_name": stand_in, **_provenance(),
             "driver": "fusion_miniapp", "sim": sim, "sim_knobs": s, "rng": o["rng"], "generator": o["generator"],
-            "emulated": True, "note": "all physics output is synthetic (random-weight stand-in models)"}
+            "emulated": True, "note": "all physics output is synthetic (random-weight stand-in models)",
+            # the asynchronous mode always has the two random streams, and its own Generator (no model call)
+            **({"rng": "per_agent", "generator": "mutation", "campaign_mode": "async"} if asynchronous(knobs) else {})}
 
 
 def start(cst: dict, knobs: dict, run_dir, sim: str = "real") -> dict:
@@ -415,19 +428,22 @@ def collect(population: list[dict], results: list[dict]) -> list[dict]:
     return out
 
 
-def keep_probabilities(evaluated: list[dict], wall_weight: float) -> list[float]:
-    """For each result of a set (as the parent's selection takes a generation: native values, in order), the
-    probability that the parent's select_survivors keeps it, ranked as it ranks them: when any meets the
-    constraints (is_good), those alone by te_core_metric (its own sort), else all by its _rank_infeasible.
-    The best 1, the worst 0, the others 1 - rank / (n - 1); one it does not rank 0. It draws nothing."""
-    evo = parent()
+def ranked(evaluated: list[dict], wall_weight: float) -> list[dict]:
+    """A set of results in the order the parent's select_survivors ranks them: when any meets the constraints
+    (is_good), those alone by te_core_metric (its own sort), else all by its _rank_infeasible."""
     good = [e for e in evaluated if e["is_good"]]
     if good:
-        ranked = sorted(good, key=lambda e: e["te_core_metric"], reverse=True)
-    else:
-        ranked = evo._rank_infeasible(evaluated, wall_weight) if evaluated else []
-    n, at, q = len(ranked), {id(e): i for i, e in enumerate(evaluated)}, [0.0] * len(evaluated)
-    for rank, e in enumerate(ranked):
+        return sorted(good, key=lambda e: e["te_core_metric"], reverse=True)
+    return parent()._rank_infeasible(evaluated, wall_weight) if evaluated else []
+
+
+def keep_probabilities(evaluated: list[dict], wall_weight: float) -> list[float]:
+    """For each result of a set (as the parent's selection takes a generation: native values, in order), the
+    probability that the parent's select_survivors keeps it, ranked as it ranks them (`ranked`). The best 1,
+    the worst 0, the others 1 - rank / (n - 1); one it does not rank 0. It draws nothing."""
+    ranked_ = ranked(evaluated, wall_weight)
+    n, at, q = len(ranked_), {id(e): i for i, e in enumerate(evaluated)}, [0.0] * len(evaluated)
+    for rank, e in enumerate(ranked_):
         q[at[id(e)]] = 1.0 if rank == 0 or n <= 1 else 1.0 - rank / (n - 1)
     return q
 
@@ -537,3 +553,186 @@ async def run_campaign(agent_id: str, seed: int, knobs: dict, svc: Services, gen
     result = finish(cst, await ask(summary_messages(cst), cst["budget"], SUMMARY_TOKENS), run_dir)
     await svc.report(agent_id, result)
     return result
+
+
+# --- the asynchronous mode (campaign.mode: async; the AUTONMI layer) -----------------------------------
+#
+# No generation barrier: the Generator keeps the campaign's candidate queue fed, a free Monitor slot takes the
+# next candidate, and the Evaluator and the Coordinator each apply every result as it arrives. Each agent's
+# decision is a pure function here, of its state and what arrived, so one order of arrival, one seed and the
+# Monitors' m give one campaign (at monitor.weight 0, the order and the seed alone: m changes no score). The
+# AUTONMI layer records the orders and each m with record.extras. No model calls yet: every agent decides on
+# numbers alone, the path that becomes each role's fallback once the calls are added.
+
+TAKE = 2   # profiles the Generator takes at a time; it takes them once no candidate waits on its queue
+WINDOW_KEYS = ("candidate_idx", "params", "is_good", "te_core_metric", "wall_ok", "te_wall_eV", "ti_wall_eV",
+               "te_ped_eV")   # what the parent's ranking and update_best_result read of a result in the window
+
+
+def asynchronous(knobs: dict) -> bool:
+    return knobs["campaign"]["mode"] == "async"
+
+
+def async_budget(knobs: dict) -> int:
+    """A campaign's candidates, outer.population x outer.generations, numbered 0 .. budget - 1 as they are made."""
+    o = knobs["outer"]
+    return o["population"] * o["generations"]
+
+
+def _window(window: list[dict], result: dict, size: int) -> list[dict]:
+    """The window with a result added last, its oldest left out past `size`."""
+    return (window + [{k: result.get(k) for k in WINDOW_KEYS}])[-size:]
+
+
+def async_generator_state(agent_id: str, seed: int, knobs: dict) -> dict:
+    """The Generator's memory: its random stream (stream 0 of outer.rng per_agent, whatever outer.rng says), the
+    profiles made, the parent's initial population while it is drawn from, and the newest survivors message it
+    holds (`held`: the message's number, 0 for none)."""
+    return {"agent_id": agent_id, "seed": seed, "rng": _stream(seed, 0), "made": 0, "initial": None,
+            "survivors": None, "held": 0}
+
+
+def async_on_survivors(gst: dict, msgs: list[dict]) -> dict:
+    """Survivors messages that arrived (numbered by the Coordinator's cycle): the Generator keeps the newest."""
+    newest = max(msgs, key=lambda m: m["n"], default=None)
+    if newest is None or newest["n"] <= gst["held"]:
+        return gst
+    return {**gst, "survivors": newest["survivors"], "held": newest["n"]}
+
+
+def async_waits(gst: dict, knobs: dict) -> bool:
+    """Whether the next profile needs a survivor and none has arrived: the Generator's only wait, for its first
+    survivors message, when profile outer.population + 1 is due."""
+    return gst["survivors"] is None and knobs["outer"]["population"] <= gst["made"] < async_budget(knobs)
+
+
+def async_profiles(gst: dict, knobs: dict) -> tuple[dict, list[dict]]:
+    """The next TAKE profiles from the evolutionary loop, as evaluate calls (evaluation_calls' keys, call id c<k>,
+    and `source`): fewer at the end of the budget, or when the next needs a survivor and none is held (then
+    async_waits). Candidate k < P is the k-th of the parent's initialize_population, drawn once; each later one
+    the parent's mutate_params of a survivor chosen at random from the newest survivors held, drawn from stream 0
+    as the parent's repopulate chooses and mutates."""
+    evo, o = parent(), knobs["outer"]
+    P = o["population"]
+    initial, rng, out = gst["initial"], rng_load(gst["rng"]), []
+    for k in range(gst["made"], min(gst["made"] + TAKE, async_budget(knobs))):
+        if k < P:
+            if initial is None:
+                initial = [_plain(p) for p in evo.initialize_population(P, MODEL, KIND, gst["seed"],
+                                                                         delta_bounds=evo.DELTA_CLIP)]
+            params, source = initial[k], "start"
+        elif not gst["survivors"]:
+            break
+        else:
+            chosen = gst["survivors"][int(rng.integers(0, len(gst["survivors"])))]
+            params, source = _plain(evo.mutate_params(chosen, MODEL, KIND, o["noise"], rng,
+                                                      delta_bounds=evo.DELTA_CLIP)), "mutation"
+        out.append({"id": f"c{k}", "params": params, "candidate_idx": k, "generation": k // P, "source": source})
+    made = gst["made"] + len(out)
+    return {**gst, "made": made, "initial": initial if made < P else None, "rng": rng_dump(rng)}, out
+
+
+def async_score(window: list[dict], result: dict, m: float | None, knobs: dict) -> tuple[list[dict], float, float]:
+    """One result as the Evaluator takes it (native values): q, the parent's keep-probability of it in the set of
+    the window (the campaign's last outer.population scored results, in arrival order) and itself, last
+    (keep_probabilities); its score, q + monitor.weight x m clipped to 0..1 (m 0 when the Monitor has none); and
+    the window with it, its oldest left out."""
+    q = keep_probabilities(window + [result], knobs["outer"]["wall_weight"])[-1]
+    score = min(1.0, max(0.0, q + knobs["monitor"]["weight"] * (m or 0.0)))
+    return _window(window, result, knobs["outer"]["population"]), q, score
+
+
+def async_evaluate(window: list[dict], reports: list[dict], knobs: dict) -> tuple[list[dict], list[dict], dict]:
+    """The Evaluator's cycle on the Monitors' reports that arrived (each: `candidate`, `result`, `t0`, `source`
+    and the Monitor's `m`), in arrival order, each scored against the window as it stands when it comes
+    (async_score). Returns the new window, the scored results for the Coordinator and a digest for the
+    Generator."""
+    scored = []
+    for r in reports:
+        window, q, score = async_score(window, native(r["result"]), r["m"], knobs)
+        scored.append({"candidate": r["candidate"], "result": r["result"], "q": q, "m": r["m"], "score": score,
+                       "t0": r["t0"], "source": r["source"]})
+    return window, scored, {"candidates": [s["candidate"] for s in scored],
+                            "scores": [round(s["score"], 4) for s in scored]}
+
+
+def async_coordinator_state(agent_id: str, seed: int, knobs: dict, context: dict, t_start: float | None = None) -> dict:
+    """The Coordinator's memory: coordinator_state's, with stream 1 of outer.rng per_agent (survival's draws),
+    the results arrived and kept, its window (as the Evaluator's), the survivors (each kept result's candidate
+    and profile, the oldest first), its cycles, and when each result's candidate was put on the queue
+    (`t_submit`, as `sim_s` and `wait_s`: this mode has no generation to time)."""
+    return {**coordinator_state(agent_id, seed, knobs, context, t_start), "rng": _stream(seed, 1), "arrived": 0,
+            "kept": 0, "scored_after_warmup": 0, "kept_after_warmup": 0, "window": [], "survivors": [], "cycles": 0,
+            "t_submit": []}
+
+
+def async_on_scored(cst: dict, scored: list[dict], knobs: dict, run_dir) -> tuple[dict, list[dict]]:
+    """The Coordinator's cycle on the scored results that arrived, each in arrival order, n its arrival number
+    (from 0): kept when its draw from stream 1 (one for every result) is below its score, and always while
+    n < campaign.warmup; the survivors, at most outer.population, the oldest leaving; best-so-far by the
+    parent's update_best_result, given the window and the result as the generation and their top-ranked as
+    the survivor; one parent log_generation call with n as the generation (outer.logs); the result's counts.
+    Returns the new memory and one row per result: n, candidate, q, m, score, draw, kept."""
+    evo, o, warmup = parent(), knobs["outer"], knobs["campaign"]["warmup"]
+    rng, rows = rng_load(cst["rng"]), []
+    c = {k: cst[k] for k in ("window", "survivors", "best", "kept", "scored_after_warmup", "kept_after_warmup",
+                             "fixture", "worker_peak_rss_mb")}
+    counts, touches, devices, checks = (dict(cst[k]) for k in ("counts", "touches", "devices", "touch_checks"))
+    t_submit, sim_s, wait_s = list(cst["t_submit"]), list(cst["sim_s"]), list(cst["wait_s"])
+    for s in scored:
+        n, e = cst["arrived"] + len(rows), native(s["result"])
+        draw = float(rng.random())
+        kept = n < warmup or draw < s["score"]
+        generation = [*c["window"], e]
+        c["best"] = evo.update_best_result(c["best"], generation, ranked(generation, o["wall_weight"])[:1], n)
+        if run_dir is not None:
+            evo.log_generation(run_dir, n, [e], [e] if kept else [])
+        if kept:
+            c["survivors"] = (c["survivors"] + [{"candidate": s["candidate"], "params": e["params"]}])[-o["population"]:]
+        c["window"] = _window(c["window"], e, o["population"])
+        c["kept"] += kept
+        if n >= warmup:
+            c["scored_after_warmup"] += 1
+            c["kept_after_warmup"] += kept
+        rows.append({"arrival": n, "candidate": s["candidate"], "q": s["q"], "m": s["m"], "score": s["score"],
+                     "draw": draw, "kept": kept})
+        counts[s["source"]] += 1
+        for kind, k in (e.get("touches") or {}).items():
+            touches[kind] = touches.get(kind, 0) + k
+        devices[str(e.get("device"))] = devices.get(str(e.get("device")), 0) + 1
+        if not e.get("fixture"):
+            checks[str(e.get("touch_check"))] = checks.get(str(e.get("touch_check")), 0) + 1
+        c["fixture"] += bool(e.get("fixture"))
+        if e.get("worker_peak_rss_mb") is not None:
+            c["worker_peak_rss_mb"] = max(e["worker_peak_rss_mb"], c["worker_peak_rss_mb"] or 0)
+        t_submit.append(round(s["t0"], 6))   # when the candidate was put on the queue
+        sim_s.append(round(float(e.get("elapsed_seconds") or 0.0), 6))
+        wait_s.append(round(max(0.0, float(e.get("t_start") or s["t0"]) - s["t0"]), 6))   # with the queue's wait
+    return {**cst, **c, "rng": rng_dump(rng), "arrived": cst["arrived"] + len(rows), "cycles": cst["cycles"] + 1,
+            "counts": counts, "touches": touches, "devices": devices, "touch_checks": checks, "t_submit": t_submit,
+            "sim_s": sim_s, "wait_s": wait_s}, rows
+
+
+def async_survivors(cst: dict) -> dict:
+    """The survivors message after a Coordinator cycle: its number (the cycle) and the survivors' profiles."""
+    return {"n": cst["cycles"], "survivors": [s["params"] for s in cst["survivors"]]}
+
+
+def async_memory(cst: dict) -> dict:
+    """What the Coordinator writes to the agent memory after each cycle."""
+    return {"arrived": cst["arrived"], "kept": cst["kept"], "best": cst["best"], "rng": cst["rng"],
+            "survivors": [s["candidate"] for s in cst["survivors"]]}
+
+
+def async_finish(cst: dict, run_dir=None) -> dict:
+    """The campaign's result once its budget is spent and its last result is in (best_result.json first), as
+    finish() gives it, with no summary call (none in this mode) and no generations, the evaluations' times
+    (`t_submit` beside `sim_s` and `wait_s`), the Coordinator's cycles, and its results scored and kept, in all
+    and after warm-up (`survival`)."""
+    if run_dir is not None:
+        (run_dir / "best_result.json").write_text(json.dumps(cst["best"], indent=2, default=str))
+    return {**finish(cst, ""), "n_llm_calls": cst["n_llm_calls"], "n_sims": cst["arrived"],
+            "t_submit": cst["t_submit"], "n_cycles": cst["cycles"],
+            "survival": {"results_scored": cst["arrived"], "results_kept": cst["kept"],
+                         "results_scored_after_warmup": cst["scored_after_warmup"],
+                         "results_kept_after_warmup": cst["kept_after_warmup"]}}

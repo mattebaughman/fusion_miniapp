@@ -65,8 +65,11 @@ async def ticker(read, emit=None, interval: float = LIVE_INTERVAL_S) -> None:
 
 
 # timings, memory, touch counts and device names: what depends on the machine or the scheduling
-MACHINE_KEYS = ("sim_s", "wait_s", "t_start", "t_end", "worker_peak_rss_mb", "touches", "devices", "llm_call_details")
-EXTRA_KEYS = ("monitor",)   # per-candidate detail written with record.extras (the AUTONMI layer): not the result
+MACHINE_KEYS = ("sim_s", "wait_s", "t_submit", "t_start", "t_end", "worker_peak_rss_mb", "touches", "devices",
+                "llm_call_details")
+# per-candidate detail written with record.extras (the AUTONMI layer: the Monitor's numbers, and in the
+# asynchronous mode each result's row and the replay orders): not the result
+EXTRA_KEYS = ("monitor", "asynchronous")
 
 
 def comparable(result: dict) -> dict:
@@ -363,17 +366,17 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
                     refill.update(r["refill"])
                     c_start.append(r["t_start"])
                     c_end.append(r["t_end"])
-                    i = 0
-                    for g in r["generations"]:
-                        gen_s.append(g["elapsed_s"])
-                        for _ in range(g["n_evaluated"]):
-                            w, d = r["wait_s"][i], r["sim_s"][i]
-                            e_sub.append(g["t0"])
-                            e_start.append(g["t0"] + w)
-                            e_end.append(g["t0"] + w + d)
-                            wait_s.append(w)
-                            sim_s.append(d)
-                            i += 1
+                    # each evaluation's submission: its generation's t0, or (the AUTONMI layer's asynchronous
+                    # mode, which has no generation) its own, in t_submit
+                    submitted = [g["t0"] for g in r["generations"] for _ in range(g["n_evaluated"])]
+                    submitted += r.get("t_submit") or ()
+                    gen_s.extend(g["elapsed_s"] for g in r["generations"])
+                    for t0, w, d in zip(submitted, r["wait_s"], r["sim_s"]):
+                        e_sub.append(t0)
+                        e_start.append(t0 + w)
+                        e_end.append(t0 + w + d)
+                        wait_s.append(w)
+                        sim_s.append(d)
                     if r.get("worker_peak_rss_mb") is not None:
                         worker_rss.append(r["worker_peak_rss_mb"])
     os.replace(tmp, out / "agents.jsonl")
