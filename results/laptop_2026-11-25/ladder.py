@@ -53,7 +53,7 @@ ROLES = ("coordinator", "generator", "evaluator", "monitor")
 BOUND = (32768 - 4096) * 3 // 4   # 21,504: each asynchronous role's longest prompt, by construction (tests/test_async.py)
 LOAD_MAX, LOAD_WAIT_S, LIMIT_S = 3.0, 900, 45 * 60
 OPEN_FILES = 65536   # each open call to a fake server holds a socket in the run's process and one in a server's
-MODELLED = 4.9   # agents of 5 in a model call when every call takes the same time (the plan's model, not measured)
+MODELLED = 4.9   # agents of 5 in a model call when every call takes the same time (modelled before the build, not measured)
 
 # rung: campaigns; knob files of this folder; the stub's latency it sets (for the record); `calls`: the call probe;
 # `sigterm_at`: SIGTERM once that many campaigns' lines are written; `stellar`: the StellarAI knob files with

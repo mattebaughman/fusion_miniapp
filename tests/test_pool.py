@@ -199,7 +199,7 @@ def test_each_inner_loop_worker_sees_gpu_i_mod_the_gpu_count_across_populations(
     """workers.gpu_per_worker on the AUTONMI layer, with a faked count of 3 GPUs (FIXTURE: no GPU is used here):
     two populations' pools (layer_autonmi.sim_pool, 2 workers each) take their workers' numbers from one counter, so
     the 4 workers are 0 .. 3, the second pool's after the first's, and worker i sees GPU i mod 3 alone
-    (CUDA_VISIBLE_DEVICES). Real placement on GPUs is unverified until the ladder's machine step 3."""
+    (CUDA_VISIBLE_DEVICES). Real placement on GPUs is unverified until a run on GPU nodes."""
     layer = pytest.importorskip("fusion_miniapp.layer_autonmi")
     monkeypatch.setattr(layer, "_GPUS", ["0", "1", "2"])
     monkeypatch.setattr(layer, "_GPU_COUNTER", None)

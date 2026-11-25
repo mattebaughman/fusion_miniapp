@@ -110,3 +110,16 @@ def test_the_asynchronous_mode_is_the_autonmi_layers(tmp_path):
     assert knobs.validate({"llm": {"thinking": True}}, modes=("generations", "async"))["llm"]["thinking"] == "on"
     off = {**k, "llm": {**k["llm"], "mode": "off"}}   # no model calls: the asynchronous mode's only
     assert knobs.validate(off, modes=("generations", "async"))["llm"]["mode"] == "off"
+
+
+def test_the_asynchronous_mode_refuses_outer_generator_mutation_unless_the_model_is_off():
+    """outer.generator mutation (no refill call) has no reading in the asynchronous mode, whose Generator's own
+    model call reconciles every candidate unless llm.mode is off: refused there, naming llm.mode off; accepted with
+    llm.mode off, and in the generations mode as before."""
+    both = ("generations", "async")
+    mutation = {"campaign": {"mode": "async"}, "outer": {"generator": "mutation"}}
+    for mode in ("stub", "openai"):
+        with pytest.raises(KnobError, match="outer.generator mutation .* llm.mode off"):
+            knobs.validate({**mutation, "llm": {"mode": mode}}, modes=both)
+    assert knobs.validate({**mutation, "llm": {"mode": "off"}}, modes=both)["outer"]["generator"] == "mutation"
+    assert knobs.validate({"outer": {"generator": "mutation"}}, modes=both)["outer"]["generator"] == "mutation"

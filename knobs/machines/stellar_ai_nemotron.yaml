@@ -18,7 +18,9 @@ llm:
   reply_cap: 4096             # max_tokens of every call (thinking off: the cap alone)
   temperature: 1.0            # NVIDIA's recommended sampling for this model, sent with every call
   top_p: 0.95
-  outage_s: 300               # wait up to 5 minutes for a model server that went away, then the call fails
+  outage_s: 300               # each try waits up to 5 minutes for a model server that went away, then fails;
+                              # with 3 tries a call can wait 15 minutes, again on each later call of the
+                              # agents of a server that stays down (each agent calls one server)
 
 sim:
   work_root: $TMPDIR          # the inner loop's work folders on node-local disk (the launch script sets TMPDIR)

@@ -112,7 +112,7 @@ AUTONMI = pytest.mark.skipif(importlib.util.find_spec("autonmi") is None or impo
                              reason="needs the AUTONMI layer's environment (requirements-autonmi.txt and autonmi)")
 
 
-def test_the_stellarai_knob_file_loads_with_the_plans_settings():
+def test_the_stellarai_knob_file_loads_with_its_settings():
     """knobs/machines/stellar_ai_nemotron.yaml over the hundredk preset and stellar_ai.yaml: the asynchronous mode
     with 2 Monitor slots (5 hosted agents a campaign, 100,000 at the scale run's 20,000 campaigns), thinking off, a
     reply cap of 4,096, no per-call time limit in practice (86,400 s), a model server waited out for 300 s,
@@ -646,6 +646,43 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
     assert all((fleet / f"model-{k}" / "ended").exists() for k in range(2))
     assert "fleet: unbound variable" in done["unset variable"].stderr
     assert not (tmp_path / "case3" / "scratch" / "fusion-miniapp" / "test-723" / "fleet").exists()
+
+
+# squeue -h -j ID -o %T as a FIXTURE answering from FAKE_ANSWERS in turn (the last again after the end): a state, or
+# FAIL, squeue failing (nothing printed, exit 1), as when slurmctld does not answer in time.
+SCRIPTED_SQUEUE = """count = os.path.join(os.environ["FAKE_JOBS"], "squeue-calls")
+n = int(open(count).read()) if os.path.exists(count) else 0
+open(count, "w").write(str(n + 1))
+answers = os.environ["FAKE_ANSWERS"].split(",")
+if answers[min(n, len(answers) - 1)] == "FAIL":
+    sys.exit(1)
+print(answers[min(n, len(answers) - 1)])
+"""
+
+
+def test_a_model_job_has_ended_only_on_an_end_state_or_after_three_answers_without_one(tmp_path):
+    """One model job that never starts (FIXTURE, PENDING), against a FIXTURE squeue answering in turn: one failed
+    squeue call does not end the launch's wait (FUSION_MODEL_WAIT, 1 s, does); an end state (FAILED) ends it at
+    once, with FUSION_MODEL_WAIT's 60 s left; a job whose state squeue does not give at the end is cancelled, as
+    one not yet serving. Each launch exits 1 before the run, with the job's stop file written."""
+    cases = {
+        "a failed answer": ("FAIL,PENDING", "1", "not every model job wrote its endpoints within 1 s"),
+        "an end state": ("FAILED", "60", "model job 9200 ended (FAILED) before its servers were ready"),
+        "no answer at the end": ("PENDING,FAIL", "1", "not every model job wrote its endpoints within 1 s"),
+    }
+    for i, (case, (answers, wait, reason)) in enumerate(cases.items()):
+        d = tmp_path / f"case{i}"
+        d.mkdir()
+        env = stellar_env(d, f"73{i}", FUSION_MODEL_NODES="1", FUSION_MODEL_TIME="00:20:00", FUSION_MODEL_WAIT=wait,
+                          FAKE_STATES="PENDING", FAKE_ANSWERS=answers, **fake_jobs(d))
+        fixture_tool(d, "squeue", SCRIPTED_SQUEUE)
+        t0 = time.time()
+        done = launch(d, env)
+        out = done.stdout + done.stderr
+        assert done.returncode == 1 and reason in done.stderr and "the run's PID" not in out, (case, out[-3000:])
+        assert time.time() - t0 < 40, case
+        assert (d / "scratch" / "fusion-miniapp" / f"test-73{i}" / "fleet" / "model-0" / "stop").exists(), case
+        assert [c[1] for c in tool_calls(d) if c[0] == "scancel"] == ["9200"], case
 
 
 @AUTONMI

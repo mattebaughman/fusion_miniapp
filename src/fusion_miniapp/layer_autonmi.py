@@ -1762,7 +1762,7 @@ _VALUE = rb"""("[^"\n]*"|'[^'\n]*'|[^\s"',;)}\]]+)"""
 SET_BY_NAME = (re.compile(rb"""(?<![\w.-])([A-Za-z_][\w.-]*)["']?[ \t]*[:=][ \t]*\[?[ \t]*""" + _VALUE),
                re.compile(rb"""(?<![\w-])--([A-Za-z][\w-]*)(?:=|[ \t]+)""" + _VALUE))
 URL_USER = re.compile(rb"://([^/\s@'\"]+)@")   # a URL's user and password (pip freeze's git+https://<token>@...)
-# the environment snapshot's variables: these prefixes and names (LLM plan, question 11)
+# the environment snapshot's variables: these prefixes and names
 ENV_PREFIXES = ("RASCAL_", "SLURM_", "CUDA_", "VLLM_", "FLASHINFER_", "TRITON_")
 ENV_NAMES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "PATH", "TMPDIR")
 LOG_HEAD_LINES = 500   # a log is copied as its head: version, non-default arguments, KV-cache memory
@@ -2296,7 +2296,7 @@ def telemetry_verdict(summary: dict) -> dict:
 
 def references(knobs: dict) -> dict:
     """What the counts of agents and model requests are measured against: the hosted agents (3 +
-    campaign.slots per campaign). (No comparison against the client's admission caps: Matt's round-4 answer 11.)"""
+    campaign.slots per campaign). (No comparison against the client's admission caps.)"""
     return {"hosted_agents": agents_per_campaign(knobs) * knobs["agents"]["count"]}
 
 

@@ -37,11 +37,16 @@
 # only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit (--signal=B:TERM@900; the run
 # needs about a minute to write its interrupted record) or once the node's available memory is below
 # FUSION_MEM_FLOOR_GIB (100). At the end, whatever happened: when this launch started the servers, the stop file in
-# each model job's folder, and a model job not yet serving (not running, or without its endpoints: it would remove
-# its stop file when it starts) cancelled; with FUSION_KEEP_SERVERS=1 (and FUSION_MODEL_NODES) servers that passed
+# each model job's folder, and a model job not yet serving (not running, without its endpoints, or with no state
+# from squeue: it would remove its stop file when it starts) cancelled; with FUSION_KEEP_SERVERS=1 (and FUSION_MODEL_NODES) servers that passed
 # the check are left running instead, for a later launch's FUSION_MODEL_FLEET, until FUSION_MODEL_TIME or
 # `touch DIR/model-*/stop`. Then the MPS daemon quit, the GPUs checked for processes left, the node-local folder
 # removed. It exits with the run's status.
+#
+# To stop a run early: scancel --batch --signal=TERM <job id>, which signals this script alone, as Slurm's warning
+# does. A plain scancel sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which
+# can come before the run has written its record and before the end above: the model jobs then serve until
+# FUSION_MODEL_TIME. (Inferred from Slurm's documentation; not yet run on the machine.)
 #SBATCH --job-name=fusion-autonmi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -75,17 +80,29 @@ combine() {   # the model jobs' endpoints, in order, into fleet/endpoints (repla
 	if cmp -s "$tmp" "$fleet/endpoints"; then rm -f "$tmp"; else mv "$tmp" "$fleet/endpoints"; fi
 }
 
-alive() {   # the servers' process (on this node) or every model job still there
-	local id
+alive() {   # the servers' process (on this node) or every model job still there: a job has ended on an end state,
+            # or once squeue gave no state 3 times in a row (it prints nothing when it fails, as when slurmctld is slow)
+	local id state k=0
 	if (( nodes == 0 )); then
 		kill -0 "$model_pid" 2>/dev/null && return 0
 		say "model.sh ended before its servers were ready: see $fleet/model-0/model-$job.out" >&2
 		return 1
 	fi
 	for id in $model_jobs; do
-		[[ -n $(squeue -h -j "$id" -o %T 2>/dev/null) ]] && continue
-		say "model job $id ended before its servers were ready: see $fleet/model-*/model-$id.out" >&2
-		return 1
+		state=$(squeue -h -j "$id" -o %T 2>/dev/null) || state=
+		case $state in
+			BOOT_FAIL|CANCELLED|COMPLETED|DEADLINE|FAILED|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|REVOKED|SPECIAL_EXIT|TIMEOUT)
+				say "model job $id ended ($state) before its servers were ready: see $fleet/model-*/model-$id.out" >&2
+				return 1 ;;
+			'')
+				silent[k]=$(( ${silent[k]:-0} + 1 ))
+				if (( silent[k] >= 3 )); then
+					say "model job $id: no state from squeue 3 times in a row, taken as ended: see $fleet/model-*/model-$id.out" >&2
+					return 1
+				fi ;;
+			*) silent[k]=0 ;;
+		esac
+		k=$(( k + 1 ))
 	done
 }
 
@@ -122,7 +139,7 @@ mem_guard() {   # SIGTERM to the run once the node's available memory falls belo
 	done
 }
 
-on_signal() {   # Slurm's warning (or scancel): the run is stopped by SIGTERM to its PID, once; before it starts, the launch ends
+on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to the run's PID, once; before it starts, the launch ends
 	if [[ -n $pid ]]; then
 		if [[ -z $signalled ]]; then
 			signalled=1
@@ -136,22 +153,23 @@ on_signal() {   # Slurm's warning (or scancel): the run is stopped by SIGTERM to
 }
 
 teardown() {   # always: the servers released if this launch started them, MPS quit, the GPUs checked, node files removed
-	local rc=$? k id left state
+	local rc=$? k id left state cancel
 	set +e
 	if [[ $rc == 0 && -z $finished ]]; then rc=1; fi   # ended early (bash 3.2 gives an unset variable's exit 0)
 	trap - TERM INT
 	for id in $refresh_pid $guard_pid; do kill "$id" 2>/dev/null; wait "$id" 2>/dev/null; done   # no "Terminated" line
 	if (( started && ! keep )); then
-		for (( k = 0; k < jobs_n; k++ )); do x touch "$fleet/model-$k/stop"; done
-		say "stop files written: the model servers end within seconds"
-		k=0
-		for id in $model_jobs; do   # a job not yet serving would remove its stop file when it starts: cancelled
-			if [[ $dry != 1 ]]; then
-				state=$(squeue -h -j "$id" -o %T 2>/dev/null)
-				if [[ -n $state && ( $state != RUNNING || ! -s $fleet/model-$k/endpoints ) ]]; then x scancel "$id"; fi
+		k=0 cancel=
+		for id in $model_jobs; do   # a job not yet serving, or whose state squeue does not give, is cancelled: it
+			if [[ $dry != 1 ]]; then   # would remove its stop file when it starts (asked before the stop files)
+				state=$(squeue -h -j "$id" -o %T 2>/dev/null) || state=
+				if [[ $state != RUNNING || ! -s $fleet/model-$k/endpoints ]]; then cancel+=" $id"; fi
 			fi
 			k=$(( k + 1 ))
 		done
+		for (( k = 0; k < jobs_n; k++ )); do x touch "$fleet/model-$k/stop"; done
+		say "stop files written: the model servers end within seconds"
+		for id in $cancel; do x scancel "$id"; done
 		if (( nodes == 0 )) && [[ -n $model_pid ]]; then
 			for (( k = 0; k < 90; k++ )); do kill -0 "$model_pid" 2>/dev/null || break; sleep 2; done
 		fi
@@ -178,7 +196,7 @@ main() {
 	: "${FUSION_ENV:?set FUSION_ENV to the campaign venv (a folder with bin/activate)}"
 	: "${FUSION_SCRATCH:?set FUSION_SCRATCH to your GPFS scratch directory}"
 	dry=${FUSION_DRY_RUN:-0} nodes=${FUSION_MODEL_NODES:-0} reuse=${FUSION_MODEL_FLEET:-}
-	started=0 keep=0 mps=0 jobs_n=0 model_pid= model_jobs= pid= signalled= refresh_pid= guard_pid= finished=
+	started=0 keep=0 mps=0 jobs_n=0 model_pid= model_jobs= pid= signalled= refresh_pid= guard_pid= finished= silent=()
 	local root name run_dir k id rc probe args
 	root=$(cd "$FUSION_MINIAPP_DIR" && pwd -P)
 	job=${SLURM_JOB_ID:-dry} name=${SLURM_JOB_NAME:-fusion-autonmi}

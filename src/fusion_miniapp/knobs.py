@@ -228,6 +228,9 @@ def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generati
     if out["llm"]["mode"] == "off" and out["campaign"]["mode"] != "async":
         raise KnobError("llm.mode off (no model calls) is the asynchronous mode's only: the generations mode's "
                         "refill and summary calls need llm.mode stub or openai")
+    if out["campaign"]["mode"] == "async" and out["outer"]["generator"] == "mutation" and out["llm"]["mode"] != "off":
+        raise KnobError("outer.generator mutation is the generations mode's: in the asynchronous mode the Generator's "
+                        "model call reconciles every candidate; for no model calls set llm.mode off")
     if "async" not in modes:   # run.py's layers send each call as before and make no Monitor or Evaluator call
         unread = [f"llm.{k}" for k in AUTONMI_ONLY if out["llm"][k] is not None] + \
             (["campaign.notes"] if out["campaign"]["notes"] else []) + \

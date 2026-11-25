@@ -460,7 +460,7 @@ def test_the_gpu_knob_places_the_real_inner_loops_workers_from_the_device_probe(
     """workers.gpu_per_worker on, --sim real on this machine's CPU (sim.device cpu), with the device probe made to
     report 3 FAKE GPUs: main() hands the probe's GPUs to sim_pool, both inner-loop workers are placed
     (autonmi.inner_loop_gpus), and the results are the real_cpu reference's. No GPU is used: real placement on
-    GPUs is unverified until the ladder's machine step 3."""
+    GPUs is unverified until a run on GPU nodes."""
     knobs = {**REAL_KNOBS, "workers": {**REAL_KNOBS["workers"], "gpu_per_worker": True}}
     env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
     proc = subprocess.run([sys.executable, "-c", FAKE_GPUS_MAIN, *REAL_ARGS, "--knobs", knob_file(tmp_path, knobs),
@@ -513,7 +513,7 @@ def test_a_failed_summary_falls_back_on_the_autonmi_layer_and_fails_its_campaign
     """The server rejects some campaigns' summary calls (HTTP 400, which no layer's transport retries). The
     LangGraph layer (frozen) ends each such campaign at its first failed call: a line with its error and that
     call, and the run fails. The AUTONMI layer tries the call 3 times (TRIES), then leaves the summary out (""),
-    counted as the Coordinator's fallback, and the campaign completes (Matt's round-4 answer 12): its line has the
+    counted as the Coordinator's fallback, and the campaign completes: its line has the
     refills, then the 3 failed tries; with the fake server's summary put back it is the reference's campaign, so
     the fallback changed nothing else; every other campaign is the reference's; the run passes."""
     def fail(body):
@@ -626,7 +626,7 @@ def test_the_live_line_and_the_client_counts_on_the_stub(tmp_path):
     assert opened["side"] == "client" and opened["emulated"]
     assert opened["calls_timed"] == rec["counts"]["llm_calls"] == 40
     assert opened["max"] == 4 and opened["time_ge_pct_s"]["hosted_agents"]["of"] == 100
-    assert set(opened["time_ge_pct_s"]) == {"hosted_agents"}   # no comparison against the client's caps (answer 11)
+    assert set(opened["time_ge_pct_s"]) == {"hosted_agents"}   # no comparison against the client's caps
     assert queued["max"] > 0 and queued["time_s"]["max"] > 0 and queued["autonmi_built_in"]["agent_seconds"] > 0
     little = opened["littles_law"]
     figures = [little[k] for k in ("autonmi_agent_seconds_per_s", "fusion_calls_per_s_x_mean_time_in_flight",
@@ -690,7 +690,7 @@ def test_an_openai_run_over_two_model_servers_records_their_decoding_counts(tmp_
     d = rec["speed"]["decoding_at_servers"]
     assert (d["servers"], d["sample_errors"], d["interval_s"]) == (2, 0, 2.0) and d["running"]["samples"] >= 4
     assert 1 <= d["running"]["max"] <= 4 and d["waiting"]["max"] >= 1 and 0 < d["kv_cache_usage"]["max"] < 1
-    ge = d["running"]["time_ge_pct_s"]   # against the hosted agents (12 x 5) alone: no client cap (answer 11)
+    ge = d["running"]["time_ge_pct_s"]   # against the hosted agents (12 x 5) alone: no client cap
     assert list(ge) == ["hosted_agents"] and ge["hosted_agents"]["of"] == 60
     assert d["stale_s"] == [0.0, 0.0] and d["gauges_missing"] is None   # both answered every reading
     headline = rec["speed"]["headline"]
@@ -1548,7 +1548,7 @@ def test_the_asynchronous_record_gains_only_counts_without_the_toggle(tmp_path, 
         "cycles.coordinator", "cycles.generator", "cycles.evaluator", "cycles.monitor", "survivor_waits",
         "parameters_filled"))}, added
     assert not {p for p in paths(gen) - paths(off) if not p.startswith(skip)}
-    # the toggle's record figures (package 4): the request settings sent (none here), the servers (none: the stub)
+    # the toggle's record figures: the request settings sent (none here), the servers (none: the stub)
     # and each role's share of time in a model call (0 here)
     assert paths(on) - paths(off) == {"llm_service.requests", "llm_service.servers", *(
         f"speed.model_call_share.{k}" for k in ("window", "source", "agents_in_a_call_per_campaign")), *(
@@ -1694,7 +1694,7 @@ def test_odd_shapes_run_in_the_asynchronous_mode(tmp_path, population, generatio
     assert rec["counts"]["asynchronous"]["cycles"]["generator"] >= 6 * -(-population * generations // 2)
 
 
-STELLAR_LLM = {"thinking": "off", "reply_cap": 4096, "temperature": 1.0, "top_p": 0.95}   # the LLM plan's settings
+STELLAR_LLM = {"thinking": "off", "reply_cap": 4096, "temperature": 1.0, "top_p": 0.95}   # the StellarAI knob file's
 
 
 def run_on_a_server(tmp_path, knobs: dict, server: FakeVllm, *args, code: int = 0) -> tuple[dict, list[dict]]:
@@ -1707,7 +1707,7 @@ def run_on_a_server(tmp_path, knobs: dict, server: FakeVllm, *args, code: int = 
 
 @pytest.mark.parametrize("mode, thinking", (("async", "off"), ("generations", "off"), ("async", "on")))
 def test_the_stellarai_settings_reach_every_request(tmp_path, mode, thinking):
-    """llm.mode openai against the fake vLLM server (a FIXTURE) with the LLM plan's StellarAI request settings
+    """llm.mode openai against the fake vLLM server (a FIXTURE) with the StellarAI knob file's request settings
     (llm.thinking off, llm.reply_cap 4,096, temperature 1.0, top_p 0.95): every request carries them, with
     chat_template_kwargs {enable_thinking: false} from AUTONMI's transport (no per-call extra_body replaced it)
     and no thinking budget. In the asynchronous mode every role calls, and only the Generator's calls carry its

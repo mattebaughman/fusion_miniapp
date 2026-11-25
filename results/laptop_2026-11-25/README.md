@@ -49,8 +49,8 @@ files here as they were; a rung that runs replaces them.
   cost was not measured on its own. It is a few microseconds a call against about 530 µs of the run's own time per
   call in the 10,000-campaign 1 ms rung (1,117,784 calls asked in a 590 s agent phase), so under 1% [inferred].
 - **This `ladder.py` and the runs.** The probes, the rungs' commands and the fake servers' replies are as run.
-  After the runs, the file changed only in how it summarizes and guards a rung: check 1's figure for an interrupted
-  record, the power fields kept here, the open-files limit, the load and power refusals, the prediction's source
+  After the runs, the file changed only in how it summarizes and guards a rung: its figure for an interrupted record,
+  the power fields kept here, the open-files limit, the load and power refusals, the prediction's source
   and the fake servers' start. Each `ladder.json` here equals what this file's summary code gives from its run's
   folder [measured].
 
@@ -108,7 +108,7 @@ back [measured].
   to 112.
 - Each figure is from one run. Two repeats of `r500_async_2s` with this ladder about 85 minutes later, in the same
   power state, gave 367 and 368 evaluations per second and 44.1 and 44.3 s, against 382 and 42.6 s here
-  [measured]: rungs that differ by a few percent are within the spread between runs.
+  [measured; those runs are not kept here]: rungs that differ by a few percent are within the spread between runs.
 - MiB per campaign is the peak divided by the campaigns, the interpreter included [inferred]. The added memory per
   added campaign is about 0.87 MiB from 2,000 to 10,000 campaigns at 1 ms (9,169 − 2,190 MiB over 8,000) and
   0.86 MiB at the stub's longer latencies [inferred].
@@ -128,7 +128,7 @@ was sent to its reply.
 
 - Each row is one run. Four repeats of `r500_async_2s` 65 to 90 minutes later, in the same power state and with
   the same call probe (two with this ladder, two with that probe alone), gave 4.738 to 4.744 of 5 (0.945 to 0.946
-  per Monitor slot; the Generator 0.87) [measured]. Over those five runs, 4.74 to 4.82 at 500 campaigns.
+  per Monitor slot; the Generator 0.87) [measured; those runs are not kept here]. Over those five runs, 4.74 to 4.82 at 500 campaigns.
 - With the stub, 4.79 to 4.82 of 5 at every size in these runs, against the model's 4.9. The Generator is the role
   most often out of a call; it takes its next 2 candidates only once none waits on the queue [inferred from the code].
 - Model calls per campaign in these three rungs: Generator 16, Monitors 32, Evaluator 17, Coordinator 17 (82 in
@@ -184,13 +184,13 @@ reply) [run, measured]:
   74 ms at the 95th percentile and 2.8 s at most, against 40 ms and 6.5 s in the 40 s stub rung. HTTP is not the
   only difference: this rung has 80 inner-loop threads against 10, and 2,400 campaigns against 10,000
   [configured].
-- Sockets [measured]: the open-files limit was 1,048,576 for the shell and 92,160 per process (macOS's
+- Sockets [measured; the limits and port range are in no file here]: the open-files limit was 1,048,576 for the shell and 92,160 per process (macOS's
   `kern.maxfilesperproc`); local ports for outgoing connections are 49,152 to 65,535 (16,384); TIME_WAIT sockets on
   the whole laptop peaked at 6,104. A laptop check much past 12,000 open calls to one address would be near that
   port range [inferred; not tried].
 - A second run of this rung, started from a shell open-files limit of 256, had its limit raised to 65,536 by the
   ladder and again reached 12,000 open calls by all four counts, with no call failed and status `pass`
-  [run, measured]. The laptop went onto battery in its last minute, so the ladder did not keep it here.
+  [run, measured; that run is not kept here]. The laptop went onto battery in its last minute, so the ladder did not keep it here.
 - Not explained: Flowgentic's own count of agents waiting for admission (the live line's `queued`) read up to 2,201
   for 18 s about 160 s into the run, while each call's recorded wait for admission was at most 0.4 ms and no call
   failed [measured; not investigated].

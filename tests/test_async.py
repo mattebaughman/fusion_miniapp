@@ -259,6 +259,18 @@ def test_the_generators_reply_replaces_the_evolutionary_loops_values():
     assert len(got) == 2 and all(set(x) == set(decide.ranges()) for x in got)
 
 
+def test_an_integer_too_large_for_a_float_in_a_reply_is_not_a_number():
+    """A JSON integer of 309 to 4,300 digits (json reads it as an int, which no float can hold): the Generator's and
+    the Evaluator's parse functions and the generations mode's refill take it as they take 1e400, as no number, and
+    raise nothing. So such a reply is not filled, or cannot be used and is tried again, as the README says."""
+    big = "1" + "0" * 400
+    assert decide.parse_reconcile('[{"a1_Te": %s}, {}]' % big, 2) == [{}, {}]
+    assert decide.parse_reconcile('[{"a1_Te": 1e400}, {}]', 2) == [{}, {}]
+    assert decide.parse_scores('{"5": %s}' % big, [5]) is None
+    assert decide.parse_scores('{"5": 0.25} then {"5": %s}' % big, [5]) == {5: 0.25}
+    assert decide.parse_candidates('[{"a1_Te": %s}]' % big, 1) == []
+
+
 def test_the_evaluators_reply_is_the_score_and_the_stub_answers_the_score_from_numbers():
     """The Evaluator's call: its prompt gives each result's q and the Monitor's m (in full), the Monitor's other
     numbers and note, and neither the score from numbers nor its formula; its reply is one JSON object with a

@@ -30,7 +30,7 @@ The random generator (knob outer.rng):
   SeedSequence(seed).spawn(2).
 The state travels as a JSON string (two 128-bit integers, which msgpack checkpoints cannot carry).
 
-The Generator (knob outer.generator):
+The Generator (knob outer.generator; the asynchronous mode refuses mutation unless llm.mode is off):
 - mutation: the parent's repopulate, nothing else. The campaign is the parent's loop exactly.
 - llm: the parent's repopulate runs first, so the random stream is unchanged, then one model call
   proposes candidates for the slots repopulate filled with mutants (or with a restart sample). Each parsed
@@ -254,11 +254,17 @@ def refill_messages(gst: dict, msg: dict, n: int, knobs: dict) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": notes + "\n\n" + ask}]
 
 
+def _number(v) -> bool:
+    """A finite JSON number: not a bool, NaN or infinite, nor an integer too large for a float (on which
+    math.isfinite raises OverflowError)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) <= sys.float_info.max
+
+
 def _clip(obj) -> dict:
     out = {}
     for k, (lo, hi) in ranges().items():
         v = obj.get(k) if isinstance(obj, dict) else None
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+        if _number(v):
             out[k] = float(min(max(v, lo), hi))
     return out
 
@@ -582,9 +588,10 @@ async def run_campaign(agent_id: str, seed: int, knobs: dict, svc: Services, gen
 # No generation barrier: the Generator keeps the campaign's candidate queue fed, a free Monitor slot takes the
 # next candidate, and the Evaluator and the Coordinator each apply every result as it arrives. Each agent's
 # decision is a pure function here, of its state and what arrived, so one order of arrival, one seed and the
-# Monitors' m give one campaign (at monitor.weight 0, the order and the seed alone: m changes no score). The
-# AUTONMI layer records the orders and each m with record.extras. Without model calls (llm.mode off) every agent
-# decides on numbers alone; that path is also each role's fallback when its model call fails (the end of this
+# Monitors' m give one campaign (at monitor.weight 0, the order and the seed alone: m changes no score) with
+# llm.mode off, or with the stub when no model call fell back: which Generator takes fell back is a further input,
+# and a real model's replies are not recorded. The AUTONMI layer records the orders and each m with record.extras.
+# Without model calls (llm.mode off) every agent decides on numbers alone; that path is also each role's fallback when its model call fails (the end of this
 # file), so a campaign whose calls all fail is the campaign with llm.mode off.
 
 TAKE = 2   # profiles the Generator takes at a time; it takes them once no candidate waits on its queue
@@ -961,7 +968,7 @@ def parse_scores(reply: str, candidates: list[int]) -> dict | None:
         out = {}
         for k in candidates:
             v = obj.get(str(k))
-            if not (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)):
+            if not _number(v):
                 break
             out[k] = min(1.0, max(0.0, float(v)))
         else:

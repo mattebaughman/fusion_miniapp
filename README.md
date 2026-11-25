@@ -170,7 +170,9 @@ arrives. The decisions are pure functions of each agent's state and what arrived
   fixture's results follow a hash unrelated to its trace, so there the label comes from the trace's own end
   values, marked synthetic.
 - **Results differ from run to run** with the order of arrival. One order, one seed and the Monitors' m give one
-  campaign; the tests replay recorded orders through the pure functions (`tests/async_replay.py`). AUTONMI's
+  campaign with `llm.mode: off`, or with the stub when no model call fell back; the tests replay recorded orders
+  through the pure functions (`tests/async_replay.py`). With model calls, which Generator takes fell back is a
+  further input the record does not hold, and a real model's replies are not recorded. AUTONMI's
   checks are this mode's invariants: P x G inner loops per campaign, each candidate once, every message
   received, at most P survivors, at most `campaign.slots` inner loops running and 2 candidates waiting, and each
   role's messages and calls within bounds tied to its cycles.
@@ -194,7 +196,9 @@ the model servers (The model service, below).
 
 - **Tries.** A call that fails is tried up to 3 times (`layer_autonmi.TRIES`), then the role's fallback is used
   and counted. A failure is an error, or a reply the role's parse function cannot use. A try is one request; it
-  includes Flowgentic's own wait for a server that went away (`llm.outage_s`). No try is made once another agent
+  includes Flowgentic's own wait for a server that went away (`llm.outage_s`). Each agent always calls the same
+  server, and nothing remembers a server that gave up: while one stays down, every call of the agents it serves
+  costs 3 x `llm.outage_s` before its fallback, and the run still passes. No try is made once another agent
   has failed the campaign. The fallbacks are the `llm.mode: off` path, so a campaign whose calls all fail is the
   campaign with no model calls.
 - **Every prompt of the asynchronous mode fits the context by construction.** A Monitor's note or the
@@ -378,8 +382,8 @@ uv pip install --python .venv/bin/python -e ".[stack,academy,dev]"
 - **The AUTONMI layer's environment** (the other two layers run in it too): the steps at the top of
   `requirements-autonmi.txt` (a workflow-mini-apps checkout beside this one, then
   `uv venv --python 3.12 .venv-autonmi` and one `uv pip install`), and the AUTONMI framework installed into it.
-- torch is not pinned: on a GPU machine install the CUDA or ROCm build first (each batch file in `launch/` names
-  one).
+- torch is not pinned: on a GPU machine install the CUDA or ROCm build first (each of the three single-GPU batch
+  files in `launch/` names one; the StellarAI run path uses the one `launch/stellar_ai.sbatch` names).
 
 ## Running
 
@@ -409,15 +413,16 @@ the Generator's candidates), or if more than `llm.max_empty_share` (0.1) of its 
 model that never answers would leave every campaign on the parent's mutants, and the run would still pass.
 
 **How a run ends badly:**
-- SIGTERM or Ctrl-C (scancel, a Slurm time limit): the campaigns are cancelled through the event loop and a
-  record with `status: interrupted` is written, with the campaigns that finished (exit 143). On the AUTONMI layer
-  the populations report into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check
-  `every_population_ran` then fails, and `autonmi.telemetry` gives each population's task counts. At 10,000
-  campaigns on a laptop the run exited about 55 s after SIGTERM (measured). The AUTONMI layer's interrupted record
-  keeps the model figures of every call made up to the signal, the unfinished campaigns' included, and says so
-  (`speed.coverage.model_calls`): each population that has not ended writes its call sums and its roles' model
-  counts then (`Script.cut_short`). `counts.by_role`'s other counts come from AUTONMI's rows, which a population
-  writes only when it ends.
+- SIGTERM or Ctrl-C (Slurm's signal before a time limit; to stop a StellarAI launch early, see step 7 of "The
+  StellarAI run path"): the campaigns are cancelled through the event loop and a record with `status:
+  interrupted` is written, with the campaigns that finished (exit 143). On the AUTONMI layer the populations report
+  into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check `every_population_ran` then
+  fails, and `autonmi.telemetry` gives each population's task counts. At 10,000 campaigns on a laptop the run
+  exited 37.8 s after SIGTERM in the ladder of 2026-11-25, and about 55 s in a run recorded here on 2026-11-23
+  (measured). The AUTONMI layer's interrupted record keeps the model figures of every call made up to the signal,
+  the unfinished campaigns' included, and says so (`speed.coverage.model_calls`): each population that has not
+  ended writes its call sums and its roles' model counts then (`Script.cut_short`). `counts.by_role`'s other counts
+  come from AUTONMI's rows, which a population writes only when it ends.
 - An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
   exits when its worker dies.
 
@@ -432,7 +437,7 @@ section.
 |---|---|
 | `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`) |
 | `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts `a<first>` to `a<first+count-1>`), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
-| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
+| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation; the asynchronous mode refuses mutation unless `llm.mode` is off), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub, openai, or off: no model calls, the asynchronous mode only), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server; 0 tokens: no token cap); the AUTONMI layer's request settings, null by default: `thinking` (off or on; YAML's bare `off` and `on` are read as these), `reply_cap`, `temperature`, `top_p` (above 0, at most 1); and `outage_s` (how long a call waits out a server that went away; 1,800, AUTONMI's) |
 | `workers` | `sim_workers` (inner-loop processes in all; each agent process or population gets its share, at least one); `gpu_per_worker` (the AUTONMI layer with `--sim real`; default false) |
@@ -473,11 +478,14 @@ warm-up), each role's cycles, the Generator's waits for survivors and its propos
 replies filled (0 to 7). The roles' own calls are counted, not listed: each population sums them
 (`layer_autonmi.CallSums`) for the record's model figures.
 
-**The record toggle, `record.extras`** (off by default). Off, the record and the lines hold counts only, and the
-tokens per second (`speed.model_tokens_per_s`). On, they also hold:
+**The record toggle, `record.extras`** (off by default). Off, its additions are left out: the roles' own calls
+are counted, not listed (the record has the tokens per second, `speed.model_tokens_per_s`, and each line its
+times, best candidate and summary, and in the generations mode its refill and summary calls' details). On, they
+also hold:
 - in each campaign's line: each candidate's Monitor numbers, q, label, note and (the generations mode with
   `campaign.notes`) assessment, as `monitor`; in the asynchronous mode each result's arrival number, q, m, score,
-  draw and kept flag, each Coordinator cycle's guidance, and the orders a replay needs, as `asynchronous`; and
+  draw and kept flag, each Coordinator cycle's guidance, and the orders a replay with `llm.mode: off` or the stub
+  needs, as `asynchronous`; and
   every call's details in `llm_call_details`, each with the `server` that answered it. All are outside
   `results_sha256`;
 - in the record: each role's share of time in a model call over the steady window (`speed.model_call_share`), the
@@ -550,8 +558,9 @@ FIXTURE standing in for a vLLM server); real vLLM is unverified until a run on t
   the populations. They are the client's caps: above what a server can run, the extra requests wait in the
   server's queue. The StellarAI knob file puts them out of reach, so vLLM's `--max-num-seqs` is the only cap.
 - **Outages:** a server that goes away is waited out for up to `llm.outage_s` (AUTONMI's `ServerRecovery`), which
-  re-reads the endpoints and key files, as after a requeued model job; then the call fails (and is tried again,
-  up to 3 tries in all).
+  re-reads the endpoints and key files, as after a requeued model job; then the try fails (and is tried again,
+  up to 3 tries in all, so up to 3 x `llm.outage_s` a call, again on each later call to a server that stays
+  down).
 - **The servers' setup files**, with `record.extras`: copied into `<run>/model_service/` with every secret left
   out (`layer_autonmi.copy_model_service`).
   - **What:** when the endpoints file's folder holds `setup-files` (`layer_autonmi.SETUP_LIST`, which the
@@ -608,7 +617,7 @@ machine.**
 
 | `FUSION_MODEL_NODES` | The servers | The campaigns | For |
 |---|---|---|---|
-| 0 (default) | `jobs/model.sh` in the background on this job's 8 GPUs | this node, `--sim fixture` | the wiring check: one node, servers and campaigns together |
+| 0 (default) | `jobs/model.sh` in the background on this job's 8 GPUs | this node; pass `--sim fixture` (the script does not add it, and the servers hold the GPUs) | the wiring check: one node, servers and campaigns together |
 | N | N model jobs through AUTONMI's `jobs/submit model`, one 8-GPU node each | this node, the real inner loop, one GPU per worker under an MPS daemon | two nodes (N = 1), and the scale run (N = 4) |
 
 With `FUSION_KEEP_SERVERS=1` (and `FUSION_MODEL_NODES`), a launch whose servers passed the check leaves them
@@ -625,9 +634,10 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
 2. One key for every server (`fleet/api-key`, owner-only, copied into each model job's folder before it starts,
    since `model.sh` keeps a key it finds). The key is never printed.
 3. The servers started, and waited for (`FUSION_MODEL_WAIT`, 3,600 s; it stops early if `model.sh` or a model
-   job ends first). Then `fleet/endpoints`, the model jobs' own endpoints in order, rewritten whenever one
-   changes (a requeued job; looked at every 10 s), and `fleet/setup-files`, the files a run with `record.extras`
-   copies (the endpoints, `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
+   job ends first: a job has ended on an end state from `squeue`, or after 3 calls in a row that gave no state).
+   Then `fleet/endpoints`, the model jobs' own endpoints in order, rewritten whenever one changes (a requeued job;
+   looked at every 10 s), and `fleet/setup-files`, the files a run with `record.extras` copies (the endpoints,
+   `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
 4. `launch/probe_model.py`; its failure stops the launch.
 5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none).
 6. The run, `python -m fusion_miniapp.layer_autonmi --preset hundredk --knobs knobs/machines/stellar_ai.yaml
@@ -637,17 +647,22 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    given there wins; `--agents` sets a smaller run.
 7. It stops the run only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit
    (`--signal=B:TERM@900`; the run needs about a minute to write its interrupted record), or once the node's
-   available memory falls below `FUSION_MEM_FLOOR_GIB` (100). It never signals an `srun` client.
+   available memory falls below `FUSION_MEM_FLOOR_GIB` (100). It never signals an `srun` client. To stop a run
+   early, use `scancel --batch --signal=TERM <job id>`: it signals the script alone, as Slurm's warning does. A
+   plain `scancel` sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which can
+   come before the run has written its record and before step 8, so the model jobs serve on until
+   `FUSION_MODEL_TIME` (inferred from Slurm's documentation; not yet run on the machine).
 8. At the end, whatever happened: when this launch started the servers (and `FUSION_KEEP_SERVERS=1` did not keep
    them), a stop file in each model job's folder (`model.sh` then stops its servers and the job ends), and a model
-   job not yet serving cancelled (not running, or without its endpoints: it would remove its stop file when it
-   starts); the MPS daemon quit; the GPUs checked for processes left; the node-local folder removed. It exits with
-   the run's status.
+   job not yet serving cancelled (not running, without its endpoints, or with no state from `squeue`: it would
+   remove its stop file when it starts); the MPS daemon quit; the GPUs checked for processes left; the node-local
+   folder removed. It exits with the run's status.
 
 **Once, on StellarAI (on the machine; not run):**
 
 ```sh
 # the campaign venv: this package, the AUTONMI framework and requirements-autonmi.txt, and torch's CUDA build
+# (the one launch/stellar_ai.sbatch names)
 export FUSION_MINIAPP_DIR=/path/to/fusion_miniapp FUSION_ENV=/path/to/campaign-venv
 export FUSION_SCRATCH=/scratch/gpfs/<group>/<you> RASCAL_REPO=/path/to/autonmi
 export SBATCH_ACCOUNT=<account> SBATCH_PARTITION=gpu
@@ -787,7 +802,8 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
   `bash -n`, its dry run in each of its three ways, a whole launch against two fake model nodes (fake Slurm and
   GPU tools, fake vLLM servers on localhost), SIGTERM reaching the run, the wiring check with a fake `model.sh`
   (late endpoints, the endpoints' refresh, the stop file), launches that stop before the run (a `model.sh` that
-  ends, model jobs that never start, a server down, a failure under `set -u`), and servers kept by one launch and
+  ends, model jobs that never start, a server down, a failure under `set -u`; a model job's state from squeue:
+  one failed call, an end state, none at the end), and servers kept by one launch and
   reused by the next; `launch/probe_model.py` against two fake servers, and each reason it stops a launch.
 - `tests/test_decode_metric.py` checks the decoding metric's arithmetic against brute-force recounts.
 
@@ -806,14 +822,17 @@ performance claims for a machine. Every number below is measured unless marked o
     warm-up were kept (49.8% at `monitor.weight` 0, 50.0 to 50.7% at 0.25).
   - With the stub at 2 s a call (emulated) and 500 campaigns, about 4.2 of a campaign's 5 agents were in a model
     call over the middle of the run, on battery in Low Power Mode, where the agents' one process saturated a core.
-    On AC power the ladder below gives about 4.7 to 4.8 (4.82 in its run, 4.74 in four repeats).
+    On AC power the ladder below gives about 4.7 to 4.8 (4.82 in its run, 4.74 in four repeats whose records are
+    not kept in the repository).
 - **The laptop ladder of 2026-11-25** (the final shape, fixture inner loop, one population, AC power; every model
   call to the stub or to fake servers, and in the generations mode, with `campaign.notes` off by default, only the
-  refill and the summary call the model; records, figures and the script in `results/laptop_2026-11-25/`):
+  refill and the summary call the model; records, figures and the script in `results/laptop_2026-11-25/`; the
+  script runs on macOS only, since it reads `pmset` and macOS's `netstat`):
   - every hosted agent live at once at 2,500, 10,000 and 50,000 agents (500, 2,000 and 10,000 campaigns, the
     asynchronous mode; the generations mode at 500 too);
   - 4.82, 4.81 and 4.79 of a campaign's 5 agents in a model call with the stub at 2 s, 8 s and 40 s a call
-    (emulated; one run each, and 4.74 in four repeats at 500), against 4.9 modelled; in the asynchronous mode
+    (emulated; one run each, and 4.74 in four repeats at 500 not kept in the repository), against 4.9 modelled
+    before the build for identical call times (not measured); in the asynchronous mode
     with the stub at 1 ms, 542 to 584 evaluations per second; peak memory 9,169 MiB at 10,000 campaigns;
   - SIGTERM at 10,000 campaigns: exit 143 and a record of the 5,060 campaigns that had finished, without their
     model-call figures (the code then wrote none for an interrupted run; it now keeps them, see "How a run ends
