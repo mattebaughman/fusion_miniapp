@@ -530,7 +530,8 @@ class CallSums:
     counts of requests in flight and queued, and the tokens per second, that record.write makes from each call's
     times and tokens), and written at the population's end beside its campaign lines (`write`, calls-p<index>.npz),
     where part() reads them (`read`); write_record removes the file once the record is written. With
-    record.extras it also counts the requests sent, by role and settings (`requests`: Script._ask)."""
+    record.extras it also counts the requests sent, by role and settings (`requests`: Script._ask). A population
+    that SIGTERM stops before its end writes the same file, with each role's model counts (Script.cut_short)."""
 
     def __init__(self) -> None:
         self.n = Counter()   # calls, errors, empty, retried
@@ -556,11 +557,14 @@ class CallSums:
         self.times.extend((d["t_end"], d["service_s"], d["recovery_s"], d["wait_s"], d["prompt_tokens"] or 0,
                            d["completion_tokens"] or 0))
 
-    def write(self, path: Path) -> None:
-        """To `path` (none without a call or a request counted)."""
-        if self.n["calls"] or self.requests:
+    def write(self, path: Path, by_role: dict | None = None) -> None:
+        """To `path` (none without a call or a request counted, unless with `by_role`: the model counts of each role
+        of a population that SIGTERM stopped, Script.cut_short)."""
+        if self.n["calls"] or self.requests or by_role is not None:
             counts = {"n": self.n, "budgets": self.budgets, "finish_reasons": self.finish_reasons,
                       "tokens": self.tokens, "requests": self.requests}
+            if by_role is not None:
+                counts["by_role"] = by_role
             np.savez(path, counts=json.dumps(counts), latency=np.array(self.latency, dtype=float),
                      times=np.array(self.times, dtype=float).reshape(-1, 6))
 
@@ -666,6 +670,7 @@ class Fusion:
     def __init__(self, knobs: dict, sim: str, out: Path, work_root: str | None = None) -> None:
         self.knobs, self.sim, self.out, self.work_root = knobs, sim, Path(out), work_root
         self.populations: dict[str, asyncio.Task] = {}   # p000...: the task running each population here (build)
+        self.scripts: dict[str, Script] = {}   # p000...: each population's Script here, until its rows (cut_short)
         self.live: Counter = Counter()   # agents started and ended in this process (LiveLine)
         self.context: int | None = None   # the model servers' context (max_model_len), for the prompt-length check
         self.transport = transport_settings(None)   # what the transports send with every call (record.extras)
@@ -693,11 +698,13 @@ class Fusion:
 
     def build(self, pop) -> ScriptedAgent:
         """Called in the task that runs the population (locally, a block of the run's engine), which is
-        kept so that an interrupted run can wait for the population to end (miniapp_workflow). Before the
-        population's host starts: the full collections' setting (bound_full_collections)."""
+        kept so that an interrupted run can wait for the population to end (miniapp_workflow), with its Script,
+        whose model figures SIGTERM writes when the population has not written its rows (Script.cut_short).
+        Before the population's host starts: the full collections' setting (bound_full_collections)."""
         bound_full_collections()
         self.populations[f"p{pop.index:03d}"] = asyncio.current_task()
-        return Script(self, pop).agent()
+        script = self.scripts[f"p{pop.index:03d}"] = Script(self, pop)
+        return script.agent()
 
     def rows(self, pop) -> list[dict]:
         """At the population's end, in its process: one row per hosted agent, with its role and campaign,
@@ -716,6 +723,7 @@ class Fusion:
         if sc is None:   # the population ended before its agents were built
             return [{"agent_id": a, "finished": False, "simulations": 0, "population": pop.index}
                     for a in pop.agent_ids]
+        self.scripts.pop(f"p{pop.index:03d}", None)   # its model figures are written here
         sc.lines.close()
         sc.sums.write(sums_file(Path(sc.lines.name), pop.index))
         mail, left, out = sc.mail, sc.mail.left(), []
@@ -995,6 +1003,7 @@ class Script:
         # Generator's proposals by parameters filled; each campaign's calls answered; the servers' context
         self.calls_on = decide.role_calls(self.knobs)
         self.asks, self.tries, self.fallbacks = Counter(), Counter(), Counter()
+        self.replies: Counter = Counter()   # each role's calls answered (on_call), for cut_short
         self.filled: dict[str, list] = {}
         self.answered: Counter = Counter()
         self.sums = CallSums()
@@ -1510,14 +1519,15 @@ class Script:
 
     def on_call(self, rec, reply: Reply) -> None:
         """A model call that returned: counted for its campaign's line (n_llm_calls in the asynchronous mode) while
-        the line is still to be written, and its details (`_detail`), as run.Services keeps them, with its times
-        (Flowgentic's CallRecord): it was in flight at the server from t_end - service_s to t_end, after
-        recovery_s of failed tries (latency_s is their sum) and, before those, wait_s for admission. With
-        record.extras also the server that answered it (`server`: the fleet's replica, the index of the model
-        job's endpoints, llm_service.servers; 0 for the stub)."""
+        the line is still to be written, and per role (`replies`, cut_short's), and its details (`_detail`), as
+        run.Services keeps them, with its times (Flowgentic's CallRecord): it was in flight at the server from
+        t_end - service_s to t_end, after recovery_s of failed tries (latency_s is their sum) and, before those,
+        wait_s for admission. With record.extras also the server that answered it (`server`: the fleet's replica,
+        the index of the model job's endpoints, llm_service.servers; 0 for the stub)."""
         m, campaign = rec.meta or {}, campaign_of(rec.agent_id)
         if self._open(campaign):
             self.answered[campaign] += 1
+        self.replies[m.get("role")] += 1
         self._detail(campaign, m.get("own", False), {
             "role": m.get("role"), "reply_tokens": m.get("reply_tokens"), "budget": m.get("budget"),
             "latency_s": round(rec.service_s + rec.recovery_s, 4), "wait_s": round(rec.wait_s, 4),
@@ -1548,6 +1558,22 @@ class Script:
 
     def _line(self, line: dict) -> None:
         self.lines.write(json.dumps(line, sort_keys=True, default=str) + "\n")
+
+    def cut_short(self) -> None:
+        """SIGTERM stopped the population before its rows (miniapp_workflow): its calls' sums, written as rows()
+        writes them, for the record's model figures, with every call up to then. The details not yet in a line (the
+        campaigns that never finished) are summed too, and each role's calls answered (AUTONMI's model_calls, which
+        counts the same replies), asked, tried and fallen back go with them (`by_role`), in place of the rows."""
+        for calls in self.calls.values():
+            for d in calls:
+                self.sums.add(d)
+        self.calls.clear()
+        out = {role: {"model_calls": self.replies[role], "model_asks": 0, "model_tries": 0, "model_fallbacks": 0}
+               for role in ROLES}
+        for k, counts in (("model_asks", self.asks), ("model_tries", self.tries), ("model_fallbacks", self.fallbacks)):
+            for agent, n in counts.items():
+                out[role_of(agent)][k] += n
+        self.sums.write(sums_file(Path(self.lines.name), self.pop.index), by_role=out)
 
 
 def _state(s: dict, phase: str, **memory) -> dict:
@@ -2056,7 +2082,8 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
             # run's verify() sees every population, and asyncio.run does not cancel one again mid-write. A
             # population cancelled before build (while its engine starts) is not waited for: it reports
             # nothing, and the run's telemetry says so. Under Dragon, build runs in the populations' own
-            # processes and nothing is waited for here. Then the check the campaign records for its own
+            # processes and nothing is waited for here. Each population that has not written its rows then
+            # writes its model figures (Script.cut_short; locally). Then the check the campaign records for its own
             # cancels, every_population_ran, fails with the populations the signal cancelled (under Dragon,
             # all of them: this process cannot tell which had ended).
             pops, grace, t = definition.populations, campaign.config.cancel_grace_s, time.perf_counter()
@@ -2069,6 +2096,12 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
             if running:
                 print(f"[fusion/autonmi] warning: {running} still running {grace} s (cancel_grace_s) after the "
                       "signal: their telemetry may be cut short", file=sys.stderr, flush=True)
+            for name, sc in list(definition.scripts.items()):
+                try:
+                    sc.cut_short()
+                except Exception as exc:   # the record is still written, without them
+                    print(f"[fusion/autonmi] warning: {name}'s model figures are not kept: {type(exc).__name__}: "
+                          f"{exc}", file=sys.stderr, flush=True)
             app.check("every_population_ran", ok=False, detail={
                 "failed": {}, "cancelled": cancelled, "timed_out": [], "interrupted": True,
                 "waited_s": round(time.perf_counter() - t, 1), "cancel_grace_s": grace, "still_running": running})
@@ -2154,7 +2187,8 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     interrupted population has none). The counts from the lines are those of the campaigns that reported. The
     model calls not in the lines (CallSums) count in llm_service, and their times and tokens (`call_times`) in
     record.write's client-side counts and tokens per second; with record.extras its requests' settings
-    (`requests`)."""
+    (`requests`). A population that SIGTERM stopped before its rows: every call up to then, and its roles' model
+    counts (`by_role`, Script.cut_short)."""
     lines = [json.loads(x) for x in lines_file.read_text().splitlines() if x]
     sums = CallSums.read(sums_file(lines_file, index))   # the calls not in the lines
     done = [r for r in lines if "error" not in r]
@@ -2168,6 +2202,7 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
         "call_times": None if sums is None else {"calls": sums["n"].get("calls", 0),
                                                  "retried": sums["n"].get("retried", 0), "times": sums["times"]},
         "requests": (sums or {}).get("requests"),   # record.extras: the request settings sent (write_record)
+        "by_role": (sums or {}).get("by_role"),     # cut short by SIGTERM: its roles' model counts (write_record)
         "tool_calls": dict(Counter(what for _ in done for what in decide.lookups(knobs))),
         "sim_tasks": runner.get("simulations", sum(r["n_sims"] for r in done)),
         # one memory write per generation, or per Coordinator cycle in the asynchronous mode
@@ -2271,14 +2306,15 @@ def _rows(out: Path) -> list[dict]:
             for x in f.read_text().splitlines() if x.strip()]
 
 
-def by_role(rows: list[dict]) -> dict:
+def by_role(rows: list[dict], cut: list[dict] = ()) -> dict:
     """counts.by_role, from AUTONMI's rows: each role's agents, those that ended normally, their model calls
     (the fleets' count of replies; and the layer's of calls asked, tries and fallbacks: Script._ask), lookups,
     messages sent, received and dropped (a failed campaign's), suspensions
     (AUTONMI's: the Monitors', one per evaluation unless it had ended when the Monitor asked), the
     evaluations the Monitors submitted, the inner-loop traces they got (monitor.capture) and the reports they
     sent, and each agent's seconds waiting for messages (their sum, and n, mean, median, 95th percentile and
-    maximum over the agents)."""
+    maximum over the agents). `cut`: the four model counts of each population that SIGTERM stopped before its
+    rows (Script.cut_short), added to its roles'; their other counts are not known here."""
     out = {}
     for role in ROLES:
         rs = [r for r in rows if r.get("role") == role]
@@ -2290,6 +2326,10 @@ def by_role(rows: list[dict]) -> dict:
                                                                      "suspensions", "simulations", "traces",
                                                                      "reports")},
                      "message_wait_s": {"sum": round(sum(waits), 3), **record._pct(waits)}}
+    for counts in cut:
+        for role, c in counts.items():
+            for k, n in c.items():
+                out[role][k] += n
     return out
 
 
@@ -2457,7 +2497,8 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     and counted (`llm_service.requests`), the model servers in the order of a call's `server` (`llm_service.servers`)
     and a copy of their setup files without their secrets (`model_service/`: copy_model_service). With
     workers.gpu_per_worker, the GPUs the inner-loop workers were placed on (`autonmi.inner_loop_gpus`). A run
-    whose AUTONMI checks fail fails."""
+    whose AUTONMI checks fail fails. When SIGTERM stopped a population before its rows, its model figures are
+    of every call up to then (Script.cut_short), which `speed.coverage.model_calls` says."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -2467,10 +2508,15 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
             parts.append(part(a, knobs, i, f, loop_lag=loop_lag, device=device, threads=threads))
         else:   # the population never started
             failed.append(i)
+    cut = [p["by_role"] for p in parts if p.get("by_role")]   # the populations SIGTERM stopped before their rows
     refs = references(knobs)
     roles = {**dict.fromkeys(ROLES[:3], 1), "monitor": knobs["campaign"]["slots"]}   # agents per campaign
     rec = record.write(out, knobs=knobs, layer="autonmi", sim=a.sim, parts=parts, failed=failed, wall_s=wall_s,
                        interrupted=interrupted, t_run=t_run, model_refs=refs, roles=roles)
+    if cut:   # their calls, the unfinished campaigns' too, against the phase of the campaigns that finished
+        rec["speed"]["coverage"]["model_calls"] = (
+            "every call up to the signal, the unfinished campaigns' included: llm_service, counts.by_role's model "
+            "counts and speed's model figures (not model_call_share)")
     for i in range(a.populations):   # summed into the record (part): not kept beside it
         sums_file(out / f"agents-p{i:03d}.jsonl", i).unlink(missing_ok=True)
     try:
@@ -2489,7 +2535,7 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     # counts.agents keeps meaning campaigns (as in the other layers' records); the hosted agents are 3 + slots each
     per = agents_per_campaign(knobs)
     rec["counts"].update(campaigns=n, hosted_agents=per * n, agents_per_campaign=per,
-                         roles=list(ROLES), by_role=by_role(rows),
+                         roles=list(ROLES), by_role=by_role(rows, cut),
                          expected_by_role={role: {**e, "lookups": len(e["lookups"]), **messages(knobs)[role]}
                                            for role, e in decide.expected_by_role(knobs).items()})
     if decide.asynchronous(knobs):   # the mode, and its counts

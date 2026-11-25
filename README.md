@@ -414,8 +414,10 @@ model that never answers would leave every campaign on the parent's mutants, and
   the populations report into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check
   `every_population_ran` then fails, and `autonmi.telemetry` gives each population's task counts. At 10,000
   campaigns on a laptop the run exited about 55 s after SIGTERM (measured). The AUTONMI layer's interrupted record
-  has no per-role counts and no model-call figures: AUTONMI's rows and the population's call sums are written when
-  a population ends (measured in the 2026-11-25 ladder).
+  keeps the model figures of every call made up to the signal, the unfinished campaigns' included, and says so
+  (`speed.coverage.model_calls`): each population that has not ended writes its call sums and its roles' model
+  counts then (`Script.cut_short`). `counts.by_role`'s other counts come from AUTONMI's rows, which a population
+  writes only when it ends.
 - An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
   exits when its worker dies.
 
@@ -514,7 +516,8 @@ against the client's admission caps:
 - `rates_per_s.model_calls_all_agents` counts every agent's calls (every try); `counts.llm_calls` the outer
   loop's (the refills and summaries; in the asynchronous mode every call answered).
 
-An interrupted run's speed numbers cover only the campaigns that finished (`speed.coverage`).
+An interrupted run's speed numbers cover only the campaigns that finished (`speed.coverage`); on the AUTONMI layer
+its model figures cover every call made up to the signal (`speed.coverage.model_calls`).
 
 `python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json` checks two runs (two machines, or
 two layers): statuses, counts and non-machine knobs must agree; the campaigns too, exactly by digest or campaign by
@@ -770,8 +773,8 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
 - **The AUTONMI layer** (`tests/test_layer_autonmi.py`): the agents per campaign (their rows, messages, per-role
   counts, one Monitor report per inner loop, the store at the end); the same results at 1, 2 or 16 Monitor slots,
   in 1, 2 or 5 populations, with caps and workers; the Monitors' numbers and the planted split; the mailbox,
-  candidate queue and inboxes; an injected failure of each role ending its campaign alone; SIGTERM; the record
-  toggle. In the asynchronous mode: the invariants, a replay of recorded orders through the pure functions, each
+  candidate queue and inboxes; an injected failure of each role ending its campaign alone; SIGTERM, and the model
+  figures it keeps (with the stub and the fake server); the record toggle. In the asynchronous mode: the invariants, a replay of recorded orders through the pure functions, each
   role's call counted and its reply reaching where it goes, the request settings against the fake server, a
   server that fails every call (3 tries, each role's fallback, the same campaign as with no model calls), the
   prompt-length check, the Evaluator's limit of results per call, verify() catching each broken invariant.
@@ -813,7 +816,8 @@ performance claims for a machine. Every number below is measured unless marked o
     (emulated; one run each, and 4.74 in four repeats at 500), against 4.9 modelled; in the asynchronous mode
     with the stub at 1 ms, 542 to 584 evaluations per second; peak memory 9,169 MiB at 10,000 campaigns;
   - SIGTERM at 10,000 campaigns: exit 143 and a record of the 5,060 campaigns that had finished, without their
-    model-call figures (an interrupted record has none);
+    model-call figures (the code then wrote none for an interrupted run; it now keeps them, see "How a run ends
+    badly");
   - the StellarAI knob file against two fake servers: every request carried its settings, and both servers
     answered every role; and 12,000 model calls open at once from one process against two fake servers, none
     failed.

@@ -164,7 +164,9 @@ expected.
   calls: their lines show all 161,920 Generator slots filled by a reply. AUTONMI's rows and the layer's sums of
   each population's calls are written when the population ends, and the signal cancelled this run's one population
   first [measured]. A run stopped by SIGTERM, as at a batch job's
-  time limit, keeps its campaigns' results but loses their model figures.
+  time limit, keeps its campaigns' results but loses their model figures. The code has changed since this run: an
+  interrupted record now keeps the model figures of the calls made up to the signal (the repository README, "How a
+  run ends badly").
 
 **The StellarAI knob file against two fake servers** (20 campaigns) [run, measured]: all 1,864 request bodies the
 two servers received carry the file's settings: the model `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`,

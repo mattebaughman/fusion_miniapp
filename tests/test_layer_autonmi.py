@@ -19,6 +19,7 @@ Needs the AUTONMI framework (the package `autonmi`, installed separately) and Fl
 (requirements-autonmi.txt); skipped without them.
 """
 import asyncio
+import contextlib
 import copy
 import csv
 import hashlib
@@ -791,6 +792,77 @@ def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(t
     assert rec["autonmi"]["failed_checks"] == ["every_population_ran"] and not rec["autonmi"]["ok"]
     ran = next(c["detail"] for c in summary["checks"] if c["name"] == "every_population_ran")
     assert (ran["cancelled"], ran["still_running"], ran["interrupted"]) == (["p000", "p001"], [], True)
+
+
+@pytest.mark.parametrize("mode, llm", (("async", "stub"), ("async", "fake vLLM"), ("generations", "fake vLLM")))
+def test_sigterm_keeps_the_model_figures_of_the_calls_made_before_it(tmp_path, mode, llm):
+    """SIGTERM in the middle of a run with model calls (on StellarAI, Slurm's signal before the time limit): the
+    interrupted record keeps the figures of every call made up to the signal, the unfinished campaigns' included,
+    and says so (speed.coverage.model_calls): llm_service, the client-side counts and tokens per second, and each
+    role's calls answered, asked, tried and fallen back (Script.cut_short), of which the campaign lines count only
+    the finished campaigns' share. Against the fake vLLM server (a FIXTURE) every reply is held 20 s from a moment
+    before the signal, so none comes after it, and the record's calls answered, and their tokens, are exactly those
+    the server answered. No call sums file (calls-p*.npz) is left behind."""
+    knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 50}, "campaign": {"mode": mode},
+             "outer": {"population": 16, "generations": 2, "parent_stdout": "drop", "logs": "none"}}
+    server = None if llm == "stub" else FakeVllm()
+    if server is not None:
+        knobs["llm"] = {**SERVER_KNOBS["llm"], **({"thinking": "off"} if mode == "async" else {})}
+    out = tmp_path / "autonmi"
+    with contextlib.ExitStack() as stack, open(tmp_path / "stderr.txt", "w") as err:
+        extra = []
+        if server is not None:
+            stack.enter_context(server)
+            (tmp_path / "endpoints").write_text(server.url + "\n")
+            extra = ["--endpoints-file", str(tmp_path / "endpoints")]
+        p = subprocess.Popen([sys.executable, "-m", ENTRY["autonmi"], "--preset", "smoke", "--sim", "fixture",
+                              "--agents", "400", "--populations", "2", "--knobs", knob_file(tmp_path, knobs), *extra,
+                              "--out", str(out)], cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=err)
+        deadline = time.time() + 120
+        while not any(f.stat().st_size for f in out.glob("agents-p*.jsonl")):   # a campaign has finished
+            assert p.poll() is None and time.time() < deadline, (tmp_path / "stderr.txt").read_text()[-3000:]
+            time.sleep(0.2)
+        if server is not None:   # each reply from now on held 20 s; once none has come for 3 s, the run has the rest
+            server.latency_s = 20.0
+            answered, quiet = server.successes, time.time()
+            while time.time() - quiet < 3:
+                time.sleep(0.1)
+                if server.successes != answered:
+                    answered, quiet = server.successes, time.time()
+        t = time.time()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=90) == 143, (tmp_path / "stderr.txt").read_text()[-3000:]
+        assert time.time() - t < 60
+        received = len(server.bodies) if server is not None else None
+    rec = json.loads((out / "run_record.json").read_text())
+    rows = lines(tmp_path, "autonmi")
+    s, c, by = rec["llm_service"], rec["counts"], rec["counts"]["by_role"]
+    assert rec["status"] == "interrupted" and 0 < c["agents"] == len(rows) < 400
+    assert rec["speed"]["coverage"]["model_calls"].startswith("every call up to the signal, the unfinished")
+    assert not list(out.glob("calls-p*.npz"))
+    replies = s["calls"] - s["errors"]
+    assert s["errors"] == 0 and replies == sum(by[role]["model_calls"] for role in ROLES) > 0
+    for role in ROLES:   # none failed or fell back; a call in flight at the signal was asked and tried, not answered
+        b = by[role]
+        assert b["model_fallbacks"] == 0 and b["model_asks"] == b["model_tries"] >= b["model_calls"], role
+    callers = ROLES if mode == "async" else ("coordinator", "generator")   # (generations: the refills and summaries)
+    assert all(by[role]["model_calls"] > 0 for role in callers)
+    assert not any(by[role]["model_asks"] for role in ROLES if role not in callers)
+    # the campaign lines count the finished campaigns' calls; the unfinished ones had made calls too
+    assert c["llm_calls"] < replies
+    if mode == "async":   # each evaluation's note was asked
+        assert by["monitor"]["model_asks"] >= c["sims"] > 0
+    else:   # the finished campaigns' refills and summaries, in their lines
+        assert c["llm_calls"] == len([d for r in rows for d in r["llm_call_details"]])
+    flight, tokens = rec["speed"]["model_requests_in_flight"], rec["speed"]["model_tokens_per_s"]
+    assert (flight["calls_timed"], flight["calls_untimed"]) == (replies, 0) and flight["max"] > 0
+    assert tokens["calls"] > 0 and tokens["prompt_per_s"] > 0 and tokens["emulated"] == (server is None)
+    assert rec["speed"]["model_latency_s"]["n"] == s["calls"] == rec["llm_check"]["replies"]["calls"]
+    if server is not None:   # exactly the replies it sent before the signal, at the fixture's 100 + 50 tokens each
+        assert replies == answered
+        assert (s["tokens"]["prompt"], s["tokens"]["completion"]) == (100 * replies, 50 * replies)
+        assert answered <= received <= sum(by[role]["model_tries"] for role in ROLES)   # a try may wait for admission
+        assert tokens["generated_per_s"] * tokens["window_s"] == pytest.approx(50 * tokens["calls"], rel=1e-3)
 
 
 def test_the_out_folder_holds_one_run(tmp_path):
