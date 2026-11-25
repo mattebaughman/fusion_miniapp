@@ -282,13 +282,13 @@ class Mailbox:
     queues <campaign>/<kind>: `put` adds an item, `take` gives the next one to whichever agent asks (the
     first that waits), so the sender addresses no one, and `emptied` waits until none is left on it (`most`:
     the most items it held at once). Each agent has inboxes <campaign>/<agent>/<kind> (the asynchronous
-    mode): `deliver` adds a message, `take_all` takes every one that has arrived, in the order sent, waiting
-    for one if there is none (or, with wait=False, none). A waiting agent awaits inside its own step, counted
-    by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken once, never polled. `fail(campaign)` fails
-    that campaign's waits, now and later, and drops its messages not yet received (counted per receiver in
-    `dropped`, a campaign queue's under its own key); a message that has already woken its receiver is that
-    receiver's, received and not dropped. With agents.start_together, `all_started` is set when every agent of
-    the population has started."""
+    mode): `deliver` adds a message, `take_all` takes every one that has arrived (the first `limit` of them
+    when given), in the order sent, waiting for one if there is none (or, with wait=False, none). A waiting
+    agent awaits inside its own step, counted by Flowgentic as waiting on a tool (TOOL_WAIT), and is woken
+    once, never polled. `fail(campaign)` fails that campaign's waits, now and later, and drops its messages
+    not yet received (counted per receiver in `dropped`, a campaign queue's under its own key); a message that
+    has already woken its receiver is that receiver's, received and not dropped. With agents.start_together,
+    `all_started` is set when every agent of the population has started."""
 
     def __init__(self, agents: int) -> None:
         self.agents, self.started, self.all_started = agents, 0, asyncio.Event()
@@ -400,9 +400,9 @@ class Mailbox:
         """A message for agent <campaign>/<to>'s inbox of `kind` (take_all)."""
         self.put(sender, f"{to}/{kind}", value)
 
-    async def take_all(self, me: str, kind: str, wait: bool = True) -> list:
-        """Every message in my inbox of `kind`, in the order sent; if there is none, wait for one (or, with
-        wait=False, none)."""
+    async def take_all(self, me: str, kind: str, wait: bool = True, limit: int | None = None) -> list:
+        """Every message in my inbox of `kind`, in the order sent (at most `limit`: the rest stay for the next
+        take); if there is none, wait for one (or, with wait=False, none)."""
         campaign = campaign_of(me)
         if campaign in self.failed:
             raise CampaignFailed(self.failed[campaign])
@@ -418,9 +418,9 @@ class Mailbox:
             finally:
                 self.waited[me] += time.perf_counter() - t
         if q is not None:
-            texts += q.items
-            q.items.clear()
-            if not q.waiting and self.queues.get(key) is q:
+            n = len(q.items) if limit is None else max(0, min(len(q.items), limit - len(texts)))
+            texts += [q.items.popleft() for _ in range(n)]
+            if not q.items and not q.waiting and self.queues.get(key) is q:
                 del self.queues[key]
         self.received[me] += len(texts)
         return [json.loads(x) for x in texts]
@@ -492,6 +492,26 @@ def transport_settings(model: dict | None) -> dict:
     if model.get("thinking_off"):
         out["extra_body"] = {"chat_template_kwargs": dict(model["thinking_off"])}
     return out
+
+
+def request_fields(knobs: dict, budget: int, reply_tokens: int) -> dict:
+    """A model call's request fields (Script._request; launch/probe_model.py sends the same): by default run.py's
+    OpenAIChat's, max_tokens = thinking budget + reply allowance, vLLM's thinking_token_budget (unless
+    llm.send_thinking_budget is false), and no temperature (AUTONMI's transports set 0; None leaves the server's
+    default). The llm knobs change them: with llm.reply_cap, max_tokens is the cap plus the budget (the cap alone
+    with llm.thinking off); llm.thinking off sends no budget (the transports send chat_template_kwargs,
+    miniapp_workflow); llm.temperature and llm.top_p are sent as set. No per-call extra_body otherwise: one would
+    replace the transports' own (flowgentic/fleet/_transport.py:555-556). Admission reserves the budget and the
+    allowance (`reserve`)."""
+    k = knobs["llm"]
+    cap = budget + reply_tokens if k["reply_cap"] is None else k["reply_cap"] + (0 if k["thinking"] == "off"
+                                                                                  else budget)
+    fields = {"max_tokens": cap, "reserve": budget + reply_tokens, "temperature": k["temperature"]}
+    if k["top_p"] is not None:
+        fields["top_p"] = k["top_p"]
+    if k.get("send_thinking_budget", True) and k["thinking"] != "off":
+        fields["extra_body"] = {"thinking_token_budget": budget}
+    return fields
 
 
 def sent(transport: dict, kwargs: dict) -> dict:
@@ -940,7 +960,6 @@ class Script:
     def __init__(self, definition: Fusion, pop) -> None:
         self.knobs, self.sim, self.out, self.pop = definition.knobs, definition.sim, definition.out, pop
         self.live = definition.live
-        self.send_budget = self.knobs["llm"].get("send_thinking_budget", True)
         self.G, self.roles = self.knobs["outer"]["generations"], decide.expected_by_role(self.knobs)
         self.P, self.slots = self.knobs["outer"]["population"], self.knobs["campaign"]["slots"]
         self.extras = self.knobs["record"]["extras"]
@@ -1317,15 +1336,16 @@ class Script:
         return calls
 
     async def _evaluator_async(self, s: dict, event, ask):
-        """Its cycle until the budget's results are scored: every report that has arrived (waiting for one),
-        scored in arrival order against the campaign's window, which its statistics hold
-        (decide.async_evaluate), each trace labelled (`_label_async`); its model call, whose keep-probabilities
-        are the scores (from numbers when it falls back); the scored results to the Coordinator and a digest to
-        the Generator. Then done."""
+        """Its cycle until the budget's results are scored: every report that has arrived (waiting for one; with
+        its model call at most decide.SHOWN_RESULTS, the rest left for its next cycle in arrival order), scored in
+        arrival order against the campaign's window, which its statistics hold (decide.async_evaluate), each trace
+        labelled (`_label_async`); its model call, whose keep-probabilities are the scores (from numbers when it
+        falls back); the scored results to the Coordinator and a digest to the Generator. Then done."""
         me, campaign = s["agent_id"], s["campaign"]
         scored_n, replay = 0, self._replay(campaign)
+        limit = decide.SHOWN_RESULTS if self.calls_on else None
         while scored_n < self.B:
-            reports = await self.mail.take_all(me, "report")
+            reports = await self.mail.take_all(me, "report", limit=limit)
             stats = self._stats(campaign)
             stats.recent, scored, digest = decide.async_evaluate(stats.recent, reports, self.knobs)
             for r, sc in zip(reports, scored):
@@ -1395,24 +1415,10 @@ class Script:
         self.mail.send(me, to, kind, g, value)
 
     def _request(self, budget: int, reply_tokens: int, role: str, own: bool) -> dict:
-        """A call's request fields: by default run.py's OpenAIChat's, max_tokens = thinking budget + reply
-        allowance, vLLM's thinking_token_budget (unless llm.send_thinking_budget is false), and no temperature
-        (AUTONMI's transports set 0; None leaves the server's default). The llm knobs change them: with
-        llm.reply_cap, max_tokens is the cap plus the budget (the cap alone with llm.thinking off); llm.thinking
-        off sends no budget (the transports send chat_template_kwargs, miniapp_workflow); llm.temperature and
-        llm.top_p are sent as set. No per-call extra_body otherwise: one would replace the transports' own
-        (flowgentic/fleet/_transport.py:555-556). Admission reserves the budget and the allowance. `own`: a
-        role's own call (tried TRIES times), in the call's meta for on_call."""
-        k = self.knobs["llm"]
-        cap = budget + reply_tokens if k["reply_cap"] is None else k["reply_cap"] + (0 if k["thinking"] == "off"
-                                                                                      else budget)
-        kwargs = {"max_tokens": cap, "reserve": budget + reply_tokens, "temperature": k["temperature"],
-                  "meta": {"budget": budget, "reply_tokens": reply_tokens, "role": role, "own": own}}
-        if k["top_p"] is not None:
-            kwargs["top_p"] = k["top_p"]
-        if self.send_budget and k["thinking"] != "off":
-            kwargs["extra_body"] = {"thinking_token_budget": budget}
-        return kwargs
+        """A call's request fields (request_fields), with its meta for on_call. `own`: a role's own call (tried
+        TRIES times)."""
+        return {**request_fields(self.knobs, budget, reply_tokens),
+                "meta": {"budget": budget, "reply_tokens": reply_tokens, "role": role, "own": own}}
 
     async def _ask(self, me: str, ask, messages: list[dict], reply_tokens: int, budget: int, parse=None,
                    response_format: dict | None = None):
@@ -1736,6 +1742,9 @@ ENV_NAMES = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "PATH", "TMPDIR")
 LOG_HEAD_LINES = 500   # a log is copied as its head: version, non-default arguments, KV-cache memory
 LEFT_OUT = b"[secret left out]"
 SECRET_MIN = 8   # a secret-named variable's value is left out wherever it is only from this length: "1" is not
+# beside the endpoints file, the files to copy (launch/stellar_ai_autonmi.sbatch writes it): one path or glob per
+# line, relative to that folder, such as model-0/vllm-*.log for the first of several model jobs' folders
+SETUP_LIST = "setup-files"
 
 
 def leave_out(data: bytes, secrets: set[bytes]) -> tuple[bytes, int]:
@@ -1777,9 +1786,11 @@ def leave_out(data: bytes, secrets: set[bytes]) -> tuple[bytes, int]:
 def copy_model_service(endpoints_file: Path, api_key_file: str | None, out: Path) -> dict:
     """record.extras with --llm openai: the model servers' setup files, from the folder of the model job's endpoints
     file (AUTONMI's FLEET_DIR: endpoints, gpu.csv, each server's vllm-<i>.log, and what a launch script puts
-    there), copied into out/model_service/ with every secret left out:
+    there), copied into out/model_service/ with every secret left out. When that folder holds a SETUP_LIST (the
+    StellarAI launch script's, beside the endpoints file it combines from one or several model jobs' folders),
+    only the files it names are copied, at their paths relative to the folder; else every file of the folder:
     - not copied: the servers' key (api-key, and the --api-key-file), any file whose name says it holds a secret
-      (SECRET_FILE), and anything that is not a plain file;
+      (SECRET_FILE), anything that is not a plain file, and a listed path outside the folder;
     - a log (.log, .out, .err) is copied as its first LOG_HEAD_LINES lines;
     - environment.txt, this process's environment: only the variables of ENV_PREFIXES and ENV_NAMES, and none
       whose name says it holds a secret (VLLM_API_KEY among them);
@@ -1787,7 +1798,8 @@ def copy_model_service(endpoints_file: Path, api_key_file: str | None, out: Path
       (SECRET_MIN characters or more) of every environment variable whose name says it holds a secret, wherever
       they are; any value set by a secret-named name (HF_TOKEN=..., "api_key": "...", --api-key ...), whatever
       its length; and a URL's user and password. A secret under a name that does not say so, in a file whose
-      name does not say so, and not in this process's environment, cannot be known, and is copied.
+      name does not say so, and not in this process's environment, cannot be known, and is copied when the folder
+      has no SETUP_LIST (with one, only the files it names).
     Then every copied file is checked for the key and those variables' values, and one that still holds one is
     removed. No secret is printed or returned. Returns, for the record: the files copied, those not copied, the
     secrets left out (a count of stretches) and the files the check removed (none expected)."""
@@ -1805,21 +1817,37 @@ def copy_model_service(endpoints_file: Path, api_key_file: str | None, out: Path
         nonlocal left_out
         data, n = leave_out(data, secrets)
         left_out += n
+        (dest / name).parent.mkdir(parents=True, exist_ok=True)
         (dest / name).write_bytes(data)
         copied.append(name)
-    for f in sorted(src.iterdir()):
-        if f.is_symlink() or not f.is_file() or SECRET_FILE.search(f.name) or \
-                any(f.resolve() == k.resolve() for k in key_files):
-            skipped.append(f.name)
+    files, listed, root = [], src / SETUP_LIST, src.resolve()
+    if listed.is_file():
+        for line in listed.read_text().splitlines():
+            pattern = line.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            inside = not Path(pattern).is_absolute() and ".." not in Path(pattern).parts
+            found = sorted(src.glob(pattern)) if inside else []
+            if not found:
+                skipped.append(pattern)   # none such, or outside the folder
+            files += [f for f in found if f not in files]
+    else:
+        files = sorted(src.iterdir())
+    for f in files:
+        name = f.relative_to(src).as_posix()
+        if f.is_symlink() or not f.is_file() or SECRET_FILE.search(f.name) or not f.resolve().is_relative_to(root) \
+                or any(f.resolve() == k.resolve() for k in key_files):
+            skipped.append(name)
             continue
         data = f.read_bytes()
         if f.suffix in (".log", ".out", ".err"):
             data = b"".join(data.splitlines(keepends=True)[:LOG_HEAD_LINES])
-        put(f.name, data)
+        put(name, data)
     env = sorted(f"{k}={v}" for k, v in os.environ.items()
                  if (k.startswith(ENV_PREFIXES) or k in ENV_NAMES) and not SECRET_NAME.search(k))
     put("environment.txt", os.fsencode("\n".join(env) + "\n"))
-    removed = [f.name for f in sorted(dest.iterdir()) if any(s in f.read_bytes() for s in secrets)]
+    removed = [f.relative_to(dest).as_posix() for f in sorted(dest.rglob("*"))
+               if f.is_file() and any(s in f.read_bytes() for s in secrets)]
     for name in removed:
         (dest / name).unlink()
     return {"folder": "model_service", "files": sorted(set(copied) - set(removed)), "not_copied": skipped,

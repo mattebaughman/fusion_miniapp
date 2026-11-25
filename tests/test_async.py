@@ -8,12 +8,13 @@ import copy
 import csv
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
 from async_replay import fixture, replay
 
-from fusion_miniapp import decide, knobs as knob_files, monitor, record, sim
+from fusion_miniapp import decide, knobs as knob_files, monitor, record, sim, tools
 from fusion_miniapp.llm import StubLLM, numbers_only
 
 
@@ -311,3 +312,57 @@ def test_the_calls_per_campaign_are_bounded_by_role():
     assert decide.role_calls(hundredk) and not decide.role_calls(off)
     gen = knob_files.base()
     assert not decide.role_calls(gen) and decide.role_calls({**gen, "campaign": {**gen["campaign"], "notes": True}})
+
+
+CONTEXT, REPLY_CAP = 32768, 4096                # the servers' context and the reply cap of the StellarAI knob file
+PROMPT_BOUND = (CONTEXT - REPLY_CAP) * 3 // 4   # 21,504 characters: a quarter of what is left kept free
+
+
+def test_every_roles_longest_prompt_fits_the_context_by_construction():
+    """Each role's longest prompt in the asynchronous mode, at the StellarAI knob file's shape (the hundredk preset:
+    population 16, 32 candidates, both lookups), built from decide's bounds: a Monitor's note and the Coordinator's
+    guidance far past their reply caps are cut to NOTE_CHARS where a later prompt shows them, and one Evaluator call
+    shows SHOWN_RESULTS results. The longest of each part is taken: every survivor and score the Generator can
+    hold, the last two candidates' numbers, the longest abstract, every number shown at its widest plausible form
+    (results of nine characters, q at full precision, m and the steps as monitor.score gives them), and for the
+    Coordinator every result of the campaign judged in one cycle. Each prompt (its characters, as the layer counts
+    them) is under PROMPT_BOUND, so it fits the context with the reply cap and a quarter to spare."""
+    root = Path(__file__).resolve().parents[1]
+    k = knob_files.validate(knob_files.load(preset="hundredk", paths=[root / "knobs/machines/stellar_ai.yaml",
+                                                                       root / "knobs/machines/stellar_ai_nemotron.yaml"]),
+                            modes=("generations", "async"))
+    P, B, ranges = k["outer"]["population"], decide.async_budget(k), decide.ranges()
+    assert (P, B, k["llm"]["reply_cap"], decide.asynchronous(k)) == (16, 32, REPLY_CAP, True)
+    profile = {key: lo + (hi - lo) * 0.123456789 for key, (lo, hi) in ranges.items()}   # 6 places each
+    wide = 1234567.8   # a shown number of nine characters
+
+    def result(i: int) -> dict:
+        return {"candidate_idx": i, "params": profile, **{key: wide for key in decide.SHOWN[:4]},
+                "wall_ok": False, "pedestal_ok": False, "is_good": False}
+    long_text, q = "y" * 5 * decide.NOTE_CHARS, math.pi / 300   # q: 20 characters at full precision
+    numbers = {"m": -0.1234, "left_at": 47, "back_at": 48, "split_at": 46}
+
+    abstract = {"abstract": max((asyncio.run(tools.abstract(f"a{i}")) for i in range(30)), key=lambda a: len(a["text"]))}
+    gst = {**decide.async_generator_state("a99999", 99999, k, abstract), "survivors": [profile] * P,
+           "scores": [[B - 1, 0.1234]] * P, "guidance": long_text, "held": 1}
+    calls = [{"id": f"c{i}", "params": profile, "candidate_idx": i, "generation": i // P, "source": "mutation",
+              "filled": None} for i in (B - 2, B - 1)]
+    items = [{"candidate": B - 1 - j, "result": result(B - 1 - j), "q": q, "numbers": numbers, "note": long_text}
+             for j in range(decide.SHOWN_RESULTS)]
+    cst = {**decide.async_coordinator_state("a99999", 99999, k, {"constraints": asyncio.run(tools.constraints())}, 0.0),
+           "window": [{key: result(i).get(key) for key in decide.WINDOW_KEYS} for i in range(B - P, B)],
+           "arrived": B, "kept": B, "survivors": [{"candidate": i, "params": profile} for i in range(B - P, B)],
+           "best": {**decide.parent().empty_best_result(), "te_core_metric": wide, "te_wall_eV": wide,
+                    "te_ped_eV": wide, "is_good": False}}
+    rows = [{"candidate": i, "kept": False, "score": 0.1234} for i in range(B)]
+    prompts = {"generator": decide.async_generator_messages(gst, calls, k),
+               "monitor": decide.note_messages(result(B - 1), numbers),
+               "evaluator": decide.scores_messages(items),
+               "coordinator": decide.guidance_messages(cst, rows, k)}
+    sizes = {role: sum(len(m["content"]) for m in messages) for role, messages in prompts.items()}
+    assert PROMPT_BOUND == 21504 and all(size < PROMPT_BOUND for size in sizes.values()), sizes
+    for role, letter in (("generator", "y"), ("evaluator", "y")):   # each note and guidance cut where it is shown
+        text = prompts[role][-1]["content"]
+        assert letter * decide.NOTE_CHARS in text and letter * (decide.NOTE_CHARS + 1) not in text, role
+    assert prompts["evaluator"][-1]["content"].count("note: ") == decide.SHOWN_RESULTS
+    assert decide._cut("") == "" and decide._cut("abc") == "abc"

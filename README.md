@@ -1,669 +1,715 @@
 # Fusion mini-app workflow
 
-This is the "Fusion mini-app workflow" box at the top of the AUTONMI stack: LangGraph agents on
-FlowGentic and RHAPSODY, where every agent campaign is the IGNOS design loop, which calls an LLM, uses
-tools and runs a PyTorch simulation. It is for scaling to 100,000 campaigns running at once. Dragon and
-RaDEX are not wired in yet (see Open items).
+This is the "Fusion mini-app workflow" box at the top of the AUTONMI stack. Every agent campaign is the IGNOS
+fusion design loop: the parent's evolutionary outer loop, whose candidates are proposed, run, watched and judged
+by agents that make their own model calls, with the IGNOS inner loop (turned down) evaluating each candidate.
+It is built to run 100,000 hosted agents at once: on the AUTONMI layer a campaign is 5 agents, so 20,000 campaigns.
 
-**All physics output is synthetic.** The simulation runs the real IGNOS inner-loop code over small
-stand-in models with random weights. It makes the same kinds of data flow, library loads and
-resource touches as the real loop, at a fraction of the size. No result is calibrated, and none
-says anything about a plasma. Every run record says so (`emulated`, `method`, `note`).
+- **The final shape** is the AUTONMI layer (`layer_autonmi.py`): per campaign a Coordinator, a Generator, an
+  Evaluator and two Monitor slots, each a hosted agent with its own model calls, in one of two modes:
+  - `campaign.mode: generations`, the parent's generation barrier, whose results equal IGNOS's exactly;
+  - `campaign.mode: async`, one result at a time, with no barrier.
+- **Two more agent layers**, LangGraph on FlowGentic and RHAPSODY (`layer_langgraph.py`, the default of
+  `fusion_miniapp.run`) and Academy (`--use-academy`), run the same campaigns with three agents each, in the
+  generations mode only. They are kept unchanged as the comparison the AUTONMI layer is checked against.
+- **The run path on StellarAI** (`launch/stellar_ai_autonmi.sbatch`) brings up NVIDIA Nemotron 3.5 Lightning on
+  vLLM, checks every server, and runs the campaigns against it. It is configured and checked on a laptop only.
+
+**All physics output is synthetic.** The inner loop runs the real IGNOS inner-loop code over small stand-in
+models with random weights. It makes the same kinds of data flow, library loads and resource touches as the
+real loop, at a fraction of the size. No result is calibrated, and none says anything about a plasma. Every run
+record says so (`emulated`, `method`, `note`).
+
+The per-candidate evaluation is called **the inner loop** in this README; code names such as `--sim`, `sim.py`
+and the task `Simulate` keep the older word.
+
+## Quick start on a laptop
+
+The AUTONMI layer needs the AUTONMI framework, which is not public yet (the RADICAL team can provide access),
+installed into an environment made from `requirements-autonmi.txt` (its header gives the steps; see Install).
+With that environment active (`source .venv-autonmi/bin/activate`), from this folder:
+
+```sh
+python -m pytest -q          # the tests: about 9 minutes on a laptop on battery in Low Power Mode, less on AC
+python -m fusion_miniapp.layer_autonmi --preset smoke --sim fixture --agents 100 --out results/smoke-autonmi
+python -m fusion_miniapp.run --preset smoke --sim fixture --agents 100 --out results/smoke-langgraph
+python -m fusion_miniapp.compare_records results/smoke-autonmi/run_record.json results/smoke-langgraph/run_record.json
+printf 'campaign: {mode: async}\n' > results/async.yaml
+python -m fusion_miniapp.layer_autonmi --preset smoke --sim fixture --agents 100 --knobs results/async.yaml \
+    --out results/smoke-async
+```
+
+- The first run is the generations mode on the AUTONMI layer: 100 campaigns of the smoke shape (population 4,
+  2 generations), the fixture in place of the inner loop, the stub LLM. The second is the same campaigns on the
+  LangGraph layer, and `compare_records` finds their results equal ("results agree").
+- The last is the asynchronous mode: every agent makes its own call to the stub LLM.
+- Each run writes `run_record.json`, `agents.jsonl` and AUTONMI's folders under its `--out`, prints a one-line
+  JSON summary and a `speed:` line, and exits 0 when it passes.
+- The StellarAI launch script's dry run, which prints what it would do and needs no Slurm:
+
+```sh
+FUSION_DRY_RUN=1 FUSION_MINIAPP_DIR="$PWD" FUSION_ENV="$VIRTUAL_ENV" FUSION_SCRATCH=/tmp/fusion-dry \
+    bash launch/stellar_ai_autonmi.sbatch --agents 100 --sim fixture
+```
 
 ## What one campaign is
 
-Each campaign is the parent's outer loop, `run_evolutionary_loop` in FusionFM/Demo's
-`evolutionary_loop.py`, carried by the parent's three agents from its `evo_agents.py`: a
-**Coordinator**, a **Generator** and an **Evaluator**. The parent's unmodified functions do the
-sampling, selection, best-result tracking, logging and repopulation:
+Each campaign is the parent's outer loop, `run_evolutionary_loop` in FusionFM/Demo's `evolutionary_loop.py`,
+carried by the parent's three agents from its `evo_agents.py`, a **Coordinator**, a **Generator** and an
+**Evaluator**, with **Monitor slots** on the AUTONMI layer. The parent's unmodified functions do the sampling,
+selection, best-result tracking, logging and mutation (`initialize_population`, `select_survivors`,
+`update_best_result`, `log_generation`, `repopulate`, `mutate_params`).
 
-1. The Generator draws the starting population, `initialize_population(P, ...)`: P full parameter
-   sets (Latin hypercube).
+| Agent | How many | What it does |
+|---|---|---|
+| Coordinator | 1 | the outer loop: survival, the survivors, best-so-far, the parent's log, the budget; guidance to the Generator |
+| Generator | 1 | the candidates: the evolutionary loop's profiles, reconciled with its model call, onto the campaign's queue |
+| Monitor | `campaign.slots` (2) | each takes the next candidate from the queue, runs its inner loop, scores its trace and writes a note |
+| Evaluator | 1 | gathers the Monitors' reports and scores each result |
+
+- **On the AUTONMI layer** each agent is a hosted agent of its own: `a<i>/coordinator`, `a<i>/generator`,
+  `a<i>/evaluator`, `a<i>/monitor0`, `a<i>/monitor1`, ... Each has its own state, start and end, row in AUTONMI's
+  records (`app/agents-p*.jsonl`), model calls (under its own id) and lookups. So a campaign is 3 +
+  `campaign.slots` agents: 5 by default.
+- **They talk only through messages**: JSON copies in a mailbox per population (`layer_autonmi.Mailbox`), and
+  each campaign's **candidate queue** (`a<i>/candidates`). The Generator puts candidates on the queue, and a free
+  Monitor takes the next one. The Generator never addresses a Monitor, and no candidate passes through the
+  Coordinator.
+- A waiting agent awaits its message inside its step, counted as waiting on a tool, and is never polled. Only a
+  Monitor's wait for its inner loop is AUTONMI's real suspension (its state goes to the store).
+- **Lookups:** the Coordinator makes the constraints lookup, the Generator the abstract lookup
+  (`decide.LOOKUP_ROLE`; `tools.py`, plain in-process functions).
+- **Every id seen outside the agents is the campaign's**, `a<i>`: the stub's key, the evaluations' `agent_id`
+  (cold starts, work folders), the lookups, the store key `campaign/a<i>`, the campaign's folder and `run_tag`.
+- **On the LangGraph and Academy layers** a campaign is the three outer-loop agents (no Monitor slots), and the
+  Evaluator runs the generation's P inner loops itself.
+
+### The generations mode (`campaign.mode: generations`, the default)
+
+The parent's loop with its generation barrier, and the check against IGNOS:
+
+1. The Generator draws the starting population, `initialize_population(P, ...)`: P parameter sets (Latin
+   hypercube).
 2. For each of G generations:
-   - The Coordinator sends the whole population to the Evaluator. The Evaluator submits all P
-     simulations at once and waits for all of them. This is the parent's generation barrier, and the
-     fan-out: at P 16, 100,000 live campaigns can request up to 1.6 million simulations in one
-     generation. Each campaign has its own barrier, so the observed peak is in `speed.sims_in_flight`.
-     (On the AUTONMI layer the Generator puts the population on the campaign's candidate queue instead,
-     its Monitor slots run them `campaign.slots` at a time, and the Evaluator gathers all P results: the
-     same barrier, with at most `campaign.slots` inner loops running per campaign. There
-     `speed.sims_in_flight` and `queue_wait_s` count from when a candidate is put on the queue, so they
-     include its wait for a free Monitor slot; `speed.sims_executing` shows the inner loops running.)
-   - The Coordinator runs `select_survivors`, `update_best_result` and `log_generation` (the parent's
-     `evolution_log.csv` and `evolution_log.jsonl`).
-   - Before every generation but the last, the Coordinator sends the survivors to the Generator, which
-     runs the parent's `repopulate`. With `outer.generator: llm` (the default) it then makes one model
-     call with the generation's results, and each parsed proposal replaces one of the parent's random
-     mutants. That is the place `evo_agents.py` names for "a directed proposer". With
-     `outer.generator: mutation` there is no model call, and the campaign is the parent's loop exactly.
-3. The Coordinator writes `best_result.json`, asks the model for a one-paragraph summary, and reports
-   to the campaign manager.
+   - the Generator puts the generation's P candidates on the queue, and the Monitor slots run them
+     `campaign.slots` at a time (`campaign.slots: 16` runs a generation of 16 at once);
+   - the Evaluator gathers the P reports and passes the results on in candidate order (the barrier);
+   - the Coordinator runs `select_survivors`, `update_best_result` and `log_generation` (the parent's
+     `evolution_log.csv` and `evolution_log.jsonl`), on the inner loop's numbers alone;
+   - before every generation but the last, the Generator runs the parent's `repopulate`. With
+     `outer.generator: llm` (the default) it then makes one model call, the refill, with the generation's
+     results, and each parsed proposal replaces one of the parent's random mutants. That is the place
+     `evo_agents.py` names for "a directed proposer". With `outer.generator: mutation` there is no refill call,
+     and the campaign is the parent's loop exactly.
+3. The Coordinator writes `best_result.json`, makes the summary call (a one-paragraph summary) and reports.
 
-Per campaign: P x G simulations. In llm mode, one model call per refill that has slots to fill, plus
-the summary: G calls in all. In mutation mode, only the summary call.
+- Per campaign: P x G inner loops, and G model calls in llm mode (each refill with slots to fill, plus the
+  summary).
+- One random generator drives selection and refill in the parent's order (`outer.rng: shared`, as
+  `run_evolutionary_loop`). `outer.rng: per_agent` gives the Generator and the Coordinator their own streams, as
+  `evo_agents.py` does.
+- The Monitors' numbers change no result in this mode, so the results equal IGNOS's at any `campaign.slots`.
+  The Evaluator labels each generation's traces at the barrier (below).
+- With `campaign.notes: true` (off by default) each Monitor also asks the model for a note on its candidate, and
+  the Evaluator for an assessment of each generation (a keep-probability for each candidate). They change no
+  result and are recorded with `record.extras`.
 
-One random generator drives selection and refill, in the parent's order (`outer.rng: shared`, as
-`run_evolutionary_loop`). Its state travels with the Coordinator's message to the Generator and back.
-`outer.rng: per_agent` gives the Generator and the Coordinator their own streams, as `evo_agents.py`
-does.
-
-**Exact match.** `tests/test_parent_oracle.py` runs the unmodified parent driver in a fresh process,
-with only its population evaluator replaced by this package's `evaluate`, and compares it with the
-mini-app campaign in both agent layers (generator: mutation), and, where the AUTONMI framework is
-installed, in the AUTONMI layer through its entry point (one campaign, `agents.first` = the seed). It
+**Exact match.** `tests/test_parent_oracle.py` runs the unmodified parent driver in a fresh process, with only
+its population evaluator replaced by this package's `evaluate`, and compares it with the campaign in every layer
+(generator: mutation; on the AUTONMI layer through its entry point, one campaign, `agents.first` = the seed). It
 does this for P 4 and G 3:
 - fixture seeds 0, 1, 2 and 99 (99 reaches a feasible candidate), one random stream;
 - fixture seeds 0 and 99 with two streams, against `evo_agents`;
 - real stand-in seeds 0, 1 and 2, one stream, and seed 0 with two streams.
 
 In every case `evolution_log.csv`, `evolution_log.jsonl` (timestamps aside) and `best_result.json` are
-identical. The CSV holds every generation's candidates, results and survivors.
+identical. The CSV holds every generation's candidates, results and survivors. The layers' runs are also
+compared with references recorded from the LangGraph layer (`tests/references/*.json`: results_sha256, each
+campaign's hash, counts, parent files and model requests, with the commit, command and date that made them;
+`python tests/references/record_references.py` records them again from a commit, default HEAD).
 
-## The simulation: `evaluate`, the IGNOS inner loop turned down
+### The asynchronous mode (`campaign.mode: async`, the AUTONMI layer only)
+
+No generations and no barrier: each agent repeats one cycle on what has arrived, and a result is applied as it
+arrives. The decisions are pure functions of each agent's state and what arrived (`decide.async_*`).
+
+| Agent | Each cycle | Its model call | After 3 failed tries |
+|---|---|---|---|
+| **Generator** | Once no candidate waits on the queue and budget is left: take the next 2 profiles from the evolutionary loop, reconcile them in one call, put both on the queue | One per 2 candidates: a JSON list of 2 objects, up to 7 parameter values each | The evolutionary loop's profiles, unchanged |
+| **Monitor slot** (2) | Take the next candidate; run its inner loop as one task; score its trace against the campaign's rolling trace statistics; send the result, its numbers and its note to the Evaluator | One per candidate: the note | Numbers, no note |
+| **Evaluator** | Take the reports that have arrived (with its model call at most 8, the rest left for its next cycle); score each one; send the scores to the Coordinator and a digest to the Generator | One per cycle: a keep-probability for each result | The score from numbers |
+| **Coordinator** | Take the scored results that have arrived; decide survival; update the survivors, best-so-far, the log and the budget; send the survivors to the Generator; only then make its call | One per cycle: guidance to the Generator on what to explore next. It decides nothing about survival | No guidance; survival is unaffected |
+
+- **Where profiles come from.** A campaign's P x G candidates are numbered 0 to P x G - 1 as they are made. The
+  first P are the parent's `initialize_population`, drawn once. Each later one is the parent's `mutate_params` of
+  a survivor chosen at random from the newest survivors the Generator holds. If no survivors have arrived when
+  candidate P is due, the Generator waits for the first survivors message: its only wait.
+- **Reconciling.** The Generator's prompt shows the 2 profiles, the newest survivors, the Evaluator's latest
+  scores and the Coordinator's guidance. A value in the reply replaces the profile's value for that parameter,
+  clipped to range; a parameter the reply leaves out keeps the evolutionary loop's value. The request's last line
+  names its candidates ("Candidates 5 and 6 of 32: reply with a JSON list of 2 objects ..."), and its JSON schema
+  goes as `response_format`.
+- **The score is a keep-probability between 0 and 1.**
+  - `q`, from numbers: the keep-probability the parent's `select_survivors` would give this result if it and the
+    campaign's last P scored results were one generation (best always kept, worst never, the rest by rank;
+    `decide.keep_probabilities`, the parent's own ranking).
+  - `m`, the Monitor's number: from -1 (the trace looked like low-ranked candidates') to +1 (like high-ranked
+    ones'), 0 when it cannot tell.
+  - With the model, the Evaluator's call reads each result's numbers, q, the Monitor's numbers and its note, and
+    its reply is the score. The prompt shows neither the score from numbers nor its formula.
+  - Without the model (`llm.mode: off`, or after 3 failed tries): score = q + `monitor.weight` x m, clipped to
+    0..1. `monitor.weight` defaults to 0.25; at 0 this is IGNOS's rule over the last P results.
+- **Survival.** The Coordinator keeps a result when its draw from its own random stream is below the score, and
+  every result during `campaign.warmup` (4). A kept result joins the survivors, at most P, the oldest leaving.
+- **Random streams.** This mode always has the two streams of `outer.rng: per_agent`: the Generator draws its
+  parents and mutations from stream 0, the Coordinator its survival draws from stream 1.
+- **Best-so-far and the log.** After each result, the parent's `update_best_result` gets the window and the
+  result as the generation and their top-ranked as the survivor. One parent `log_generation` row per result,
+  its arrival number as the generation.
+- **Good and bad, for the Monitors' trace statistics:** a trace is good when its result's q is 0.5 or more. The
+  fixture's results follow a hash unrelated to its trace, so there the label comes from the trace's own end
+  values, marked synthetic.
+- **Results differ from run to run** with the order of arrival. One order, one seed and the Monitors' m give one
+  campaign; the tests replay recorded orders through the pure functions (`tests/async_replay.py`). AUTONMI's
+  checks are this mode's invariants: P x G inner loops per campaign, each candidate once, every message
+  received, at most P survivors, at most `campaign.slots` inner loops running and 2 candidates waiting, and each
+  role's messages and calls within bounds tied to its cycles.
+- A campaign's line has no generations (`counts.generations` is 0). Beside each evaluation's `sim_s` and
+  `wait_s` it has its submission time `t_submit`, and the counts `n_cycles` and `survival`.
+
+## Model calls
+
+Every call is one request with a whole reply: no token streaming, and no tools chosen by a model. Each agent
+has at most one call open. Calls go through Flowgentic's fleet: to fusion's stub LLM, or with `--llm openai` to
+the model servers (The model service, below).
+
+**The four calls of the asynchronous mode**, and their fallbacks:
+
+| Role | When | Its prompt (`decide.py`) | Its reply | Reply allowance | Fallback |
+|---|---|---|---|---|---|
+| Generator | per take of 2 | `async_generator_messages` | a JSON list of 2 objects (`parse_reconcile`) | 320 tokens (`reply_tokens(2)`) | the profiles unchanged |
+| Monitor | per candidate | `note_messages` | any text: the note (`parse_text`) | 128 | no note |
+| Evaluator | per cycle | `scores_messages` | a JSON object of each candidate's keep-probability (`parse_scores`) | 32 + 16 per result | the score from numbers |
+| Coordinator | per cycle, after it sends the survivors | `guidance_messages` | any text: the guidance (`parse_text`) | 256 | no guidance |
+
+- **Tries.** A call that fails is tried up to 3 times (`layer_autonmi.TRIES`), then the role's fallback is used
+  and counted. A failure is an error, or a reply the role's parse function cannot use. A try is one request; it
+  includes Flowgentic's own wait for a server that went away (`llm.outage_s`). No try is made once another agent
+  has failed the campaign. The fallbacks are the `llm.mode: off` path, so a campaign whose calls all fail is the
+  campaign with no model calls.
+- **Every prompt of the asynchronous mode fits the context by construction.** A Monitor's note or the
+  Coordinator's guidance shown inside a later prompt is cut to `decide.NOTE_CHARS` (1,200) characters; the record
+  keeps the whole text with `record.extras`. One Evaluator call shows at most `decide.SHOWN_RESULTS` (8) results;
+  the rest wait in its inbox for its next cycle, in arrival order. At the StellarAI shape (population 16, 32
+  candidates) each role's longest prompt is under 21,504 characters, three quarters of a 32,768-token context less
+  the 4,096-token reply cap (`tests/test_async.py`). The bounds grow with `outer.population` (survivors and
+  scores the Generator shows) and the campaign's budget (the results the Coordinator judges in one cycle).
+- **The prompt-length check.** Before a role's call is sent, its prompt's characters (at least its tokens) plus
+  `max_tokens` are compared with the smallest `max_model_len` the servers report. A prompt too long is not sent
+  and not tried again: the fallback at once. With the stub there is no check.
+- **The generations mode's calls** are the refill and the summary, and with `campaign.notes` a note per
+  candidate and an assessment per generation. The refill and summary are also tried up to 3 times while they
+  fail (an error); then the refill keeps the parent's mutants and the summary is left out (`""`), counted, and
+  the campaign goes on. The LangGraph and Academy layers end the campaign at the first failed call, so the
+  layers differ on this failure path only. An assessment shows a generation's P results; at P 16 its longest
+  prompt (about 28,400 characters) is above the bound, and it changes no result.
+- **Request settings** (each null by default, so that every request is as before; `run.py`'s layers refuse them
+  set): `llm.thinking` (off: `chat_template_kwargs {enable_thinking: false}` on every call through AUTONMI's
+  transports, and no thinking budget; on: the budget as `llm.send_thinking_budget` says), `llm.reply_cap`
+  (`max_tokens`: the cap, plus `agents.thinking_budget` unless thinking is off), `llm.temperature`, `llm.top_p`.
+  The Generator's JSON schema goes as a plain `response_format` keyword, never in a per-call `extra_body`,
+  which would replace the transports' thinking switch. A model run (`--llm openai`) in the asynchronous mode
+  needs `llm.thinking` set. By default a request is `run.py`'s: `max_tokens` = thinking budget + reply allowance,
+  vLLM's per-request `thinking_token_budget`, no temperature of its own.
+- **The stub LLM** (`llm.StubLLM`, a FIXTURE, not a model) is called like a model, so its latency is felt:
+  `llm.stub_latency_s` per call (emulated). Its replies depend only on the campaign and the request's last line,
+  so every layer agrees. It answers a refill or the Generator's call with parameters drawn in range, and the three
+  other calls with the value from numbers alone (the score from numbers, computed from the q and m the
+  Evaluator's prompt gives; no note; no guidance). So stub runs do not show reconciling.
+- `llm.mode: off` (the asynchronous mode only): no agent calls a model, and each decides on numbers alone.
+
+## The Monitor and the inner-loop trace
+
+**The trace** is added instrumentation, not in IGNOS. Each evaluation's record can carry `trace`, a step-by-step
+account of its inner loop (`trace.py`). The values are read, never changed, so results, touches and the
+parent's files are the same with or without it. In the hundredk shape it holds 232 numbers:
+- what the parent computes and then drops: the summary's per-puff scan rows (puff, the six wall and pedestal
+  metrics, iterations, residual, converged) and its four stage timings. `sim.py` wraps the parent's
+  `evaluate_final_innerloop`, as it wraps `_clean_pfr`; the parent's files are untouched.
+- values recorded in the stand-ins (`standins.py`): for the XGC stage's priming state and each rollout step, the
+  relative change and the mean density, electron and ion temperature over the nodes with psi > 0.80 (outside the
+  anchored core); for each iteration of each puff's fixed point, the residual and the new state's te_wall,
+  ti_wall and q_peak_proxy (the cells `wall_pedestal_metrics` reads); and the hand-off file's normalisation
+  ranges.
+
+The field is `{"kind", "synthetic", "complete", "sections", "f32"}`: the values as float32 in base64, with a
+one-line header of section shapes (`xgc:3x4 fixed_point:3x15x4 handoff:6 scan:3x10 timings_s:4`), about 1.4 KB.
+`trace.unpack` returns the arrays. Every fixed point runs to its cap (the tolerance is 0), so `converged` is
+always false; the residual series is the only convergence signal.
+
+The fixture has no inner loop, so its trace is synthetic, of the same shape, and labelled (`"kind":
+"synthetic_smooth"` or `"synthetic_hash"`, `"synthetic": true`). It uses none of the fixture's own draws.
+- `smooth` (the default) is a smooth function of the normalised parameters with one planted split: candidates on
+  either side of the middle of `a1_Te`'s range follow each other until fixed-point iteration
+  `fixed_point_cap // 2` of each puff, and then part in te_wall, ti_wall and q_peak_proxy.
+- `hash` is random, from a second generator seeded by the parameters' digest.
+
+Knobs `monitor.capture` (default true) and `monitor.fixture_trace` (`smooth` or `hash`). Only the AUTONMI layer
+asks for a trace; the Monitors take it out of the result before they report, so `decide.py`, the parent's files
+and `agents.jsonl` never see one.
+
+**The Monitor's numbers** (`monitor.py`). Each campaign keeps one statistics object in its population's process,
+which both slots read: for every step of the inner loop an exponentially weighted mean and variance, kept apart
+for good and bad candidates (in the asynchronous mode it also holds the window of the last P scored results).
+For one trace:
+- `left_at`: the step where the trace left the typical band (more than 2 pooled spreads from both sides);
+- `back_at`: where it came back;
+- `m`: from -1 (like low-ranked candidates) to +1 (like high-ranked ones), weighted toward the steps where the
+  two sides part;
+- `split_at`: where the two sides part.
+
+`m` is 0 until each side holds `campaign.warmup` traces (4). Memory stays constant per campaign. The traces are
+labelled at each generation's barrier (the generations mode) or as each result is scored (the asynchronous
+mode). AsyncFlow and RHAPSODY keep each evaluation's returned record, trace included, until the population ends:
+about 3.6-3.8 KiB per evaluation at 2,000 campaigns (fixture, hundredk, one population; measured), and the run
+was about 4.6% slower; `capture: false` removes both.
+
+## The inner loop: `evaluate`, the IGNOS inner loop turned down
 
 `sim.py` and `standins.py` run the parent's own worker (`_evaluate_single_candidate`) and inner loop
-(`evaluate_final_innerloop`), unmodified, with stand-ins injected through their `context`. Each
-evaluation:
+(`evaluate_final_innerloop`), unmodified, with stand-ins injected through their `context`. Each evaluation:
 - loads checkpoints from disk to the device and builds the models;
 - runs graph forwards on the device;
 - hands each stage's output to the next, in memory and through a netCDF file;
 - runs the fixed-point loop;
 - writes the real artifact layout under `gen{g}_candidate{i}/final_innerloop`.
 
-Every call checks its own touches (below). `--sim fixture` replaces `evaluate` with an instant,
-torch-free stand-in for large agent counts. It makes no touches.
+Every call checks its own touches (The touch checklist, below). `--sim fixture` replaces `evaluate` with an
+instant, torch-free stand-in for large agent counts. It makes no touches.
 
-### The inner-loop trace: added instrumentation, not in IGNOS
+Real inner loops run in spawned worker processes (`pool.ResilientProcessPool`), never on the agents' event loop.
+With `workers.gpu_per_worker` (the AUTONMI layer, `--sim real`) each worker takes the next number i from one
+counter that every population's pool shares, and sees only GPU i mod the number of GPUs the device probe saw
+(`pool.on_gpu`, through `CUDA_VISIBLE_DEVICES`; the record's `autonmi.inner_loop_gpus`). It is tested with a
+faked GPU count only; real placement is unverified until a run on GPU nodes. Device rule: `cuda` if available,
+else `cpu` (ROCm builds answer through `torch.cuda`).
 
-For the Monitor (the AUTONMI layer's Monitor slots, `monitor.py`), each evaluation's record
-can carry `trace`, a step-by-step account of its inner loop (`trace.py`). IGNOS records none of it; the
-values are read, never changed, so results, touches and the parent's files are the same with or without it.
-In the `hundredk` shape it holds 232 numbers:
-- what the parent computes and then drops: the summary's per-puff scan rows (puff, the six wall and pedestal
-  metrics, iterations, residual, converged) and its four stage timings. `sim.py` wraps the parent's
-  `evaluate_final_innerloop`, as it wraps `_clean_pfr`; the parent's files are untouched.
-- values recorded in the stand-ins (`standins.py`): for the XGC stage's priming state and each rollout step,
-  the relative change and the mean density, electron and ion temperature over the nodes with psi > 0.80
-  (outside the anchored core); for each iteration of each puff's fixed point, the residual and the new
-  state's te_wall, ti_wall and q_peak_proxy (the cells `wall_pedestal_metrics` reads); and the hand-off
-  file's normalisation ranges.
+## The agent layers
 
-The field is `{"kind", "synthetic", "complete", "sections", "f32"}`: the values as float32 in base64, with a
-one-line header of section shapes (`xgc:3x4 fixed_point:3x15x4 handoff:6 scan:3x10 timings_s:4`), about
-1.4 KB. `trace.unpack` returns the arrays. Each puff's series ends at that puff's scan row, and the selected
-puff's at the record's own values. Every fixed point runs to its cap (the tolerance is 0), so `converged` is
-always false; the residual series is the only convergence signal.
-
-The fixture has no inner loop, so its trace is synthetic, of the same shape, and labelled
-(`"kind": "synthetic_smooth"` or `"synthetic_hash"`, `"synthetic": true`). It uses none of the fixture's own
-draws: every other field of the fixture's record is byte-identical with or without it.
-- `smooth` (the default) is a smooth function of the normalised parameters with one planted split.
-  Candidates on either side of the middle of `a1_Te`'s range follow each other until fixed-point iteration
-  `fixed_point_cap // 2` of each puff, and then part in te_wall, ti_wall and q_peak_proxy. Its series end at
-  their own values, not the record's (the record's come from a hash of the parameters).
-- `hash` is random, from a second generator seeded by the parameters' digest. The selected puff ends at the
-  record's te_wall, ti_wall and q_peak_proxy.
-
-Knobs `monitor.capture` (default true) and `monitor.fixture_trace` (`smooth` or `hash`). They are not under
-`sim`, so no campaign's `config.json` changes. Only the AUTONMI layer asks for a trace. Its Monitors take
-each trace out of the result before they report it, so `decide.py` (whose `collect` refuses a result that
-holds one), the parent's files and `agents.jsonl` never see one; they score it and hold it in the campaign's
-trace statistics until its generation is labelled (`counts.by_role.monitor.traces` counts them). The memory stays held
-until the population ends: AsyncFlow and RHAPSODY keep each evaluation's returned record, and RHAPSODY a
-text copy of it, until then. Measured at 2,000 campaigns (fixture, hundredk, one population) that is about
-3.6-3.8 KiB per evaluation, and the run was about 4.6% slower; `capture: false` removes both. The LangGraph
-and Academy layers never ask for a trace, so in their run records the `monitor` knobs are recorded but do
-nothing.
-
-## Two agent layers, one flag
-
-`--use-academy` picks the agent layer, once, at invocation. Both layers give every campaign the same
-three agents, carry the same messages and call the same code (`decide.py`), so they give identical
-results. `results_sha256` in the run record is the same for both.
-
-| | Default (the PDF's stack, `layer_langgraph.py`) | `--use-academy` (`layer_academy.py`) |
-|---|---|---|
-| The three agents | three compiled LangGraph subgraphs in one campaign graph, talking through mailbox keys of its state | three Academy agents per campaign on the process's local exchange, talking through action calls |
-| Hosting | FlowGentic's `AgentHost`, one hosted graph run per campaign | Academy's `Manager`, no executor; a campaign launches its agents when it gets a slot and shuts them down when it ends |
-| The generation's P simulations | P suspending `evaluate` task tools in one step: FlowGentic saves and drops the campaign until all P end (one suspension per generation) | the Evaluator's action awaits all P RHAPSODY tasks |
-| Model calls | FlowGentic's fleet | a semaphore with the same per-process share |
-
-Both layers:
-- admit at most each agent process's share (campaigns in the process ÷ all campaigns) of
-  `llm.MAX_IN_FLIGHT` (512 per model server) model calls at once;
-- cap campaigns live at once per process with `agents.max_live` (null: all of them);
-- run real simulations in spawned worker processes, never on the agents' event loop;
-- print `agents working=<n> waiting=<n> model_requests=<n> done=<n>` to stderr once a second.
-
-## The third layer: AUTONMI
-
-`layer_autonmi.py` runs the same campaigns on AUTONMI's framework, as a workflow mini-app with an entry
-point of its own:
+### AUTONMI (`layer_autonmi.py`)
 
 ```sh
 python -m fusion_miniapp.layer_autonmi --preset smoke --sim fixture --agents 100 --populations 2
-python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --populations 2 ...   # under Dragon
+python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --populations 2 ...   # under Dragon; not run by the tests
 ```
 
-- **The same campaigns.** Each campaign is `decide.py`'s three roles, with Monitor slots that run the
-  inner loops, and (in the default `campaign.mode: generations`) the parent's whole-generation selection on
-  the inner loop's numbers alone. Its results are
-  the other layers' results at any `campaign.slots`: `results_sha256` is the same, and so are the parent's
-  per-campaign files.
-- **3 + `campaign.slots` agents per campaign** (5 by default). On this layer each role is a hosted AUTONMI
-  agent of its own: `a<i>/coordinator`, `a<i>/generator`, `a<i>/evaluator` and the Monitor slots
-  `a<i>/monitor0`, `a<i>/monitor1`, ..., one after another in the agent list. Each has its own state, start
-  and end, row in AUTONMI's records (`app/agents-p*.jsonl`), model calls (under its own id, so its own
-  routing and call records) and lookups. They share one AUTONMI agent definition, so they share its list of
-  actions and one model-call limit (the largest role's, times 3 tries); fusion checks each role's exact counts
-  (the Monitors' together per campaign; bounds in the asynchronous mode). Model calls are whole replies: no token
-  streaming, and no tools chosen by a model.
-  - They talk only through messages, JSON copies kept in a mailbox per population
-    (`layer_autonmi.Mailbox`) under the key `a<i>/<to>/<kind>/<g>`, and through each campaign's candidate
-    queue (`a<i>/candidates`: the Generator puts, a free Monitor takes the next item). Each generation (in
-    the generations mode; the asynchronous mode is below):
-    Coordinator -> Generator `make/g`; Generator -> Coordinator `population/g`, and the generation's P
-    candidates onto the queue; each Monitor that takes one -> Evaluator `report/<call id>` (the result and
-    the Monitor's numbers); Evaluator -> Coordinator `results/g`, the P results in candidate order once all
-    have arrived (the generation barrier). The Generator never addresses a Monitor, and no candidate passes
-    through the Coordinator. After the last generation the Coordinator makes the summary call, sends `done`
-    to the Generator and the Evaluator, reports and ends; the Generator then puts one stop on the queue for
-    each Monitor, so all stay live until their campaign ends. That is 3G + 2 + 2PG + slots messages per
-    campaign. A waiting agent awaits its message inside its step, counted as waiting on a tool, and is never
-    polled; only a Monitor's wait for its evaluation is AUTONMI's real suspension (its state goes to the
-    store). The other waits keep the paused step in memory.
-  - The Coordinator makes the constraints lookup and sends it in `make/0`; the Generator makes the abstract
-    lookup itself (`decide.LOOKUP_ROLE`). Every id seen outside the agents stays the campaign's, `a<i>`: the
-    stub's key, the evaluations' `agent_id` (cold starts, work folders), the lookups, the store key
-    `campaign/a<i>`, the campaign's folder and its `run_tag`.
-  - `agents.start_together` (on in `hundredk`, off in `smoke`): no Coordinator begins until every agent of
-    its population has started, so all are live at once. It needs `agents.max_live: null`; with a cap the
-    run is refused.
-  - `agents.max_live` still counts campaigns: AUTONMI's cap is 3 + `campaign.slots` agents per campaign, and
-    a cap of one campaign runs (a cap below that is refused). The start-up stagger (`--stagger-batch`,
-    campaigns) is likewise 3 + `campaign.slots` agents per campaign.
-  - A campaign's agents must stay in one population, and AUTONMI splits its agent list into equal
-    contiguous blocks, so the populations must divide the campaigns. By default the layer takes the
-    smallest count that does, from `run.py`'s agent processes up to twice that, and otherwise refuses with
-    nearby campaign counts that work. A `--populations` that does not divide is refused.
-  - When one of a campaign's agents fails, the others end with an error instead of waiting, and the
-    campaign is one line with that error, the failing `role` and every role's model calls. The other
-    campaigns go on, as before.
-  - The record counts campaigns (`counts.agents`, as in the other layers) and the hosted agents
-    (`counts.hosted_agents`, `agents_per_campaign`), and per role (`counts.by_role`): agents, those that
-    ended normally, model calls (the replies; and the calls asked, tried and fallen back, `model_asks`,
-    `model_tries`, `model_fallbacks`), lookups, messages sent, received and dropped (a failed campaign's
-    messages not yet received), suspensions, evaluations, traces, Monitor reports (one per inner loop) and each
-    agent's seconds waiting for messages. `counts.llm_calls` keeps
-    counting the outer loop's calls (in the asynchronous mode, every call of its agents answered). AUTONMI's checks include each role's exact counts (bounds in the
-    asynchronous mode), every message
-    received once with none left, the lookups against AUTONMI's own count, and the store at the end
-    (`store_holds_only_the_memories`: no agent's saved state, each reported campaign's memory under
-    `campaign/a<i>`).
-- **The Monitor slots** (`campaign.slots`, default 2), in both modes.
-  Each Monitor takes the next candidate from its campaign's queue and runs its inner loop as one suspending
-  `evaluate` task tool, with the same arguments and call id as before (so the same results); the slots run a
-  generation's P candidates `slots` at a time (16: a generation of 16 at once). It then scores the
-  candidate's trace against the campaign's rolling trace statistics (`monitor.py`; one object per campaign
-  in its population's process, which both slots read): for every step of the inner loop an exponentially
-  weighted mean and variance, kept apart for good and bad candidates. Its numbers: `left_at` (the step where
-  the trace left the typical band: more than 2 pooled spreads from both sides), `back_at` (where it came
-  back), `m` (from -1, like low-ranked candidates, to +1, like high-ranked ones) and `split_at` (where the
-  two sides part). `m` is 0 until each side holds `campaign.warmup` traces (4). At each generation's barrier
-  the Evaluator labels its traces: good when `q`, the keep-probability the parent's `select_survivors` gives
-  the result in its generation (`decide.keep_probabilities`), is 0.5 or more. On the fixture, whose results
-  follow a hash unrelated to its trace, the label comes from the trace's own end values (the wall at its last
-  step, ranked as the parent ranks the wall term) and is marked synthetic. In this mode the Monitor's numbers
-  change no result: selection is the parent's, on the inner loop's numbers alone (`monitor.weight` is for
-  the asynchronous mode, below). With `campaign.notes: true` (off by default) each Monitor also asks the
-  model for a note on its candidate, and the Evaluator, at each barrier, for an assessment of the generation
-  (a keep-probability for each candidate, as in the asynchronous mode); they change no result either. The
-  record counts the Monitor reports and the calls; each candidate's numbers, `q`, label, note and assessment
-  are written only with `record.extras: true`, as `monitor` in its campaign's line in `agents.jsonl`, outside
-  `results_sha256`.
-  - Its cost, measured on a laptop on AC power (2026-11-24; hundredk shape, fixture, stub at 1 ms, one
-    population, agents starting together; the same results): 500, 2,000 and 10,000 campaigns took 17.5 s,
-    68.9 s and 359.4 s, against 14.9 s, 57.6 s and 294.0 s with the Evaluator's 16-wide batch (1.18, 1.20 and
-    1.22 times; 1.16 to 1.24 times over three sets of runs that night), and peak memory 716, 2,419 and
-    8,872 MiB against 652, 2,189 and 8,221 MiB. The extra time is
-    the event loop's: one suspension, one queue item and one report per inner loop instead of one fan-out
-    per generation, on the thread that shares Python's lock with the fixture's evaluation threads.
-- **The asynchronous mode** (`campaign.mode: async`; the AUTONMI layer only, `run.py`'s layers refuse it).
-  No generations and no barrier: each agent repeats one cycle on what has arrived, its decisions pure
-  functions of its state and what arrived (`decide.async_*`), and each cycle makes the role's own model call
-  (its prompt and how its reply is read are in `decide.py`). With `llm.mode: off` no agent calls a model and
-  each decides on numbers alone; that path is also each role's fallback when its call fails: an error, a
-  reply that cannot be used, or a prompt too long for the servers' context (`max_model_len` from their
-  `/v1/models`; the prompt's characters count as its tokens; checked for the roles' own calls only, so the
-  generations mode's refill and summary are sent as before) is tried up to 3 times (a prompt too long once),
-  then the fallback is used and counted. No try is made once another agent has failed the campaign. The
-  generations mode's refill and summary calls are also tried up to 3 times while they fail; then the refill
-  keeps the parent's mutants and the summary is left out (`""`), counted as the Generator's or the
-  Coordinator's fallback, and the campaign goes on. The LangGraph and Academy layers (`run.py`, unchanged) end
-  the campaign at the first failed call, so the layers differ on this failure path only. With the
-  stub LLM each call takes `llm.stub_latency_s`; the stub answers the Generator as it answers a refill and the
-  three other calls with the value from numbers alone (the score from numbers, computed from the q and m the
-  Evaluator's prompt gives at `monitor.weight`; no note, no guidance). A model run (`--llm openai`) in this
-  mode needs `llm.thinking` set.
-  - **Generator:** once no candidate waits on the campaign's queue, it takes the next 2 of the P x G
-    profiles (numbered 0 to P x G - 1 as made). The first P are the parent's `initialize_population`; each
-    later one is the parent's `mutate_params` of a survivor chosen at random, from stream 0, from the newest
-    survivors it holds. Its only wait is for its first survivors, when candidate P is due. Its call shows the
-    2 profiles, the newest survivors, the Evaluator's latest scores and the Coordinator's guidance; its
-    request's last line names the 2 candidates, and its JSON schema goes as `response_format`. The reply is a
-    JSON list of 2 objects: a value in it replaces the profile's, clipped to range, and a parameter it leaves
-    out keeps the evolutionary loop's value (fallback: the profiles unchanged). Then both go on the queue.
-  - **Monitor slots:** as above, then each asks for its note; each report (the result, the numbers and the
-    note) goes to the Evaluator's inbox (`Mailbox.take_all` takes every message that has arrived).
-  - **Evaluator:** every report that has arrived, in arrival order: `q`, the parent's keep-probability of
-    the result among the campaign's last P scored results and itself (`decide.keep_probabilities`; the
-    window is kept in the campaign's statistics object), and the score from numbers, q + `monitor.weight` x m,
-    clipped to 0..1. The trace is labelled good when q is 0.5 or more (the fixture's from its own end values,
-    synthetic). Its call, one per cycle, reads each result's numbers, q, the Monitor's numbers and note, and
-    replies with each one's keep-probability: that is the score (fallback: the score from numbers, which the
-    prompt does not show, nor its formula, so that the reply is the model's own). The scores go to the
-    Coordinator, a digest to the Generator.
-  - **Coordinator:** every scored result that has arrived: kept when its draw from stream 1 is below its
-    score, and always for the first `campaign.warmup`; at most P survivors, the oldest leaving; best-so-far
-    by the parent's `update_best_result` over the window and the result, their top-ranked as its survivor;
-    one parent `log_generation` row per result, its arrival number as the generation. Then the newest
-    survivors to the Generator, and only then its call: guidance to the Generator on what to explore next,
-    sent after it (fallback: none). It decides nothing about survival. After the last result: `done` and its
-    report, with no summary call.
-  - It always uses the two random streams of `outer.rng: per_agent`. A campaign's line has no generations
-    (`counts.generations` is 0): beside each evaluation's `sim_s` and `wait_s` it has its submission time
-    (`t_submit`, where the generations mode has one `t0` per generation), and the counts `n_cycles` and
-    `survival`.
-  - **Results differ from run to run** with the order of arrival. One order, one seed and the Monitors' m
-    give one campaign; at `monitor.weight` 0 the order and the seed alone. (Each m is scored against the
-    trace statistics as they stand when its inner loop ends, so it too follows the interleaving.) The tests
-    replay recorded orders and m through the pure functions. AUTONMI's checks are its
-    invariants: P x G evaluations per campaign, each candidate once, every message received, at most P
-    survivors, `campaign.slots` inner loops running and 2 candidates waiting; each role's messages are
-    bounds tied to its cycles (`layer_autonmi.messages`). The record marks the mode (`campaign_mode`) and
-    counts the results scored and kept, each role's cycles and the Generators' proposals by the parameters
-    their replies filled (`counts.asynchronous`; the cycles and parameters are null after SIGTERM, which
-    leaves no agent rows), and per role the calls asked, tried and fallen back (`counts.by_role`). The roles'
-    calls are counted, not listed: without `record.extras` a campaign's line has none in `llm_call_details`
-    (the generations mode's refill and summary stay there, as before), and each population sums them instead
-    (`layer_autonmi.CallSums`, a file removed once the record is written) for the record's `llm_service` and
-    client-side counts and tokens per second. With `record.extras`
-    each campaign's line also has each result's arrival number, q, m, score, draw and kept flag, each
-    candidate's note, each Coordinator cycle's guidance, the orders a replay needs, and every call's details
-    in `llm_call_details` (each with the `server` that answered it); the record's model-call extras are below
-    (the decoding metric). `compare_records` compares two such records on their counts and invariants, not
-    their digests (and with `llm.mode: openai` not the counts that follow the model's replies,
-    `candidates_by_source` and `refill_slots`).
-  - Measured with no model calls (as `llm.mode: off`) on a laptop on AC power (2026-11-24; hundredk shape,
-    fixture, one population): 500,
-    2,000 and 10,000 campaigns took 21.8 s, 86.6 s and 445.8 s, against 17.9 s, 69.0 s and 359.0 s in the
-    generations mode on the same code (1.22 to 1.26 times; 760 to 795 evaluations per second against 960 to
-    1,000), with peak memory 621, 2,096 and 8,428 MiB against 709, 2,449 and 9,220 MiB. About half of the
-    results scored after warm-up were kept: 49.8% at `monitor.weight` 0 (500 campaigns) and 50.0 to 50.7% at
-    0.25 (500 to 10,000).
-- **What runs the campaigns is AUTONMI's.** The campaigns are split into populations
-  (`--populations`; by default one per agent process of `run.py`), each an AsyncFlow node with an engine
-  of its own for its simulations.
-  - Locally the populations run in one process. Real simulations run in spawned workers
-    (`pool.ResilientProcessPool`, `--workers` per population; by default its share of
-    `workers.sim_workers`). With `workers.gpu_per_worker` each worker takes the next number i from one counter
-    that every population's pool shares, and sees only GPU i mod the number of GPUs the device probe saw
-    (`pool.on_gpu`, through `CUDA_VISIBLE_DEVICES`; an MPS daemon, if any, is the launch script's). This is
-    tested with a faked GPU count only: real placement is unverified until the ladder's machine step 3.
-    Fixture simulations run on threads that each keep one event loop (`layer_autonmi.FixturePool`):
-    RHAPSODY's `asyncio.run` per task would walk every task of the process each time, and a run's time grew
-    about with the square of its campaigns.
-  - AsyncFlow's engine loop finds finished tasks by checking every running one on every pass
-    (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
-    The layer gives each engine a set of running tasks that records completions as they happen
-    (`layer_autonmi._RunningSet`; `FUSION_ASYNCFLOW_RUNNING_SHIM=0` turns it off; the record's
-    `autonmi.asyncflow_running_shim` says whether it was on). Measured on a laptop, fixture simulations, one
-    population: 10,000 campaigns in 403 s instead of 2,039 s, the same results, throughput flat from 2,000 to
-    10,000 campaigns. 100,000 is not measured, and it has not run under Dragon yet. Remove it once AsyncFlow tracks
-    completions itself.
-  - CPython's automatic full collections are off while agents run (`layer_autonmi.bound_full_collections`).
-    `FUSION_GC_FULL_AUTO=1` keeps them, and the record's `autonmi.gc` says which setting ran.
-    - Why: each full collection scans every live object. At 10,000 campaigns, four of them stalled the event loop
-      for up to 6.7 s each.
-    - Measured on a laptop on AC, with fixture simulations and one population: the same results, wall time and memory.
-      At 10,000 campaigns there is one full collection of 0.2 s (Flowgentic's freeze) instead of four.
-    - The loop lag still grows about 7× from 2,000 to 10,000 campaigns. Most of that comes from
-      `agents.start_together` releasing every Coordinator at the same moment: with it off, the growth was 1.56×
-      with the same results (one run each). The release is unchanged for now.
-  - Under Dragon (`--runtime dragon`), each population is a Dragon process, its simulations run on
-    RHAPSODY's native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not
-    place populations on nodes yet, and refuses more.
-- **Model calls** go through Flowgentic's fleet, with the request `llm.py` sends: the thinking budget per
-  call, `max_tokens` as budget plus reply, no temperature of its own. The Generator awaits its call
-  inside its step, as `decide.generator_step` is written. `--llm openai` reads the model job's servers
-  from `--endpoints-file` (base URLs without `/v1`, each answering `/health`) and its key from
-  `--api-key-file`, not from `llm.base_url_env`. A server that goes away is waited out for up to 30
-  minutes, instead of `llm.max_retries` retries.
-- **What it writes** is what `run.py` writes, with `agent_layer: autonmi`: `run_record.json` (its
-  status, counts, `llm_check`, touch check, `speed` and `results_sha256`, by `record.write`),
-  `agents.jsonl` and `campaigns/`. So `compare_records` compares it with the other layers' runs. The
-  record's `autonmi` section gives AUTONMI's own verdict; its run folders (`launcher/`, `populations/`,
-  `app/`, `otel/`) and `summary.json` hold the run's telemetry, checked by workflow-mini-apps' `MiniApp`.
-- **How a run ends badly,** as with `run.py`: SIGTERM or Ctrl-C cancels the campaigns through the event
-  loop and writes an `interrupted` record with those that finished (exit 143); a failed campaign is a
-  line with its error. Locally, the populations shut down and report into the run before it is verified
-  (at most AUTONMI's `cancel_grace_s`, 60 s; untested under Dragon, where nothing waits for them).
-  AUTONMI's check `every_population_ran` then fails with the populations the signal cancelled, and the
-  record's `autonmi.telemetry` gives AUTONMI's `telemetry_complete` verdict with each population's task
-  counts: those the signal cut off are `abandoned`, which does not by itself make the telemetry
-  incomplete. At 10,000 campaigns on a laptop the run exited about 55 s after SIGTERM (measured; larger
-  runs not yet).
+- **What runs the campaigns is AUTONMI's.** The campaigns are split into populations (`--populations`; by
+  default one per agent process of `run.py`), each an AsyncFlow node with an engine of its own for its inner
+  loops, a fleet for its model calls and Flowgentic's agent host. They share one AUTONMI agent definition, so
+  one list of actions and one model-call limit (the largest role's, times 3 tries); fusion checks each role's
+  counts (exact in the generations mode, bounds in the asynchronous mode).
+- **Layout.** A campaign's agents must stay in one population, and AUTONMI splits its agent list into equal
+  contiguous blocks, so the populations must divide the campaigns. By default the layer takes the smallest count
+  that does, from `run.py`'s agent processes up to twice that, and otherwise refuses with nearby campaign counts
+  that work.
+- `agents.start_together` (on in `hundredk`, off in `smoke`): no campaign begins until every agent of its
+  population has started, so all are live at once. It needs `agents.max_live: null`. `agents.max_live` counts
+  campaigns (3 + `campaign.slots` agents each); a cap below one campaign is refused.
+- **When one agent fails**, the others of its campaign end with an error instead of waiting, and the campaign is
+  one line with that error, the failing `role` and every role's model calls. The other campaigns go on.
+- **Locally** the populations run in one process. Fixture inner loops run on threads that each keep one event
+  loop (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the process each
+  time, and a run's time grew about with the square of its campaigns.
+- **AsyncFlow's engine** finds finished tasks by checking every running one on every pass
+  (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
+  The layer gives each engine a set of running tasks that records completions as they happen
+  (`layer_autonmi._RunningSet`; `FUSION_ASYNCFLOW_RUNNING_SHIM=0` turns it off; the record's
+  `autonmi.asyncflow_running_shim` says whether it was on). Measured on a laptop, fixture, one population: 10,000
+  campaigns in 403 s instead of 2,039 s, the same results. Remove it once AsyncFlow tracks completions itself.
+- **CPython's automatic full collections are off while agents run** (`layer_autonmi.bound_full_collections`;
+  `FUSION_GC_FULL_AUTO=1` keeps them; the record's `autonmi.gc`). Each full collection scans every live object:
+  at 10,000 campaigns four of them stalled the event loop for up to 6.7 s each (measured).
+- **Under Dragon** (`--runtime dragon`) each population is a Dragon process, its inner loops run on RHAPSODY's
+  native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not place populations on nodes
+  yet. Untested in this package's tests.
+- **What it writes** is what `run.py` writes, with `agent_layer: autonmi` and an `autonmi` section (AUTONMI's own
+  verdict), plus AUTONMI's folders (`launcher/`, `populations/`, `app/`, `otel/`) and `summary.json`, checked by
+  workflow-mini-apps' `MiniApp`. So `compare_records` compares it with the other layers' runs.
 - **The live line.** About once a second the head process prints to stderr
-  `agents live=<n> model_requests_open=<n> queued=<n> decoding_at_servers=<n> done=<n>`: hosted agents
-  started and not ended; model requests admitted and sent whose reply is not back, and requests waiting for
-  the client's admission caps (both client side, Flowgentic's agent states); sequences in the model
-  servers' running batches, summed (the vLLM sampler's latest reading of each server that answered within
-  2.5 sampling intervals; `-` with the stub); agents ended. The record keeps the same rows
-  (`speed.live.series`). The line waits a second after the last one, so an event-loop stall stretches a
-  gap (up to about 2.2 s at 2,000 campaigns on a laptop, measured). Under Dragon only the servers' count is seen in
-  the head process (the populations run elsewhere; untested).
-- **The decoding metric** (`speed` in the record). For each count: the maximum, the time-weighted mean,
-  and the seconds at or above 50, 90 and 95% of the hosted agents (3 + `campaign.slots` per campaign). There is
-  no comparison against the client's admission caps (Matt's answer 11 of 2026-11-24).
-  - `model_tokens_per_s` (on by default): prompt and generated tokens per second over the steady window, 15% to
-    85% of the agent phase (`record.STEADY`): the usage counts of the calls answered in it, per second of the
-    window. With the stub they are its estimates (a quarter of the characters), marked `emulated`. Null in
-    `run.py`'s layers, whose call details carry no times.
-  - With `record.extras` (off by default) the record also has each role's share of time in a model call over
-    the same window (`model_call_share`: the mean number of the role's agents in a call, from each answered
-    call's `[t_end - service_s, t_end]`, over its agents; and a campaign's agents in a call, of 3 +
-    `campaign.slots`), the request settings sent (`llm_service.requests`: each distinct body besides the
-    messages, as the transport makes it, by role, with its count of requests), the model servers in the order of
-    a call's `server` (`llm_service.servers`, null with the stub), and with `--llm openai` a copy of the model
-    servers' setup files in `<run>/model_service/` (`llm_service.model_service`): every plain file in the
-    folder of `--endpoints-file` (the model job's `endpoints`, `gpu.csv`, each `vllm-<i>.log` as its first 500
-    lines, and what a launch script puts there), and `environment.txt`, this process's variables of the
-    prefixes `RASCAL_`, `SLURM_`, `CUDA_`, `VLLM_`, `FLASHINFER_`, `TRITON_` and `HF_HUB_OFFLINE`,
-    `TRANSFORMERS_OFFLINE`, `PATH`, `TMPDIR`. Secrets are left out: the key file (`api-key`, `--api-key-file`)
-    and any file or variable whose name says it holds a secret (`VLLM_API_KEY`, `HF_TOKEN`, `secrets.json`,
-    `tokens.txt`, ...) are not copied. In every copied file the key, and the value of each such variable of
-    this process that has 8 characters or more, are replaced wherever they appear (a shorter value would match
-    ordinary text); a value set by such a name in the file (`HF_TOKEN=...`, `"api_key": "..."`,
-    `--api-key ...`) is replaced whatever its length, and so is a URL's user and password; a copied file that
-    still holds the key or one of those values is removed (`layer_autonmi.copy_model_service`). A secret under
-    a name that does not say so, in a file whose name does not say so and not in this process's environment,
-    cannot be recognised and is copied: the model job's folder must not hold one.
-    The share of time in a model call takes every campaign that finished as live through the whole window, as
-    when all start at once; campaigns in waves (`agents.max_live`) make it lower than the live agents' share.
-  - `agents_live`: from AUTONMI's rows (`app/agents-p*.jsonl`, each agent's `t_start` to `t_end`), in all
-    and per role (`by_role`, against one agent per campaign, the Monitors' `campaign.slots`), with `all_live_s`: how long every hosted agent
-    was live at once (from the last start to the first end). `start_together` gives each Coordinator's wait
-    for every agent to start, and `begin_margin_s`: the earliest Coordinator's start of its campaign
-    (`t_begin` in its row) minus the last start of its population's agents, the smallest over populations;
-    at least 0 when every campaign began after every agent had started, as the knob promises. With the
-    default stagger every agent is soon live at once with or without the knob (`all_live_s` > 0 at 20 and
-    at 2,000 campaigns), so `begin_margin_s` is what shows the knob at work.
-  - `model_requests_in_flight` (client side): exact, from each call's `[t_end - service_s, t_end]`
-    (kept in `llm_call_details` with the call's `role`, `wait_s` and `recovery_s`, or, for the roles' own
-    calls without `record.extras`, summed per population in `CallSums`); beside it AUTONMI's
-    own figures (`autonmi_sampled`: `summary.json`'s `agent_states_over_time.model_request`, sampled about
-    every 10 s, and `agent_seconds_by_state.model_request` per second of the agent phase), Little's law three
-    ways (each per second of the agent phase; AUTONMI's agent-seconds per second of wall time beside them),
-    and the event loop's lag, flagged `high` when its 95th percentile is at least 10% of the mean time in
-    flight (the lag lands inside the call intervals).
-  - `model_requests_queued`: each call's wait for admission (Flowgentic's MODEL_QUEUED).
-  - `decoding_at_servers`: the vLLM servers' `num_requests_running`, summed, with their waiting requests
-    and KV-cache use (`vllm/vllm.json`); null with the stub. It includes prompt processing: vLLM has no
-    decode-only count. A server's reading counts until its next one, for at most 2.5 sampling intervals: a
-    server that stopped answering `/metrics` counts 0 from then on, and its seconds without a reading are in
-    `stale_s`. A gauge a server never gave (an older vLLM's name) is null, named in `gauges_missing`.
-  - `headline`: the servers' running count where there are servers, else the client-side count. With the
-    stub it is labelled emulated (`llm.stub_latency_s` per call), never decoding. With servers it names who
-    their `/v1/models` say serve the model (`served_by`, from `llm_service.served_models`): `vllm` for
-    vLLM, `fusion-test-fixture` for the tests' fake server.
-  - `rates_per_s.model_calls_all_agents` counts every agent's calls (every try; each call's `role` in
-    `llm_call_details` where its details are listed); `counts.llm_calls` and `rates_per_s.model_calls` keep
-    counting the outer loop's (the
-    Generator's refills and the Coordinator's summary; with `campaign.notes` not the notes and assessments; in
-    the asynchronous mode every call answered).
-  Measured on a laptop (2026-11-23, hundredk shape, fixture, one population, emulated): at 2,000 campaigns
-  with 2 s per call, 160.78 requests in flight on average by AUTONMI's agent-seconds, 160.78 by fusion's
-  calls per second x time in flight, and 160.52 by calls per second x 2 s (each per second of the agent
-  phase; AUTONMI's per second of wall time, 154.1). With 30 s per call the client's count reached the 512
-  cap: 94 s at it, in the summary wave, and 210 s at or above 95% of it. In the refill wave (about 10 s to
-  124 s) the 2,000,000-token cap held it near 498. Up to 1,502 requests were queued.
-- **Its environment.** It needs the AUTONMI framework (the package `autonmi`) installed: it is not
-  public yet, and the RADICAL team can provide access. `requirements-autonmi.txt` installs the rest:
-  Flowgentic 0.6.0 and the commits the framework runs on. The LangGraph and Academy layers also run in
-  that environment. The layer is tested on the framework's commit `layer_autonmi.AUTONMI_COMMIT`
-  (`e20861a`, origin/MTU-188-framework). Each run records the commit it imported (git in an editable
-  clone, else the installer's record) in `autonmi.framework_commit`, and warns once on stderr when it is
-  another commit, unknown, or has changed files.
-- **Tests.** `tests/test_layer_autonmi.py` compares it with the LangGraph layer by `compare_records`:
-  fixture campaigns in two knob cases, the real stand-in on CPU, and a model server stand-in (the same
-  requests; a failed summary, which the LangGraph layer ends the campaign at and this layer leaves out after
-  3 tries; and failed refills, which keep the parent's mutants). It also checks SIGTERM and the shape
-  workflow-mini-apps requires, the live line and the client's counts on the stub, and the model-service checks below. It checks the agents
-  per campaign (their rows, messages, exact per-role counts, one Monitor report per inner loop and the store
-  at the end), the same results with 1, 2 or 16 Monitor slots, the record toggle, the Monitors' numbers once
-  warm-up is reached (in the hundredk shape the planted split is found, and the numbers are the same at 2 and
-  16 slots), the barrier's good and bad labels, the candidate queue's own contract, the same results in 1, 2 or 5 populations, with a cap of 1 or 7 campaigns or none, 1 or 4 workers, and with a slow
-  start-up with and without starting together (with it, every campaign begins after its population's last
-  agent starts), the refusals (populations that do not divide, a cap below one campaign, starting together
-  with a cap), the mailbox's own contract, that the ids seen outside the agents are the campaign's, and that
-  an injected Generator, Evaluator or Monitor failure (`FUSION_AUTONMI_FAIL=<agent id>:<g>`, a Monitor's
-  `<g>` its candidate's call id `g<g>c<i>`; tests only) ends its campaign alone, as one error line with every
-  role's model calls. In the asynchronous mode it checks the invariants and the record's counts, a replay
-  of each campaign's recorded orders through the pure functions (`tests/async_replay.py`; the run's arrivals
-  are reordered on purpose, so results arrive out of candidate order and a Coordinator cycle takes several
-  Evaluator cycles), the inboxes' own contract, the trace labels, that verify() catches each broken
-  invariant, a failure of each role, SIGTERM, odd shapes and the other layers' refusal; and the roles' model
-  calls: each role's call counted (the stub's run replayed through the pure functions with the stub's
-  Generator replies), each role's reply reaching where it goes (the Evaluator's as the score, the notes in
-  the Evaluator's prompt, the digest and guidance in the Generator's), the request settings against the fake
-  server (thinking off or on, the reply cap, temperature, top_p; the Generator's schema), a server that fails
-  every call (3 tries, each role's fallback, and the same campaign as with no model calls in the same order),
-  a reply that cannot be used tried again and a call answered on its third try, the prompt-length check,
-  `campaign.notes` changing no result in the generations mode (also when every note and assessment falls
-  back), `llm.outage_s` reaching AUTONMI's wait for the servers, and verify() catching broken call counts;
-  `tests/test_async.py` checks the mode's rule itself (q against the parent's `select_survivors`, survival,
-  warm-up, the Generator's profiles, one order, one seed and the Monitors' m giving one campaign). The model
-  server is `tests/fake_vllm.py`, a FIXTURE (not a model) standing in for a vLLM server;
-  `tests/test_decode_metric.py` checks the metric's arithmetic against brute-force recounts.
-  Both layers' runs are also compared with references recorded from the LangGraph layer
-  (`tests/references/*.json`: results_sha256, each campaign's hash, counts, parent files and model
-  requests, with the commit, command and date that made them). `python tests/references/record_references.py`
-  records them again from a commit (default HEAD, exported with `git archive`). The parent oracle
-  (above) runs through it too. Without the AUTONMI framework these are skipped.
+  `agents live=<n> model_requests_open=<n> queued=<n> decoding_at_servers=<n> done=<n>`: hosted agents started
+  and not ended; model requests sent whose reply is not back, and requests waiting for the client's admission
+  caps; sequences in the model servers' running batches, summed (`-` with the stub); agents ended.
+- **Its environment.** The AUTONMI framework (the package `autonmi`) installed separately, and
+  `requirements-autonmi.txt` for the rest (Flowgentic 0.6.0 and the commits the framework runs on). The layer is
+  tested on the framework's commit `layer_autonmi.AUTONMI_COMMIT` (`e20861a`); each run records the commit it
+  imported in `autonmi.framework_commit` and warns once on stderr when it is another one.
 
-## The model service
+### LangGraph and Academy (`fusion_miniapp.run`)
 
-What the AUTONMI layer's `--llm openai` needs of the model servers. Tested against `tests/fake_vllm.py`
-only (a FIXTURE); real vLLM is unverified until a machine.
-- **Endpoints file** (`--endpoints-file`): one base URL per line, without `/v1` (for example
-  `http://nid001234:8000`). Each server must answer `/health` without a key; the run waits up to
-  `--model-wait` seconds (default 1,800) for all of them, re-reading the file. The key, if the servers have
-  one, is in the file `--api-key-file`, never in a knob file or the record.
-- **The served model's name is `llm.model`.** Before any campaign, every server's `/v1/models` must list it
-  (vLLM's `--served-model-name`); otherwise the run is refused with `run refused: <url> serves [...], not
-  llm.model '<name>'` and exits 1.
-- **Chat completions** (`/v1/chat/completions`, OpenAI-compatible): each request has the messages, the
-  model, `max_tokens` = thinking budget + reply allowance, no temperature (the server's default), and
-  vLLM's per-request `thinking_token_budget`. That field needs the server started with a reasoning parser
-  (`vllm serve --reasoning-parser`, for example `qwen3`); without one, set `llm.send_thinking_budget:
-  false`. The replies' `usage` token counts are recorded.
-- **`/metrics` reachable from the head process**, in vLLM's Prometheus format. The layer samples each
-  server's `vllm:num_requests_running`, `vllm:num_requests_waiting`, `vllm:kv_cache_usage_perc` and token and
-  request counters every 2 s (every 5 s past 50 servers), with AUTONMI's `VllmSampler`, into
-  `vllm/vllm.json`. AUTONMI then checks that the servers' counters never went down (`verify_vllm`) and that
-  the fleets' tokens and successful requests equal the servers' exactly (`tokens_match_the_servers`). These
-  checks fail the run (status fail, exit 1) when a server restarts during it (its counters reset), when a
-  requeued model job moves the servers (the sampler keeps reading the old addresses), when the client gave
-  up on a request the server still finished (a timeout), or when the servers also serve another run. Where
-  any of these is expected, give `--no-vllm-metrics`: no sampling, no decoding counts, none of those checks.
-  A server without vLLM's `/metrics` still serves the run: one warning, and `decoding_at_servers` is null.
-  The first reading of each server's `/metrics` gets three tries, 2 s apart; if any server fails them, no
-  server is sampled (AUTONMI compares the servers' counters with all of the fleets' calls).
-- **Admission knobs:** `llm.max_in_flight` (512) requests and `llm.admission_tokens` (2,000,000; 0 = no token
-  cap) per server, at once, split over the populations. They are the client's caps: above what a server can
-  run, they raise the client count, not decoding, and the extra requests wait in the server's queue
-  (`num_requests_waiting`). Whichever cap is reached first binds. At the hundredk shape a refill reserves
-  about 4,000 tokens (inferred: 2,000,000 / 498, the count the token cap held at 30 s per call), so the
-  token cap binds near 500 refills per server, below 512. Raising `llm.max_in_flight` alone does not raise
-  refill concurrency; raise `llm.admission_tokens` with it. AUTONMI's own defaults are 96 requests and
-  235,000 tokens per server (`PopulationConfig`). Measure them on each machine. `run.py`'s layers keep
-  `llm.MAX_IN_FLIGHT`.
-- **Outages:** a server that goes away is waited out for up to 30 minutes (AUTONMI's `ServerRecovery`),
-  which re-reads the endpoints and key files, as after a requeued model job. The campaigns survive it,
-  but with `/metrics` sampled the run then fails AUTONMI's checks against the servers' counters (above);
-  give `--no-vllm-metrics` where outages are expected.
-- **Reference launcher:** AUTONMI's `jobs/model.sh` starts one `vllm serve` per GPU (or per `RASCAL_TP`
-  GPUs), served as `RASCAL_MODEL_NAME`, with the reasoning parser `RASCAL_REASONING`, and writes
-  `endpoints` and `api-key` into its folder once every server answers `/health`; it restarts a server that
-  dies. Wiring it into `launch/` is not done yet.
-- **The servers' setup files:** with `record.extras` the run copies every plain file of the endpoints file's
-  folder (logs as their first 500 lines) and a filtered environment snapshot into `<run>/model_service/`,
-  leaving out the key file and every secret it can recognise (the decoding metric, above). Tested with planted
-  fake secrets.
-- **Not built (asks):** per-role models or servers (every role's calls go to one fleet); token streaming;
-  time to first token (the record has each call's whole time only).
+`--use-academy` picks the layer, once, at invocation. Both give every campaign the same three agents, carry the
+same messages and call the same code (`decide.py`), so they give identical results: `results_sha256` is the same.
+
+| | Default (FlowGentic with LangGraph, `layer_langgraph.py`) | `--use-academy` (`layer_academy.py`) |
+|---|---|---|
+| The three agents | three compiled LangGraph subgraphs in one campaign graph, talking through mailbox keys of its state | three Academy agents per campaign on the process's local exchange, talking through action calls |
+| Hosting | FlowGentic's `AgentHost`, one hosted graph run per campaign | Academy's `Manager`, no executor; a campaign launches its agents when it gets a slot |
+| The generation's P inner loops | P suspending `evaluate` task tools in one step (one suspension per generation) | the Evaluator's action awaits all P RHAPSODY tasks |
+| Model calls | FlowGentic's fleet | a semaphore with the same per-process share |
+
+Both admit at most each agent process's share of `llm.MAX_IN_FLIGHT` (512 per model server) model calls at once,
+cap campaigns live at once per process with `agents.max_live`, and print `agents working=<n> waiting=<n>
+model_requests=<n> done=<n>` to stderr once a second. They refuse the asynchronous mode and the AUTONMI-only
+knobs set (`llm.thinking`, `reply_cap`, `temperature`, `top_p`, `campaign.notes`, `workers.gpu_per_worker`).
+With `--llm openai` they read the endpoint's URL from the environment variable the knob file names (default
+`OPENAI_BASE_URL`) and its key from `OPENAI_API_KEY`; `llm.timeout_s` and `llm.max_retries` bound each call.
 
 ## Install
 
-Python 3.12. From this folder:
+Python 3.12. From this folder, for the LangGraph and Academy layers:
 
 ```sh
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[stack,academy,dev]"
-source .venv/bin/activate        # in every new shell (or call .venv/bin/python directly)
 ```
 
-- `stack` is the PDF's stack. FlowGentic 0.5.0 comes from GitHub at a pinned commit, as it is not on
-  PyPI yet.
-- `academy` is academy-py.
-- torch is not pinned: on a GPU machine install the CUDA or ROCm build first (each batch file in
-  `launch/` names one).
-- `ENVIRONMENT.md` lists the exact laptop set.
+- These two commands download packages; they were not rerun for this version of the README.
+- `stack` is FlowGentic with LangGraph and RHAPSODY (FlowGentic from GitHub at a pinned commit, as it is not on
+  PyPI); `academy` is academy-py. `ENVIRONMENT.md` lists the exact laptop set.
+- **The AUTONMI layer's environment** (the other two layers run in it too): the steps at the top of
+  `requirements-autonmi.txt` (a workflow-mini-apps checkout beside this one, then
+  `uv venv --python 3.12 .venv-autonmi` and one `uv pip install`), and the AUTONMI framework installed into it.
+- torch is not pinned: on a GPU machine install the CUDA or ROCm build first (each batch file in `launch/` names
+  one).
 
-## Run
+## Running
 
 ```sh
-python -m fusion_miniapp.run --preset smoke                 # 100 campaigns, P 4, G 2
-python -m fusion_miniapp.run --preset smoke --use-academy
+python -m fusion_miniapp.layer_autonmi [options] [--populations N] [--workers N] [--runtime local|dragon] \
+    [--endpoints-file F] [--api-key-file F] [--model-wait S] [--no-vllm-metrics]
+python -m fusion_miniapp.run [options] [--use-academy]
 ```
 
-**Options:**
+**Options of both:**
 - `--agents N` (campaigns; default the knob file's `agents.count`);
 - `--preset smoke|hundredk|ignos_shape`;
-- `--knobs FILE`, repeatable, merged in order over the preset (for example a machine file from
-  `knobs/machines/`);
+- `--knobs FILE`, repeatable, merged in order over the preset (for example a machine file from `knobs/machines/`);
 - `--sim real|fixture` (default `real`);
-- `--llm stub|openai`;
-- `--out DIR`. It must be a new or empty folder: the parent's logs append, so a folder that already
-  holds a run is refused.
+- `--llm stub|openai` (over `llm.mode`); `llm.model` must then be the served model's name (`stub` is refused);
+- `--out DIR`: a new or empty folder (the parent's logs append, so a folder that already holds a run is refused).
 
-**`--llm openai`** needs:
-- `llm.model` set in a knob file to the served model's name (the run refuses `stub`);
-- the endpoint's URL in the environment variable the knob file names (default `OPENAI_BASE_URL`), and
-  its key in `OPENAI_API_KEY` if it needs one (a local server without authentication does not).
+The AUTONMI layer's `--llm openai` reads the servers from `--endpoints-file` and their key from
+`--api-key-file` (The model service, below); `--model-wait` (1,800 s) bounds the wait for them.
 
-Every call sends vLLM's per-request `thinking_token_budget`; set `llm.send_thinking_budget: false` for
-a server that rejects it. `llm.timeout_s` and `llm.max_retries` bound each call. The run fails (see
-`llm_check` below) if the model filled fewer than `llm.min_model_share` of the refill slots it was
-asked for, or if more than `llm.max_empty_share` of its replies were empty. Without this check, a
-model that never answers would leave every campaign running on the parent's random mutants, and the
-run would still pass.
+**Exit codes:** 0 (`status: pass`: every campaign finished, every real evaluation passed its touch check, the model
+check passed, and on the AUTONMI layer AUTONMI's checks passed); 1 (`fail`); 143 (`interrupted`).
 
-**Exit codes:**
-- 0 (`status: pass`): every campaign finished, every real evaluation passed its touch check, and the
-  model check passed;
-- 1 (`fail`);
-- 143 (`interrupted`).
+**The model check** (`llm_check`, with `--llm openai`): the run fails if the model filled fewer than
+`llm.min_model_share` (0.5) of the candidate slots it was asked for (the refills' slots; in the asynchronous mode
+the Generator's candidates), or if more than `llm.max_empty_share` (0.1) of its replies were empty. Without it, a
+model that never answers would leave every campaign on the parent's mutants, and the run would still pass.
 
 **How a run ends badly:**
-- SIGTERM or Ctrl-C (scancel, a Slurm time limit): the agents are cancelled through the event loop,
-  the simulation workers are stopped within 20 s (leftovers killed), and a record with `status:
-  interrupted` is still written.
-- A simulation worker that dies: its pool rebuilds once and resubmits the lost simulations.
-- A cold-start child (below) exits when its worker dies.
-
-## What a run writes
-
-- `run_record.json`:
-  - `status`;
-  - `run`: time, host, Slurm job id, this package's git commit and whether it had uncommitted changes,
-    the execution backend;
-  - all knobs, the layer, package versions (with FlowGentic's and RHAPSODY's commits), the parent
-    commit, a device probe taken in a simulation worker;
-  - `counts`: campaigns, simulations, model calls, generations, candidates by source (start, survivor,
-    mutation, model, restart), refill slots asked and filled, suspensions;
-  - `llm_service` (calls, empty replies, errors, retries, finish reasons, tokens) and `llm_check`;
-  - the summed touches and their verdict;
-  - `speed` (below);
-  - peak memory (agent processes, and simulation workers by their own high-water mark);
-  - `threads`, pool rebuilds, `results_sha256`.
-- `agents.jsonl`: one line per campaign:
-  - its best result, per-generation summaries, candidate sources and refill counts;
-  - its evaluations' simulation and queue-wait times;
-  - every model call's latency, finish reason, token counts and empty flag (`llm_call_details`).
-- `campaigns/<id>/` (`outer.logs: per_agent`): the parent's `config.json`, `evolution_log.csv`,
-  `evolution_log.jsonl` and `best_result.json` for each campaign. At 100,000 campaigns that is 400,000
-  small files, so `hundredk` sets `outer.logs: none`.
-- stdout: a one-line JSON summary, then one parsable `speed:` line.
-
-**The `speed` section**, for the goal of 100,000 campaigns working at once:
-- campaigns live at once: the maximum, the time-weighted mean, the seconds with at least 95% of the
-  requested campaigns live, and the ramp-up to the last start;
-- the agent phase (first campaign start to last finish), with start-up and shutdown reported apart;
-- evaluations, model calls, generations and campaigns per second;
-- simulations in flight (submitted, not returned) and executing (on a worker): the maximum and the
-  mean;
-- the mean, 50th and 95th percentiles and the maximum of simulation time, queue wait (from the
-  generation's submission to the evaluation's start), generation time (submission to last result) and
-  model-call latency;
-- event-loop lag (the same 100 ms timer in both layers);
-- the model calls' prompt and generated tokens per second over the steady window, 15% to 85% of the agent
-  phase (`model_tokens_per_s`; the AUTONMI layer's, whose call details carry their times);
-- `sim_bound_ratio`: the simulations' own time spread over the workers, against the agent phase
-  (1 means the run took no longer than its simulations had to).
-
-An interrupted run's speed numbers cover only the campaigns that finished (`speed.coverage`).
-
-`python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json` checks two runs (two
-machines, or both layers) against each other:
-- statuses, counts and non-machine knobs must agree;
-- the campaigns must agree too: exactly by digest, or campaign by campaign within `--rtol`/`--atol`
-  when last digits differ between machines;
-- speed numbers are reported, never failed on.
+- SIGTERM or Ctrl-C (scancel, a Slurm time limit): the campaigns are cancelled through the event loop and a
+  record with `status: interrupted` is written, with the campaigns that finished (exit 143). On the AUTONMI layer
+  the populations report into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check
+  `every_population_ran` then fails, and `autonmi.telemetry` gives each population's task counts. At 10,000
+  campaigns on a laptop the run exited about 55 s after SIGTERM (measured).
+- An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
+  exits when its worker dies.
 
 ## The knob file
 
 One YAML file with nine sections. A preset and any number of knob files are merged in order over
-`knobs/smoke.yaml`, so a file needs only the keys it changes (`hundredk` and `ignos_shape` take the
-`campaign`, `record` and `monitor.weight` knobs and the newer `llm` knobs from it). The turn-down is the `sim` section.
+`knobs/smoke.yaml`, so a file needs only the keys it changes (`hundredk` and `ignos_shape` take the newer knobs
+from it). Unknown keys and out-of-range values are refused with the knob's name. The turn-down is the `sim`
+section.
 
 | Section | Knobs |
 |---|---|
-| `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`; sets OMP, OpenBLAS, MKL and torch threads) |
-| `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts campaigns `a<first>` to `a<first+count-1>`, as they are in a run from 0; default 0), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer: generation 0 waits until every hosted agent of the population has started; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
-| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's per-generation prints) |
+| `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`) |
+| `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts `a<first>` to `a<first+count-1>`), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
+| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
-| `llm` | `mode` (stub, openai, or off: no model calls, the asynchronous mode only), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (the stub's seconds per call: emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server); the AUTONMI layer's request settings, each null by default so that every request is as before: `thinking` (off: `chat_template_kwargs {enable_thinking: false}` on every call and no thinking budget; on; YAML's bare `off` and `on` are read as these), `reply_cap` (`max_tokens`: the cap, plus `agents.thinking_budget` unless thinking is off), `temperature`, `top_p` (above 0, at most 1); `run.py`'s layers refuse these four set; and `outage_s` (how long a call waits out a server that went away; 1,800, AUTONMI's) |
-| `workers` | `sim_workers` (simulation processes in all; each agent process gets `sim_workers // agent processes`, at least one); `gpu_per_worker` (the AUTONMI layer with `--sim real`; default false: inner-loop worker i, counted over every population's pool, sees GPU i mod the GPUs the device probe saw, through `CUDA_VISIBLE_DEVICES`; no effect without a GPU; `run.py`'s layers refuse it set; the record's `autonmi.inner_loop_gpus`) |
-| `monitor` | `capture` (each evaluation's record carries the inner-loop trace; the AUTONMI layer only; default true), `fixture_trace` (`smooth` or `hash`: the fixture's synthetic trace), `weight` (the Monitor's `m` in a result's score in the asynchronous mode; default 0.25). Added instrumentation, not in IGNOS; no result of the generations mode reads it |
-| `campaign` | the AUTONMI layer: `slots` (Monitor agents per campaign; default 2), `mode` (`generations`, the default: the parent's generation barrier; `async`: each result applied as it arrives, each role making its own model call, the AUTONMI layer only), `warmup` (traces each side holds before the Monitor's `m` is not 0, and in the asynchronous mode the first results kept whatever their score; default 4), `notes` (the generations mode: a Monitor call per candidate and an Evaluator call per generation, recorded; default false; `run.py`'s layers refuse it). In the generations mode no result depends on them |
-| `record` | `extras` (each candidate's Monitor numbers, and its note and assessment, in its campaign's line, and in the asynchronous mode each result's row, the guidance and the orders a replay needs; each call's server; in the record each role's share of time in a model call, the request settings sent, and the model servers' setup files without their secrets; default false: counts only, and tokens per second) |
+| `llm` | `mode` (stub, openai, or off: no model calls, the asynchronous mode only), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server; 0 tokens: no token cap); the AUTONMI layer's request settings, null by default: `thinking` (off or on; YAML's bare `off` and `on` are read as these), `reply_cap`, `temperature`, `top_p` (above 0, at most 1); and `outage_s` (how long a call waits out a server that went away; 1,800, AUTONMI's) |
+| `workers` | `sim_workers` (inner-loop processes in all; each agent process or population gets its share, at least one); `gpu_per_worker` (the AUTONMI layer with `--sim real`; default false) |
+| `monitor` | `capture` (the inner-loop trace; default true), `fixture_trace` (`smooth` or `hash`), `weight` (the Monitor's m in a result's score in the asynchronous mode; default 0.25) |
+| `campaign` | the AUTONMI layer: `slots` (Monitor agents per campaign; default 2), `mode` (`generations`, the default, or `async`), `warmup` (traces each side holds before m is not 0, and in the asynchronous mode the first results kept whatever their score; default 4), `notes` (the generations mode's notes and assessments; default false) |
+| `record` | `extras` (the record toggle, below; default false) |
 
-| Preset | Campaigns | P | G | Simulations per campaign | Simulations in all | Notes |
+| Preset | Campaigns | P | G | Inner loops per campaign | Inner loops in all | Notes |
 |---|---|---|---|---|---|---|
-| `smoke` | 100 | 4 | 2 | 8 | 800 | seconds with `--sim fixture`, a few minutes with real simulations on a laptop CPU |
-| `ignos_shape` | 4 | 16 | 20 | 320 | 1,280 | the parent campaign's shape; larger simulations |
+| `smoke` | 100 | 4 | 2 | 8 | 800 | seconds with `--sim fixture`, a few minutes with real inner loops on a laptop CPU |
+| `ignos_shape` | 4 | 16 | 20 | 320 | 1,280 | the parent campaign's shape; larger inner loops |
 | `hundredk` | 100,000 | 16 | 2 | 32 | 3.2 million | 10 agent processes of 10,000; `logs: none`, `parent_stdout: drop` |
 
-None is calibrated. With real simulations, `hundredk` is set by simulation throughput (about 0.16 s
-each, so roughly 14 hours on one laptop's 10 workers). The agent-count ladder uses the fixture.
+None is calibrated. With real inner loops, `hundredk` is set by inner-loop throughput (about 0.16 s each on a
+laptop CPU). `knobs/machines/` holds the machine files: `sim.device: cuda` for each of the three batch files, and
+`stellar_ai_nemotron.yaml` for the StellarAI run path (below).
+
+## What a run writes
+
+- `run_record.json`: `status`; `run` (time, host, Slurm job id, this package's git commit and whether it had
+  uncommitted changes, the backend); all knobs; the layer; package versions; the parent commit; a device probe
+  taken in an inner-loop worker; `counts`; `llm_service` and `llm_check`; the summed touches and their verdict;
+  `speed`; peak memory; `threads`, pool rebuilds, `results_sha256`.
+- `agents.jsonl`: one line per campaign: its best result, its generations' summaries (the generations mode),
+  candidate sources and refill counts, its evaluations' inner-loop and queue-wait times, and the generations
+  mode's refill and summary calls' details (`llm_call_details`: latency, finish reason, tokens, empty flag).
+- `campaigns/<id>/` (`outer.logs: per_agent`): the parent's `config.json`, `evolution_log.csv`,
+  `evolution_log.jsonl` and `best_result.json`. At 100,000 campaigns that is 400,000 small files, so `hundredk`
+  sets `outer.logs: none`.
+- stdout: a one-line JSON summary, then one parsable `speed:` line.
+
+**The AUTONMI layer's counts** (`counts`): campaigns (`agents`), hosted agents (`hosted_agents`,
+`agents_per_campaign`), and per role (`by_role`): agents, those that ended normally, model calls (the replies; and
+the calls asked, tried and fallen back: `model_asks`, `model_tries`, `model_fallbacks`), lookups, messages sent,
+received and dropped, suspensions, evaluations, traces, Monitor reports and seconds waiting for messages. In the
+asynchronous mode `campaign_mode: async` and `counts.asynchronous`: results scored and kept (in all and after
+warm-up), each role's cycles, the Generator's waits for survivors and its proposals by the parameters their
+replies filled (0 to 7). The roles' own calls are counted, not listed: each population sums them
+(`layer_autonmi.CallSums`) for the record's model figures.
+
+**The record toggle, `record.extras`** (off by default). Off, the record and the lines hold counts only, and the
+tokens per second (`speed.model_tokens_per_s`). On, they also hold:
+- in each campaign's line: each candidate's Monitor numbers, q, label, note and (the generations mode with
+  `campaign.notes`) assessment, as `monitor`; in the asynchronous mode each result's arrival number, q, m, score,
+  draw and kept flag, each Coordinator cycle's guidance, and the orders a replay needs, as `asynchronous`; and
+  every call's details in `llm_call_details`, each with the `server` that answered it. All are outside
+  `results_sha256`;
+- in the record: each role's share of time in a model call over the steady window (`speed.model_call_share`), the
+  request settings sent (`llm_service.requests`: each distinct body besides the messages, as the transport makes
+  it, by role, with its count of requests), the model servers in the order of a call's `server`
+  (`llm_service.servers`), and with `--llm openai` a copy of the model servers' setup files without their secrets
+  (`<run>/model_service/`, `llm_service.model_service`; The model service, below).
+
+**The `speed` section**, for the goal of 100,000 agents working at once:
+- campaigns live at once (maximum, time-weighted mean, seconds with at least 95% of the requested campaigns
+  live, ramp-up); the agent phase (first campaign start to last finish), with start-up and shutdown apart;
+- evaluations, model calls, generations and campaigns per second; inner loops in flight and executing;
+- the mean, 50th and 95th percentiles and the maximum of inner-loop time, queue wait (on the AUTONMI layer from
+  when the candidate was put on the queue, so with its wait for a free Monitor slot), generation time and
+  model-call latency; event-loop lag;
+- `model_tokens_per_s` (on by default): prompt and generated tokens per second over the steady window, 15% to
+  85% of the agent phase (`record.STEADY`), from the usage counts of the calls answered in it. With the stub they
+  are its estimates, marked `emulated`. Null in `run.py`'s layers, whose call details carry no times;
+- `sim_bound_ratio`: the inner loops' own time spread over the workers, against the agent phase.
+
+**The decoding metric** (the AUTONMI layer's `speed`). For each count, the maximum, the time-weighted mean, and
+the seconds at or above 50, 90 and 95% of the hosted agents (3 + `campaign.slots` per campaign); no comparison
+against the client's admission caps:
+- `agents_live`, in all and per role (from AUTONMI's rows), with `all_live_s` (how long every hosted agent was
+  live at once) and, with `start_together`, `begin_margin_s` (at least 0 when every campaign began after every
+  agent had started);
+- `model_requests_in_flight` (client side, exact from each call's `[t_end - service_s, t_end]`), beside AUTONMI's
+  own sampled figures, Little's law three ways and the event loop's lag (flagged `high` when its 95th percentile
+  is at least 10% of the mean time in flight);
+- `model_requests_queued`: each call's wait for admission;
+- `decoding_at_servers`: the vLLM servers' `num_requests_running`, summed, with their waiting requests and
+  KV-cache use (`vllm/vllm.json`); null with the stub. It includes prompt processing: vLLM has no decode-only
+  count. A server's reading counts until its next one, for at most 2.5 sampling intervals;
+- `headline`: the servers' running count where there are servers, else the client-side count (labelled emulated
+  with the stub);
+- `rates_per_s.model_calls_all_agents` counts every agent's calls (every try); `counts.llm_calls` the outer
+  loop's (the refills and summaries; in the asynchronous mode every call answered).
+
+An interrupted run's speed numbers cover only the campaigns that finished (`speed.coverage`).
+
+`python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json` checks two runs (two machines, or
+two layers): statuses, counts and non-machine knobs must agree; the campaigns too, exactly by digest or campaign by
+campaign within `--rtol`/`--atol`; speed numbers are reported, never failed on. Two asynchronous records are
+compared on their counts and invariants, not their digests.
+
+## The model service
+
+What the AUTONMI layer's `--llm openai` needs of the model servers. Tested against `tests/fake_vllm.py` only (a
+FIXTURE standing in for a vLLM server); real vLLM is unverified until a run on the machine.
+- **Endpoints file** (`--endpoints-file`): one base URL per line, without `/v1` (for example
+  `http://nid001234:8000`). Each server must answer `/health` without a key; the run waits up to `--model-wait`
+  seconds for all of them, re-reading the file. The key, if the servers have one, is in the file
+  `--api-key-file`, never in a knob file or the record.
+- **The served model's name is `llm.model`.** Before any campaign, every server's `/v1/models` must list it
+  (vLLM's `--served-model-name`); otherwise the run is refused with `run refused: <url> serves [...], not
+  llm.model '<name>'` and exits 1. Its `max_model_len` sets the prompt-length check.
+- **Chat completions** (`/v1/chat/completions`, OpenAI-compatible), with the request settings above. The thinking
+  budget field (`thinking_token_budget`) needs the server started with a reasoning parser; without one, set
+  `llm.send_thinking_budget: false` (or `llm.thinking: off`, which sends none). The replies' `usage` token counts
+  are recorded.
+- **`/metrics`**, reachable from the head process in vLLM's Prometheus format: each server's running and waiting
+  requests, KV-cache use and token and request counters are sampled every 2 s (5 s past 50 servers) into
+  `vllm/vllm.json`. AUTONMI then checks that the counters never went down and that the fleets' tokens and
+  successful requests equal the servers' exactly. These checks fail the run when a server restarts during it,
+  when a requeued model job moves the servers, when the client gave up on a request the server still finished,
+  or when the servers also serve another run; `--no-vllm-metrics` drops the sampling and those checks. A server
+  without vLLM's `/metrics` still serves the run, with one warning and no decoding counts.
+- **Admission:** `llm.max_in_flight` requests and `llm.admission_tokens` tokens per server at once, split over
+  the populations. They are the client's caps: above what a server can run, the extra requests wait in the
+  server's queue. The StellarAI knob file puts them out of reach, so vLLM's `--max-num-seqs` is the only cap.
+- **Outages:** a server that goes away is waited out for up to `llm.outage_s` (AUTONMI's `ServerRecovery`), which
+  re-reads the endpoints and key files, as after a requeued model job; then the call fails (and is tried again,
+  up to 3 tries in all).
+- **The servers' setup files**, with `record.extras`: copied into `<run>/model_service/` with every secret left
+  out (`layer_autonmi.copy_model_service`).
+  - **What:** when the endpoints file's folder holds `setup-files` (`layer_autonmi.SETUP_LIST`, which the
+    StellarAI launch script writes), exactly the files it names (one path or glob per line, relative to that
+    folder; for several model jobs `model-<k>/vllm-*.log` and so on), at those paths; else every plain file of the
+    folder. Logs (`.log`, `.out`, `.err`) as their first 500 lines. And `environment.txt`, this process's variables
+    of the prefixes `RASCAL_`, `SLURM_`, `CUDA_`, `VLLM_`, `FLASHINFER_`, `TRITON_` and `HF_HUB_OFFLINE`,
+    `TRANSFORMERS_OFFLINE`, `PATH`, `TMPDIR`.
+  - **Not copied:** the key file (`api-key`, `--api-key-file`), any file whose name says it holds a secret
+    (`secrets.json`, `tokens.txt`, `hf_token`, ...), anything that is not a plain file, a listed path outside the
+    folder.
+  - **Left out of every copied file:** the key, and the value of each secret-named variable of this process with
+    8 characters or more, wherever they appear; any value set by a secret-named name in the file (`HF_TOKEN=...`,
+    `"api_key": "..."`, `--api-key ...`) whatever its length; a URL's user and password. A copied file that still
+    holds the key or one of those values is removed.
+  - **The limit:** a secret under a name that does not say so, in a file whose name does not say so and not in
+    this process's environment, cannot be recognised. With `setup-files` such a file is copied only if the list
+    names it; without the list, the folder must not hold one.
+- **Not built:** per-role models or servers (every role's calls go to one fleet); token streaming; time to first
+  token.
+
+## The StellarAI run path
+
+The campaigns against NVIDIA Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`) on
+vLLM 0.27.1, on StellarAI's 8 x B200 nodes. **Configured and checked on a laptop only; nothing here has run on the
+machine.**
+
+**The files:**
+- `knobs/machines/stellar_ai_nemotron.yaml`, applied over the `hundredk` preset and `stellar_ai.yaml`
+  (`sim.device: cuda`):
+  - `agents.count: 20000` for the scale run (100,000 hosted agents); `campaign.mode: async`, `campaign.slots: 2`;
+  - `llm.mode: openai`, `llm.model` the full name above;
+  - `llm.thinking: off`, `llm.send_thinking_budget: false`, `llm.reply_cap: 4096`, `agents.thinking_budget: 4096`
+    (sent only with thinking on);
+  - `llm.temperature: 1.0`, `llm.top_p: 0.95` (NVIDIA's recommended sampling for this model);
+  - `llm.timeout_s: 86400` (no per-call limit in practice: the longest job is 24 h), `llm.outage_s: 300`;
+  - `llm.max_in_flight: 1000000`, `llm.admission_tokens: 0` (the client's caps out of reach);
+  - `workers.sim_workers: 80`, `workers.gpu_per_worker: true` (the real inner loop, 10 workers per GPU),
+    `sim.work_root: $TMPDIR` (node-local).
+- `launch/stellar_ai_model.env`: the model servers' settings for AUTONMI's `jobs/model.sh` (the weights path,
+  `RASCAL_MODEL_NAME` = `llm.model`, the tool parser, `RASCAL_VLLM_RESTARTS=3`), the serving flags
+  (`RASCAL_VLLM_ARGS`: TRITON attention, an FP8 KV cache, no prefix caching, 92% of GPU memory, a 16-bit Mamba
+  state, `--max-num-seqs 4096`, `--max-num-batched-tokens 32768`, asynchronous scheduling, CUDA graphs for batches
+  up to 4,096), the variables for running without internet, and the caches on scratch. It holds no secret.
+- `launch/stellar_ai_autonmi.sbatch`: the launch script (its header lists every step and variable).
+- `launch/probe_model.py`: the check before each run. With the run's own arguments it sends one request of each
+  role (built by `decide.py` from fixture values) to every server with the run's settings. It stops the launch on
+  a server that does not list `llm.model`, a prompt that does not fit `max_model_len` with the reply cap, an HTTP
+  error, a time-out (300 s, its own) or an empty reply, a Traceback or EngineDeadError in a server log, and with
+  `--idle` a server that is not idle. It reports each reply's finish reason, whether the role could use it,
+  usage and latency. It never prints the key.
+
+**How the launch script gets the servers:**
+
+| `FUSION_MODEL_NODES` | The servers | The campaigns | For |
+|---|---|---|---|
+| 0 (default) | `jobs/model.sh` in the background on this job's 8 GPUs | this node, `--sim fixture` | the wiring check: one node, servers and campaigns together |
+| N | N model jobs through AUTONMI's `jobs/submit model`, one 8-GPU node each | this node, the real inner loop, one GPU per worker under an MPS daemon | two nodes (N = 1), and the scale run (N = 4) |
+
+With `FUSION_KEEP_SERVERS=1` (and `FUSION_MODEL_NODES`), a launch whose servers passed the check leaves them
+running at its end: no stop file, nothing cancelled. They end at `FUSION_MODEL_TIME`, or after
+`touch <fleet folder>/model-*/stop`. A later launch with `FUSION_MODEL_FLEET=<that fleet folder>` reuses them
+instead of starting servers, only if every one shows no request running or waiting; it neither starts nor stops
+them, and keeps `fleet/endpoints` current after a requeue. The servers of a launch without `FUSION_KEEP_SERVERS=1`
+have stopped by its end, and the check refuses them.
+
+What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
+1. A run folder `$FUSION_SCRATCH/fusion-miniapp/<job name>-<job id>`, its fleet folder `fleet/`, and each model
+   job's folder `fleet/model-<k>/`; node-local temporary files (`TMPDIR`) named for the run; the open-files limit
+   raised to the hard limit (each open call holds a socket); the campaign venv activated.
+2. One key for every server (`fleet/api-key`, owner-only, copied into each model job's folder before it starts,
+   since `model.sh` keeps a key it finds). The key is never printed.
+3. The servers started, and waited for (`FUSION_MODEL_WAIT`, 3,600 s; it stops early if `model.sh` or a model
+   job ends first). Then `fleet/endpoints`, the model jobs' own endpoints in order, rewritten whenever one
+   changes (a requeued job; looked at every 10 s), and `fleet/setup-files`, the files a run with `record.extras`
+   copies (the endpoints, `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
+4. `launch/probe_model.py`; its failure stops the launch.
+5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none).
+6. The run, `python -m fusion_miniapp.layer_autonmi --preset hundredk --knobs knobs/machines/stellar_ai.yaml
+   --knobs knobs/machines/stellar_ai_nemotron.yaml <the script's arguments> --llm openai --endpoints-file
+   fleet/endpoints --api-key-file fleet/api-key --model-wait 3600 --out <run folder>/run`, started directly, so
+   that its PID is the Python process's. The script's arguments come after the knob files, so a `--knobs` file
+   given there wins; `--agents` sets a smaller run.
+7. It stops the run only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit
+   (`--signal=B:TERM@900`; the run needs about a minute to write its interrupted record), or once the node's
+   available memory falls below `FUSION_MEM_FLOOR_GIB` (100). It never signals an `srun` client.
+8. At the end, whatever happened: when this launch started the servers (and `FUSION_KEEP_SERVERS=1` did not keep
+   them), a stop file in each model job's folder (`model.sh` then stops its servers and the job ends), and a model
+   job not yet serving cancelled (not running, or without its endpoints: it would remove its stop file when it
+   starts); the MPS daemon quit; the GPUs checked for processes left; the node-local folder removed. It exits with
+   the run's status.
+
+**Once, on StellarAI (on the machine; not run):**
+
+```sh
+# the campaign venv: this package, the AUTONMI framework and requirements-autonmi.txt, and torch's CUDA build
+export FUSION_MINIAPP_DIR=/path/to/fusion_miniapp FUSION_ENV=/path/to/campaign-venv
+export FUSION_SCRATCH=/scratch/gpfs/<group>/<you> RASCAL_REPO=/path/to/autonmi
+export SBATCH_ACCOUNT=<account> SBATCH_PARTITION=gpu
+# the vLLM 0.27.1 environment at $FUSION_SCRATCH/envs/vllm (or set FUSION_VLLM_ENV), and the model's weights
+# at $FUSION_SCRATCH/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 (or set FUSION_MODEL_PATH)
+cp "$RASCAL_REPO/jobs/local.env.example" "$RASCAL_REPO/jobs/local.env"
+# in local.env: SLURM_ACCOUNT, SLURM_GPU_PARTITION=gpu, SLURM_GPU_GRES=gpu:8, and as its last line
+#   source "$FUSION_MINIAPP_DIR/launch/stellar_ai_model.env"
+# (that file sets RASCAL_VENV to $FUSION_ENV and RASCAL_MODEL to the weights, over the example's placeholders)
+```
+
+**The runs, in order (on the machine; not run):**
+
+```sh
+cd "$FUSION_SCRATCH"
+# one node: the servers and 100 campaigns together, fixture inner loop (the wiring check)
+sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" \
+    --agents 100 --sim fixture
+# two nodes: one model node, and the campaigns with the real inner loop under MPS
+FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=01:30:00 sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
+    "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 300
+FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=03:30:00 sbatch --time=03:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
+    "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 5000
+# the scale run: four model nodes, 20,000 campaigns (100,000 agents)
+FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
+    "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch"
+```
+
+- The times are placeholders, to be set from each step's measured campaign length (StellarAI's QOS follows the
+  walltime: 30 minutes or less gpu-test, 4 h gpu-short, 24 h gpu-medium). A model job's time is the campaign
+  job's plus a margin, so the servers outlive the run.
+- The wiring check needs more than 30 minutes: `model.sh` starts its 8 servers one at a time (about 2 minutes each
+  in an earlier deployment on StellarAI, so about 16 minutes; inferred for 8), and Slurm's warning comes 15
+  minutes before the limit. A signal before the run starts ends the launch with no run (exit 143).
+- **Unverified until these runs:** vLLM 0.27.1 starting with these flags (repeated flags taking their last
+  value); the JSON schema together with thinking off; real prompt and reply sizes; the model's replies and how
+  often each role can use them; GPU placement of the inner-loop workers and the MPS daemon; submitting model jobs
+  from inside a job; calls between nodes; `/tmp` being private to each job; memory and file limits at 100,000
+  open calls. Also never run: the memory guard (it reads `/proc/meminfo`, which a laptop does not have); the
+  check's scan of real vLLM logs (any line with `Traceback` stops the launch, a harmless one too); keeping and
+  reusing servers, the endpoints' refresh after a real requeue, and the cancelling of model jobs, under Slurm
+  (each is tested on a laptop with fake Slurm tools and fake model jobs).
+
+## Other machines
+
+Three single-GPU batch files run `fusion_miniapp.run` (the LangGraph or Academy layer). **The app's inner loop
+needs a GPU there, and a run without one fails.** Each batch file requests one GPU, writes under the machine's
+scratch, applies the machine's knob file (`knobs/machines/<machine>.yaml`, `sim.device: cuda`) after the user's
+presets and files, runs the device probe first (`launch/probe.py`, which needs the GPU and a finite convolution)
+and stops if it fails, and asks Slurm for SIGTERM 120 s before the time limit.
+- `perlmutter.sbatch`: shared QOS, 1 A100, 32 CPUs, output under `$PSCRATCH`.
+- `stellar_ai.sbatch`: output under `$FUSION_SCRATCH`.
+- `lux.sbatch`: output under the member work area, MIOpen caches on node-local storage.
+
+They share `launch/batch.sh` and `launch/run.sh` (which activates `FUSION_ENV`). The account comes from
+`SBATCH_ACCOUNT`. For example (on the machine; not run):
+
+```sh
+sbatch --output="$PSCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/perlmutter.sbatch" --preset smoke
+```
 
 ## The touch checklist: what "validated" means here
 
-"Validated" means only that each evaluation made the same kinds of touches as the real loop, in the
-numbers the knobs imply. Every evaluation counts its touches and checks them (`touches.py`); a run
-with any failed check exits non-zero. Per evaluation, with k = `rollout_steps`, p = `puffs`,
-c = `fixed_point_cap`, b = 1 if the context was built in this call else 0, s = small forwards seen:
+"Validated" means only that each evaluation made the same kinds of touches as the real loop, in the numbers the
+knobs imply. Every evaluation counts its touches and checks them (`touches.py`); a run with any failed check exits
+non-zero. Per evaluation, with k = `rollout_steps`, p = `puffs`, c = `fixed_point_cap`, b = 1 if the context was
+built in this call else 0, s = small forwards seen:
 
 | Touch | Count |
 |---|---|
@@ -678,181 +724,124 @@ c = `fixed_point_cap`, b = 1 if the context was built in this call else 0, s = s
 | artifact files written | 7 + 2k (11 at k = 2, as in the real loop) |
 | context build; result record returned | 0 or 1; 1 |
 
-The real loop starts a fresh process and loads everything for every evaluation. Here workers stay warm
-unless `cold_start_fraction` sends an evaluation to a fresh process (3 checkpoint loads, 4 library
-imports).
-
-The fixture makes no touches; its evaluations are counted apart and never pass. The parent's result
-record still says `"inner_loop": "validated"`, which is the parent's name for its variant; here that
-word means only the checklist above. The method label is `miniapp_standin`, and every record has
-`emulated: true`.
+The real loop starts a fresh process and loads everything for every evaluation. Here workers stay warm unless
+`cold_start_fraction` sends an evaluation to a fresh process (3 checkpoint loads, 4 library imports). The fixture
+makes no touches; its evaluations are counted apart and never pass. The parent's result record still says
+`"inner_loop": "validated"`, which is the parent's name for its variant; here that word means only the checklist
+above. The method label is `miniapp_standin`, and every record has `emulated: true`.
 
 ## Files from FusionFM/Demo, and the declared differences
 
 Five files under `src/fusion_miniapp/parent/` are copied unchanged from FusionFM/Demo (branch
-`evo-innerloop-upgrade`, commit `9768bcb`):
-- `steps/final_inner_loop.py`;
-- `evolutionary_loop.py`;
-- `steps/step0/profile_generator.py`;
-- `evo_agents.py`;
-- `config/config.yaml`.
-
-`PARENT.lock` holds their SHA-256 hashes, and a test checks them. They are configured only through
-module attributes and the injected context. `evo_agents.py` is the reference for `outer.rng:
-per_agent` in the exact-match test; the two layers re-create its three agents rather than import it.
-Two of the files (`evolutionary_loop.py` and `final_inner_loop.py`) contain default paths on a site
-file system. Only the parent's own command line and context builder use them, and this package never
-calls either. Those paths include a project directory name and the user-directory names of two other
-people (see Open items).
+`evo-innerloop-upgrade`, commit `9768bcb`): `steps/final_inner_loop.py`, `evolutionary_loop.py`,
+`steps/step0/profile_generator.py`, `evo_agents.py` and `config/config.yaml`. `PARENT.lock` holds their SHA-256
+hashes, and a test checks them. They are configured only through module attributes and the injected context.
+`evo_agents.py` is the reference for `outer.rng: per_agent` in the exact-match test; the layers re-create its
+three agents rather than import it. Two of the files (`evolutionary_loop.py` and `final_inner_loop.py`) contain
+default paths on a site file system, which only the parent's own command line and context builder use; this
+package never calls either. Those paths include a project directory name and the user-directory names of two
+other people (see Open items).
 
 **Where a campaign differs from the parent's loop, on purpose:**
-- The population evaluator: the parent runs batches of `n_gpus` in a process pool, or `srun`; here the
-  P simulations are RHAPSODY tasks on the agent process's worker pool.
-- `outer.generator: llm`: the model's proposals replace mutants. They replace them only after the
-  parent's `repopulate` has run, so selection and mutation draw the same random numbers. Proposals can
-  still change later generations' survivors, so only `mutation` mode is the parent's trajectory.
-- `config.json`: the parent's keys, with this package's values. The checkpoints are stand-ins (or none,
-  for the fixture), and each campaign records its own cost-scaled simulation knobs.
-  `runtime_source_sha256` and `git` are computed once per agent process, not once per campaign (300,000
-  `git` calls at 100,000 campaigns).
-- `best_result.json` is written after the last generation, before the summary model call (the parent
-  has no summary).
-- The Coordinator logs after updating the best result, as `run_evolutionary_loop` does; `evo_agents`
-  logs first. The outputs are the same.
-- `outer.parent_stdout: drop` discards the parent's prints. `select_survivors` prints a line for every
-  generation with no feasible candidate.
-- Results cross processes as JSON, so NaN arrives as None. The Coordinator puts NaN back for the
-  parent's float keys before selection and logging.
-- The inner-loop trace (above) is added instrumentation, not in IGNOS: `evaluate_final_innerloop` is
-  wrapped to keep its summary's scan rows and timings, and the stand-ins record per-step values. Nothing it
-  records reaches selection or the parent's files.
+- The population evaluator: the parent runs batches of `n_gpus` in a process pool, or `srun`; here each inner
+  loop is a RHAPSODY task (on the AUTONMI layer one per Monitor's candidate).
+- `outer.generator: llm`: the model's proposals replace mutants, only after the parent's `repopulate` has run, so
+  selection and mutation draw the same random numbers. Proposals can still change later generations' survivors,
+  so only `mutation` mode is the parent's trajectory.
+- The asynchronous mode is not the parent's loop: it applies the parent's ranking and keep-probability to each
+  result against the campaign's last P results, as it arrives (above).
+- `config.json`: the parent's keys, with this package's values. `runtime_source_sha256` and `git` are computed
+  once per agent process, not once per campaign.
+- `best_result.json` is written after the last generation, before the summary call (the parent has no summary).
+- `outer.parent_stdout: drop` discards the parent's prints.
+- Results cross processes as JSON, so NaN arrives as None. The Coordinator puts NaN back for the parent's float
+  keys before selection and logging.
+- The inner-loop trace (above) is added instrumentation, not in IGNOS. Nothing it records reaches selection in
+  the generations mode, or the parent's files.
 
-## Machines
+## Tests
 
-All three targets use Slurm. **The app's simulations need GPUs, and a run without one fails.** Each
-batch file:
-- requests one GPU;
-- writes under the machine's scratch, never the package folder;
-- applies the machine's knob file (`knobs/machines/<machine>.yaml`, `sim.device: cuda`) after the
-  user's presets and files;
-- runs the device probe first (`launch/probe.py`, which needs the GPU and a finite convolution) and
-  stops if it fails;
-- asks Slurm for SIGTERM 120 s before the time limit, so the run writes an interrupted record.
-
-The batch files:
-- `perlmutter.sbatch`: shared QOS, 1 A100, 32 CPUs, output under `$PSCRATCH`.
-- `stellar_ai.sbatch`: output under `$FUSION_SCRATCH`.
-- `lux.sbatch`: output under the member work area, MIOpen caches on node-local storage.
-
-They share `launch/batch.sh` and `launch/run.sh` (which activates `FUSION_ENV`). The account comes from
-`SBATCH_ACCOUNT`. For example:
-
-```sh
-sbatch --output="$PSCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/perlmutter.sbatch" --preset smoke
-```
-
-How GPUs are split between the simulations and model servers on a node is open. Device rule: `cuda` if
-available, else `cpu` (ROCm builds answer through `torch.cuda`). The workers never set a
-visible-device variable.
+`python -m pytest -q` in the AUTONMI layer's environment (about 9 minutes on a laptop on battery in Low Power
+Mode, less on AC power; without the AUTONMI framework its tests are skipped). The model server in the tests is `tests/fake_vllm.py`, a FIXTURE (not a model).
+- **The campaigns:** the exact match with the parent (above); the layers agreeing, and each against the
+  references; the real `evaluate` on the CPU end to end; cold starts; a dead worker rebuilt.
+- **The AUTONMI layer** (`tests/test_layer_autonmi.py`): the agents per campaign (their rows, messages, per-role
+  counts, one Monitor report per inner loop, the store at the end); the same results at 1, 2 or 16 Monitor slots,
+  in 1, 2 or 5 populations, with caps and workers; the Monitors' numbers and the planted split; the mailbox,
+  candidate queue and inboxes; an injected failure of each role ending its campaign alone; SIGTERM; the record
+  toggle. In the asynchronous mode: the invariants, a replay of recorded orders through the pure functions, each
+  role's call counted and its reply reaching where it goes, the request settings against the fake server, a
+  server that fails every call (3 tries, each role's fallback, the same campaign as with no model calls), the
+  prompt-length check, the Evaluator's limit of results per call, verify() catching each broken invariant.
+  Planted fake secrets never reach a copied setup file, with one model job's folder or several.
+- **The rule itself** (`tests/test_async.py`): q against the parent's `select_survivors`, survival, warm-up, the
+  Generator's profiles, reconciling, one order and one seed giving one campaign, each role's longest prompt within
+  the bound.
+- **The launchers** (`tests/test_launch.py`): the three batch files against a stub `srun`; the StellarAI knob file
+  and env file (also sourced last in a `local.env` made from AUTONMI's example); the StellarAI launch script's
+  `bash -n`, its dry run in each of its three ways, a whole launch against two fake model nodes (fake Slurm and
+  GPU tools, fake vLLM servers on localhost), SIGTERM reaching the run, the wiring check with a fake `model.sh`
+  (late endpoints, the endpoints' refresh, the stop file), launches that stop before the run (a `model.sh` that
+  ends, model jobs that never start, a server down, a failure under `set -u`), and servers kept by one launch and
+  reused by the next; `launch/probe_model.py` against two fake servers, and each reason it stops a launch.
+- `tests/test_decode_metric.py` checks the decoding metric's arithmetic against brute-force recounts.
 
 ## What has run, and what has not
 
-As of 2026-11-21, on one laptop (Apple silicon, 12 cores, 24 GB; Python 3.12.13; torch 2.15.0, a
-CPU/MPS build), with the stub LLM. These are functional checks, not performance claims.
+Measured on one laptop (Apple silicon, 12 cores, 24 GB). These are functional checks and laptop timings, not
+performance claims for a machine. Every number below is measured unless marked otherwise.
 
-- **Tests:** `.venv/bin/python -m pytest -q`, about 90 s: 88 tests, 1 skipped (CUDA). They cover:
-  - the exact match with the parent (above);
-  - both layers agreeing;
-  - the real `evaluate` on the CPU through both layers end to end;
-  - cold starts;
-  - a dead worker rebuilt, and a cold child ending with its worker;
-  - the model check against a local endpoint that returns empty replies;
-  - the speed section;
-  - the record comparison;
-  - the batch files against a stub `srun`.
-- **10,000 campaigns** in the `hundredk` shape (P 16, G 2), fixture on 10 threads, one agent process:
-  320,000 simulations in each layer, all 10,000 campaigns live at once, and the same `results_sha256`
-  (Codex also paired the campaigns one by one: no differences).
+- **The AUTONMI layer, 2026-11-24** (hundredk shape, fixture, stub at 1 ms, one population, agents starting
+  together, AC power):
+  - the generations mode at 500, 2,000 and 10,000 campaigns: 17.5 s, 68.9 s and 359.4 s, 1.18 to 1.22 times the
+    earlier shape whose Evaluator ran a generation's 16 inner loops itself (the cost of one Monitor round trip
+    per inner loop on the event loop); peak memory 716, 2,419 and 8,872 MiB;
+  - the asynchronous mode with no model calls at the same sizes: 21.8 s, 86.6 s and 445.8 s (760 to 795
+    evaluations per second), peak memory 621, 2,096 and 8,428 MiB; about half of the results scored after
+    warm-up were kept (49.8% at `monitor.weight` 0, 50.0 to 50.7% at 0.25).
+  - With the stub at 2 s a call (emulated) and 500 campaigns, about 4.2 of a campaign's 5 agents were in a model
+    call over the middle of the run, on battery in Low Power Mode, where the agents' one process saturated a core
+    (measured once; not repeated on AC power).
+- **The StellarAI run path:** its launch script and check ran only on the laptop, against fake Slurm tools, fake
+  model jobs and fake vLLM servers (FIXTURES). No real model server, GPU or MPS daemon has run.
+- **10,000 campaigns on the LangGraph and Academy layers** (by 2026-11-21, hundredk shape, fixture on 10 threads,
+  one agent process): 320,000 evaluations in each layer, all 10,000 campaigns live at once, the same
+  `results_sha256`. LangGraph 462 s (694 evaluations per second, 6,142 MiB, about 629 KiB per campaign; the run
+  overlapped a Docker image build); Academy, 30,000 Academy agents, 172 s (1,922 per second, 3,553 MiB, about
+  364 KiB per campaign).
+- **80 fault trials** on macOS (by 2026-11-21), 40 per layer: 40 cold-start runs, all identical; 20 runs with a
+  worker killed mid-evaluation, all recovered within 4.9 to 8.0 s; 20 runs with SIGTERM to the whole job during a
+  cold evaluation, all with an interrupted record within 0.24 s. None left scratch files behind.
+- **1,000 campaigns** in the smoke shape with the real stand-ins on the CPU (2026-11-21, one agent process, 4
+  workers): 8,000 real evaluations per layer, all passing their touch checks, the same `results_sha256`;
+  LangGraph 77.7 s, Academy 75.4 s. Records and commands in `results/laptop_2026-11-21/`.
+- **The reference problem, `ignos_shape`** (4 campaigns x P 16 x G 20, real stand-ins on the CPU): both layers
+  pass with 1,280 of 1,280 touch checks, the same `results_sha256`, byte-identical `evolution_log.csv` and
+  `best_result.json`. Records in `results/ignos_shape_reference/`, with how to check another machine against them.
+- **Linux** (by 2026-11-21; native arm64 container, Debian trixie, Python 3.12.16, CPU torch 2.15.0): the test
+  suite of that date (86 passed, 2 skipped) and the same 80 fault trials passed. **Slurm** (a one-node Slurm 24.11
+  in that container, `perlmutter.sbatch` unchanged, with two labelled test substitutions: a `module` command that
+  knows only `load conda`, and a wrapper that drops only the probe's GPU requirement): a normal job wrote only
+  under the scratch path, and a job with a 3-minute limit got Slurm's early TERM and wrote an interrupted record
+  (exit 143).
 
-  | Layer | Time | Simulations/s | Agent-process peak | Per campaign |
-  |---|---|---|---|---|
-  | LangGraph | 462 s | 694 | 6,142 MiB | about 629 KiB |
-  | Academy (30,000 Academy agents) | 172 s | 1,922 | 3,553 MiB | about 364 KiB |
-
-  The LangGraph run overlapped a Docker image build, and the Academy run did not, so the times are not a
-  clean comparison. The per-campaign figures include the interpreter and the frameworks. The fixture runs
-  on threads in
-  the agent process, so LangGraph's heavier per-campaign work also slowed the fixture (median 10 ms
-  against 4.5 ms).
-- **Codex's 80 fault trials** on macOS, 40 per layer:
-  - 40 cold-start runs at fractions 0.25 and 0.5: all identical, with no retries;
-  - 20 runs with a worker killed mid-simulation: all recovered, ending 4.9 to 8.0 s after the kill;
-  - 20 runs with SIGTERM to the whole job during a cold simulation: all wrote an interrupted record
-    within 0.24 s.
-
-  None left scratch files behind.
-
-- **Ladder rung (a): 1,000 campaigns** in the smoke shape (P 4, G 2) with the real stand-ins on the CPU,
-  one agent process and 4 workers. Both layers ran 8,000 real simulations, all passing their touch checks,
-  with the same `results_sha256`:
-  - LangGraph: 77.7 s, agent process 487 MiB at peak;
-  - Academy: 75.4 s, 348 MiB.
-
-  Each worker peaked at about 300 MiB. The simulation-bound ratio was 0.95 and 0.98, so at this size the
-  simulations, not the agents, set the time. Rung (b) is the 10,000-campaign fixture run above. The two
-  rungs' records and commands are in `results/laptop_2026-11-21/`.
-- **The reference problem, `ignos_shape`** (4 campaigns x P 16 x G 20, real stand-ins on the CPU):
-  - both layers pass, with 1,280 of 1,280 touch checks;
-  - the same `results_sha256`;
-  - byte-identical `evolution_log.csv` and `best_result.json` (the JSONL logs differ only in timestamps).
-
-  Its records are in `results/ignos_shape_reference/`, with how to check another machine against them.
-- **Linux** (native arm64 container: Debian trixie, Python 3.12.16, CPU torch 2.15.0, the frozen package
-  set):
-  - the test suite: 86 passed, 2 skipped;
-  - the same 80 fault trials as on macOS, all passed;
-  - the CPU-thread limit: with `auto` (3 threads each for 4 workers on 12 CPUs), 40 real campaigns took
-    18.4 s; with 12 threads per worker they took 76.2 s (46 threads each, 4.1 times slower). Each
-    worker's own peak memory is recorded (360 MiB).
-- **Slurm** (a one-node Slurm 24.11 in that container, `perlmutter.sbatch` unchanged, the package folder
-  mounted read-only). Two labelled test substitutions: a `module` command that knows only `load conda`,
-  and a wrapper that drops only the probe's GPU requirement, since that torch is CPU-only.
-  - A normal job completed, writing only under the scratch path.
-  - A job with a 3-minute limit got Slurm's early TERM (`--signal=TERM@120`) and wrote an interrupted
-    record, keeping both agent processes' counts and exiting 143.
-- **A fresh install from this README** (a clean `python:3.12.16-trixie` container, `git archive` of the
-  commit): the smoke preset passed in both layers, and `compare_records` reported "results agree".
-
-**Not run:**
-- CUDA and ROCm (no such GPU here);
-- Perlmutter, Stellar-AI and Lux;
-- Dragon, RaDEX, vLLM or any real model server;
-- FlowGentic's MCP tool route.
-
-The 2026-11-19 ladder in `results/laptop_2026-11-19_final/` predates the outer loop. Its campaigns
-evaluated one candidate at a time, and its memory column is MiB ÷ 1000.
+**Not run:** CUDA and ROCm (no such GPU here); Perlmutter, StellarAI and Lux; Dragon and RaDEX from this
+package's tests; vLLM or any real model server; FlowGentic's MCP tool route. The 2026-11-19 ladder in
+`results/laptop_2026-11-19_final/` predates the outer loop.
 
 ## Open items
 
-- **Dragon and RaDEX are not wired in.** RHAPSODY's released Dragon backend (rhapsody-py 0.7.0) ran this
-  workload correctly when passed in by hand, and the same goes for the RaDEX store. Choosing them from
-  the command line and batch files is the next round. The places they go:
-  `run.Services.open(backend=, store=, model=)` and `layer_langgraph.run_agents(store=, replicas=)`.
-  The AUTONMI layer (above) already runs under Dragon with RaDEX, through its own entry point.
-- **How GPUs are split between the model servers and the simulations** on a node. Today a job requests
-  one GPU and every simulation worker uses it.
-- **The model server and model** for the first Perlmutter job.
-- **Memory per live campaign at P 16:** about 629 KiB (LangGraph) and 364 KiB (Academy) of host memory
-  per agent process, measured with fixture campaigns. That puts 100,000 campaigns in 10 processes at
-  about 60 GiB and 35 GiB: more than this 24 GB laptop. Not measured: a full 100k run, real GPU
-  simulations, and the model servers' memory, all of which a node's capacity plan needs.
-  - A finished LangGraph campaign now releases its checkpoints from the private store, and the cache of
-    finished simulation results is bounded (1,024). Each finished campaign's result and statistics are
-    still kept until the run ends.
-  - The peak while every campaign is live is held by the libraries: RHAPSODY's and FlowGentic's copies of
-    each result, and a RHAPSODY task cycle that only Python's cyclic collector frees. Reducing it is
-    upstream work.
+- **Several nodes for the campaigns' own process.** The scale run puts 20,000 campaigns (100,000 agents) in one
+  process on one node. Whether one process can drive them, or the populations must be placed on several nodes
+  (Dragon), is decided by a load check on the machine.
+- **Dragon and RaDEX from `run.py`.** The AUTONMI layer runs under Dragon with RaDEX through its own entry point;
+  the other two layers take them only when passed in by hand (`run.Services.open(backend=, store=, model=)`,
+  `layer_langgraph.run_agents(store=, replicas=)`).
+- **Memory per live campaign** at P 16 was about 629 KiB (LangGraph) and 364 KiB (Academy) of host memory per
+  agent process with fixture campaigns (measured); on the AUTONMI layer the 8,872 MiB peak at 10,000 campaigns
+  is about 0.9 MiB per campaign (inferred: the peak divided by the campaigns, the interpreter included).
+  Not measured: a full 100,000-agent run, real GPU inner loops at scale, the model servers' memory.
 - **The five parent files** contain site paths with a project directory name and two other people's
-  user-directory names. They must stay byte-identical here; decide before publishing whether they ship
-  as they are.
-- **Publishing:** a lockfile, a release tag, and the multi-node path.
+  user-directory names. They must stay byte-identical here; decide before publishing whether they ship as they
+  are.
+- **Publishing:** a lockfile, a release tag, and the AUTONMI framework's own release.

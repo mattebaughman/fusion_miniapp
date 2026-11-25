@@ -809,6 +809,16 @@ SCORES_ASK = ("Reply with one JSON object that maps each candidate number above 
               "from 0 to 1.")
 GUIDANCE_ASK = "Reply with guidance for the Generator in two or three sentences: what to explore next."
 NOTE_TOKENS, GUIDANCE_TOKENS = 128, 256   # visible reply allowances (as reply_tokens and SUMMARY_TOKENS)
+# Bounds that keep every prompt of the asynchronous mode within the context by construction (a model's note or
+# guidance is free text up to the reply cap): a Monitor's note or the Coordinator's guidance shown inside a later
+# prompt is cut to NOTE_CHARS characters (the record keeps the whole text, with record.extras), and one Evaluator
+# call shows at most SHOWN_RESULTS results (the rest wait for its next cycle, in arrival order: the layer's).
+NOTE_CHARS, SHOWN_RESULTS = 1200, 8
+
+
+def _cut(text: str) -> str:
+    """A note or guidance as a later prompt shows it: its first NOTE_CHARS characters."""
+    return (text or "")[:NOTE_CHARS]
 
 
 def scores_tokens(n: int) -> int:
@@ -842,8 +852,9 @@ def _numbered(ks: list[int]) -> str:
 
 def async_generator_messages(gst: dict, calls: list[dict], knobs: dict) -> list[dict]:
     """The Generator's prompt: the take's profiles from the evolutionary loop, the newest survivors, the
-    Evaluator's latest scores and the Coordinator's guidance. Its last line names the candidates, by their
-    numbers (from 0), of the campaign's budget: the stub seeds its reply by the campaign and that line."""
+    Evaluator's latest scores and the Coordinator's guidance (cut to NOTE_CHARS). Its last line names the
+    candidates, by their numbers (from 0), of the campaign's budget: the stub seeds its reply by the campaign and
+    that line."""
     system = ("You are the experiment generator of one IGNOS fusion design campaign. The campaign's evolutionary "
               "loop proposes H-mode plasma profile parameters for the three-region profile model; you reconcile "
               "each proposal with what the campaign has learned. The goal is the highest te_core_metric among "
@@ -858,7 +869,7 @@ def async_generator_messages(gst: dict, calls: list[dict], knobs: dict) -> list[
         parts.append("The Evaluator's latest keep-probabilities (candidate: probability): "
                      + ", ".join(f"{c}: {x}" for c, x in gst["scores"]))
     if gst["guidance"]:
-        parts.append("The Coordinator's guidance: " + gst["guidance"])
+        parts.append("The Coordinator's guidance: " + _cut(gst["guidance"]))
     parts.append("The evolutionary loop proposes:\n" + "\n".join(
         f"candidate {c['candidate_idx']} ({c['source']}): {json.dumps(_seven(c['params']))}" for c in calls)
                  + "\nGive each candidate the values you would change; a key you leave out keeps the evolutionary "
@@ -920,9 +931,10 @@ def parse_text(reply: str) -> str:
 
 
 def scores_messages(items: list[dict]) -> list[dict]:
-    """The Evaluator's prompt: each result to score (items: candidate, result, q, numbers, note), q and m at full
-    precision (so that the stub's numbers-only answer, llm.numbers_only, is exact); the last line asks for each
-    one's keep-probability. Neither the score from numbers nor its formula is shown: the reply is the model's own."""
+    """The Evaluator's prompt: each result to score (items: candidate, result, q, numbers, note, the note cut to
+    NOTE_CHARS), q and m at full precision (so that the stub's numbers-only answer, llm.numbers_only, is exact); the
+    last line asks for each one's keep-probability. Neither the score from numbers nor its formula is shown: the
+    reply is the model's own."""
     system = ("You are the evaluator of one IGNOS fusion design campaign. For each result below you give the "
               "probability, from 0 to 1, that the campaign keeps it as a survivor. q is the probability the "
               "campaign's evolutionary loop gives it by its rank among the campaign's recent results (the best 1, "
@@ -930,7 +942,7 @@ def scores_messages(items: list[dict]) -> list[dict]:
               "(+1) or low-ranked (-1) candidates. Weigh q, the Monitor's numbers and note, and the result's own "
               "numbers.")
     rows = [f"candidate {it['candidate']}: q {it['q']!r}; {_trace(it['numbers'])}; {_shown(it['result'])}; "
-            f"profile {json.dumps(_seven(it['result']['params']))}; note: {it['note'] or 'none'}" for it in items]
+            f"profile {json.dumps(_seven(it['result']['params']))}; note: {_cut(it['note']) or 'none'}" for it in items]
     return [{"role": "system", "content": system},
             {"role": "user", "content": "Results to score:\n" + "\n".join(rows) + "\n\n" + SCORES_ASK}]
 

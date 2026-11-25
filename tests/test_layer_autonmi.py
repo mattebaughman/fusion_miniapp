@@ -1107,6 +1107,36 @@ def test_an_inbox_gives_everything_that_has_arrived():
     asyncio.run(check())
 
 
+def test_an_inbox_gives_at_most_its_limit_and_keeps_the_rest_in_order():
+    """take_all with a limit (the asynchronous Evaluator's, with its model call: decide.SHOWN_RESULTS): the first
+    `limit` messages in the order sent; the rest stay in the inbox and come with the next take at once, without a
+    wait; a take that waited counts the message that woke it in its limit. Every message is received once, and on a
+    failure the ones left are dropped, counted once."""
+    from fusion_miniapp.layer_autonmi import Mailbox
+
+    async def check():
+        box = Mailbox(agents=5)
+        for c in range(11):
+            box.deliver("a1/monitor0", "evaluator", "report", {"c": c})
+        assert await box.take_all("a1/evaluator", "report", limit=8) == [{"c": c} for c in range(8)]
+        assert box.left() == {"a1/evaluator": 3}
+        assert await box.take_all("a1/evaluator", "report", limit=8) == [{"c": c} for c in range(8, 11)]
+        assert box.queues == {} and box.left() == {}
+        waiting = asyncio.ensure_future(box.take_all("a1/evaluator", "report", limit=2))
+        await asyncio.sleep(0)
+        for c in (11, 12, 13):
+            box.deliver("a1/monitor1", "evaluator", "report", {"c": c})
+        assert await waiting == [{"c": 11}, {"c": 12}]
+        assert await box.take_all("a1/evaluator", "report", wait=False, limit=8) == [{"c": 13}]
+        assert box.received["a1/evaluator"] == 14 and box.queues == {}
+        for c in range(3):
+            box.deliver("a2/monitor0", "evaluator", "report", {"c": c})
+        assert await box.take_all("a2/evaluator", "report", limit=1) == [{"c": 0}]
+        box.fail("a2", "a2/monitor1 failed")
+        assert (box.received["a2/evaluator"], box.dropped["a2/evaluator"]) == (1, 2) and box.left() == {}
+    asyncio.run(check())
+
+
 def test_every_id_seen_outside_the_agents_is_the_campaigns(tmp_path):
     """Whichever of campaign a4's agents asks, the evaluate task's agent_id (cold starts, work folders), the
     lookups (the abstract differs for a4 and a4/generator) and the store key of its memory are a4's."""
@@ -1749,6 +1779,61 @@ def test_a_planted_secret_never_reaches_a_copied_setup_file(tmp_path, monkeypatc
     assert leave_out(text, [outer, inner]) == leave_out(text, [inner, outer]) == (b"x " + LEFT_OUT + b" y", 1)
 
 
+def test_the_setup_list_copies_each_model_jobs_files_and_nothing_else(tmp_path, monkeypatch):
+    """Several model nodes (launch/stellar_ai_autonmi.sbatch): the endpoints file combines the model jobs' own in a
+    folder of its own, beside their shared key and the list of files to copy (layer_autonmi.SETUP_LIST: one path or
+    glob per line, relative to that folder), each job's folder under it (model-<k>/). The copy takes exactly the
+    listed files, at their paths under the folder, from every job's folder (logs as their heads, the key left out
+    wherever it is); a file the list does not name is not copied, so a bare FAKE secret under a name that says
+    nothing, in a file whose name says nothing, never reaches the run, which the same folder without its list would
+    copy; a listed path outside the folder, one that is not there, the key files and a symlink are not copied."""
+    from fusion_miniapp.layer_autonmi import LEFT_OUT, LOG_HEAD_LINES, SECRET_NAME, SETUP_LIST, copy_model_service
+
+    for k in [k for k in os.environ if SECRET_NAME.search(k)]:   # this machine's own: none here
+        monkeypatch.delenv(k)
+    bare = "planted-bare-secret-unnamed-file-4x"   # FAKE
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    (fleet / "api-key").write_text(PLANTED["key"] + "\n")
+    (fleet / "endpoints").write_text("http://node0:8100\nhttp://node1:8100\n")
+    (fleet / "notes.txt").write_text(bare + "\n")
+    (tmp_path / "elsewhere.log").write_text("outside the folder\n")
+    for k in range(2):
+        job = fleet / f"model-{k}"
+        job.mkdir()
+        (job / "api-key").write_text(PLANTED["key"] + "\n")
+        (job / "endpoints").write_text(f"http://node{k}:8100\n")
+        (job / "gpu.csv").write_text(f"2026/11/24 00:00:00.000, {k}, 97, 150000\n")
+        log = [f"INFO line {i}" for i in range(700)]
+        log[2] = f"serving with key {PLANTED['key']}"
+        (job / "vllm-0.log").write_text("\n".join(log) + "\n")
+        (job / f"model-{50 + k}.out").write_text(f"model job {50 + k}\n")
+        (job / "notes.txt").write_text(bare + "\n")
+    (fleet / "model-1" / "vllm-1.log").symlink_to(tmp_path / "elsewhere.log")
+    (fleet / SETUP_LIST).write_text("\n".join(["endpoints", "# each model job's folder", *[
+        f"model-{k}/{name}" for k in range(2) for name in ("endpoints", "gpu.csv", "vllm-*.log", "model-*.out")],
+        "model-1/missing.csv", "../elsewhere.log", str(tmp_path / "elsewhere.log"), "model-0/api-key", ""]))
+    got = copy_model_service(fleet / "endpoints", str(fleet / "api-key"), tmp_path / "run")
+    jobs = [f"model-{k}/{name}" for k in range(2) for name in ("endpoints", "gpu.csv", "vllm-0.log", f"model-{50 + k}.out")]
+    assert got["files"] == sorted(["endpoints", "environment.txt", *jobs])
+    assert sorted(got["not_copied"]) == sorted(["model-1/vllm-1.log", "model-1/missing.csv", "../elsewhere.log",
+                                                str(tmp_path / "elsewhere.log"), "model-0/api-key"])
+    assert got["secrets_left_out"] == 2 and got["removed_by_the_check"] == []
+    copied = tmp_path / "run" / "model_service"
+    assert sorted(f.relative_to(copied).as_posix() for f in copied.rglob("*") if f.is_file()) == got["files"]
+    for f in copied.rglob("*"):
+        if f.is_file():
+            assert PLANTED["key"].encode() not in f.read_bytes() and bare.encode() not in f.read_bytes(), f
+    head = (copied / "model-1" / "vllm-0.log").read_text().splitlines()
+    assert len(head) == LOG_HEAD_LINES and head[2] == "serving with key " + LEFT_OUT.decode()
+    assert (copied / "model-0" / "gpu.csv").read_text().startswith("2026/11/24 00:00:00.000, 0,")
+    # the same folder without its list: every plain file of it (not the jobs' folders), the bare secret with them
+    (fleet / SETUP_LIST).unlink()
+    plain = copy_model_service(fleet / "endpoints", str(fleet / "api-key"), tmp_path / "run2")
+    assert plain["files"] == ["endpoints", "environment.txt", "notes.txt"]
+    assert bare in (tmp_path / "run2" / "model_service" / "notes.txt").read_text()
+
+
 def test_the_record_toggle_adds_the_model_calls_extras(tmp_path):
     """The asynchronous mode, --llm openai with the StellarAI settings over two fake vLLM servers (FIXTURES: each
     reply 100 prompt and 50 generated tokens) with a key, record.extras on, from a fake model job's folder with
@@ -1908,6 +1993,79 @@ def test_a_recorded_order_with_the_stubs_calls_replays_to_the_same_campaign(asyn
         assert json.loads(json.dumps(cst["best"])) == line["best"], line["agent_id"]
         assert all(c["source"] == "model" and c["filled"] == 7 for c in calls.values())
     assert sum(sum(line["asynchronous"]["evaluator"], []) != list(range(16)) for line in lines_of(out)) > 0
+
+
+SHOWN_ONE = """import sys
+sys.path.insert(0, sys.argv.pop(1))
+from async_replay import reordered
+from fusion_miniapp import decide
+decide.SHOWN_RESULTS = 1   # (tests only) one result per Evaluator call
+sys.exit(reordered(sys.argv[1:]))
+"""
+
+
+def test_an_evaluator_call_shows_at_most_its_limit_of_results(tmp_path):
+    """The asynchronous mode with every role's call (the stub, FIXTURE) and decide.SHOWN_RESULTS set to 1 in the run's
+    own process (async_run's reordered arrivals, so reports reach the Evaluator while it scores others): each
+    Evaluator cycle takes one report, the others wait in its inbox for its next cycle in arrival order; so each
+    campaign's Evaluator has as many cycles and calls as results; AUTONMI's checks of the mode pass; and the
+    recorded orders replay to the same campaign. With llm.mode off (no call) its cycle takes every report, as
+    before (async_run)."""
+    from async_replay import fixture, replay, stub_reconcile
+
+    script = tmp_path / "shown_one.py"
+    script.write_text(SHOWN_ONE)
+    proc = subprocess.run([sys.executable, str(script), str(Path(__file__).parent), *ASYNC_ARGS, "--knobs",
+                           knob_file(tmp_path, {**ASYNC_CALLS, "record": {"extras": True}}),
+                           "--out", str(tmp_path / "autonmi")],
+                          cwd=tmp_path, check=False, timeout=900, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    out = tmp_path / "autonmi"
+    rec = json.loads((out / "run_record.json").read_text())
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    checks = {c["name"]: c["ok"] for c in json.loads((out / "app" / "checks.json").read_text())}
+    assert checks == dict.fromkeys(ASYNC_CHECKS, True), checks
+    by = rec["counts"]["by_role"]
+    assert by["evaluator"]["model_asks"] == rec["counts"]["asynchronous"]["cycles"]["evaluator"] == 20 * 16
+    knobs = rec["knobs"]
+    for line in lines_of(out):
+        x, seed = line["asynchronous"], line["seed"]
+        assert [len(b) for b in x["evaluator"]] == [1] * 16, line["agent_id"]
+        m = {r["candidate"]: r["m"] for r in x["results"]}
+        _, rows, _ = replay(seed, knobs, x["evaluator"], x["coordinator"], x["held"], m, fixture(knobs, seed),
+                            stub_reconcile(knobs))
+        assert rows == x["results"], line["agent_id"]
+
+
+def test_a_long_note_or_guidance_is_cut_in_later_prompts_and_kept_whole_in_the_record(tmp_path):
+    """The asynchronous mode with every role's call through a fake vLLM server (FIXTURE) whose Monitor notes are
+    3,000 characters and Coordinator guidance 2,500, with record.extras: every request shows at most
+    decide.NOTE_CHARS of either (the Evaluator's prompts show notes cut to it, the Generator's guidance cut to
+    it), the record keeps each whole (agents.jsonl: monitor[i].note and asynchronous.guidance), and the run
+    passes."""
+    note, guidance = "z" * 3000, "g" * 2500
+
+    def reply(content):
+        last = content.splitlines()[-1]
+        return note if last == decide.NOTE_ASK else guidance if last == decide.GUIDANCE_ASK else None
+
+    knobs = {"llm": {"mode": "openai", "model": "stand-in", "thinking": "off", "reply_cap": 4096},
+             "outer": {"population": 4, "generations": 3, "parent_stdout": "drop"}, "campaign": {"mode": "async"},
+             "record": {"extras": True}}
+    with FakeVllm(reply=reply) as server:
+        (tmp_path / "endpoints").write_text(server.url + "\n")
+        rec = run("autonmi", tmp_path, "--preset", "smoke", "--sim", "fixture", "--agents", "6", "--knobs",
+                  knob_file(tmp_path, knobs), "--endpoints-file", str(tmp_path / "endpoints"))
+        prompts = ["\n".join(m["content"] for m in body["messages"]) for body in server.take()]
+    assert rec["status"] == "pass" and rec["autonmi"]["ok"], rec["autonmi"]
+    cut = decide.NOTE_CHARS
+    for text in (note, guidance):
+        assert any(text[:cut] in p for p in prompts) and not any(text[:cut + 1] in p for p in prompts), text[0]
+    lines = lines_of(tmp_path / "autonmi")
+    notes = [m["note"] for line in lines for m in line["monitor"]]
+    assert notes and set(notes) == {note}
+    given = [g for line in lines for g in line["asynchronous"]["guidance"]]
+    assert given and set(given) == {guidance}
 
 
 def test_a_server_that_fails_every_call_leaves_each_role_on_its_fallback(tmp_path):

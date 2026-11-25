@@ -1,0 +1,32 @@
+# StellarAI with NVIDIA Nemotron 3.5 Lightning on vLLM: the AUTONMI layer's settings for the model runs.
+# launch/stellar_ai_autonmi.sbatch applies it over the hundredk preset and knobs/machines/stellar_ai.yaml; knob
+# files given to the launch script come after it, and --agents sets a smaller run. Nothing here is calibrated,
+# and all physics output is synthetic. Configured, not yet run on the machine.
+
+agents:
+  count: 20000                # the scale run: 20,000 campaigns x 5 hosted agents = 100,000 agents
+  thinking_budget: 4096       # sent only with llm.thinking on and llm.send_thinking_budget true
+
+llm:
+  mode: openai                # never the stub: the launch script also passes --llm openai
+  model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4   # the servers' --served-model-name (RASCAL_MODEL_NAME)
+  send_thinking_budget: false # thinking off: no thinking_token_budget (it also needs a reasoning parser)
+  timeout_s: 86400            # no per-call time limit in practice: StellarAI's longest job is 24 h
+  max_in_flight: 1000000      # the client's admission caps out of reach: vLLM's --max-num-seqs is the only cap
+  admission_tokens: 0         # 0: no token cap
+  thinking: off               # chat_template_kwargs {enable_thinking: false} on every call
+  reply_cap: 4096             # max_tokens of every call (thinking off: the cap alone)
+  temperature: 1.0            # NVIDIA's recommended sampling for this model, sent with every call
+  top_p: 0.95
+  outage_s: 300               # wait up to 5 minutes for a model server that went away, then the call fails
+
+sim:
+  work_root: $TMPDIR          # the inner loop's work folders on node-local disk (the launch script sets TMPDIR)
+
+workers:
+  sim_workers: 80             # inner-loop worker processes on the campaign node (10 per GPU of 8)
+  gpu_per_worker: true        # --sim real: worker i sees GPU i mod 8; no effect with --sim fixture
+
+campaign:
+  mode: async                 # each result applied as it arrives; each agent makes its own model call
+  slots: 2                    # Monitor agents per campaign: 3 + 2 = 5 hosted agents
