@@ -1,0 +1,1673 @@
+{
+ "status": "pass",
+ "agent_layer": "autonmi",
+ "sim": "fixture",
+ "llm": "stub",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 2000,
+   "planes": 4,
+   "rollout_steps": 2,
+   "puffs": 3,
+   "fixed_point_cap": 15,
+   "model_width": 32,
+   "checkpoint_mb": 1,
+   "device": "auto",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": null,
+   "threads_per_worker": "auto"
+  },
+  "agents": {
+   "count": 2000,
+   "first": 0,
+   "per_process": 10000,
+   "max_live": null,
+   "start_together": true,
+   "cost_scale": 1.0,
+   "thinking_budget": 256,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "stub",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "stub",
+   "send_thinking_budget": true,
+   "timeout_s": 120,
+   "max_retries": 2,
+   "min_model_share": 0.5,
+   "max_empty_share": 0.1,
+   "stub_latency_s": 0.001,
+   "max_in_flight": 512,
+   "admission_tokens": 2000000,
+   "thinking": null,
+   "reply_cap": null,
+   "temperature": null,
+   "top_p": null,
+   "outage_s": 1800
+  },
+  "workers": {
+   "sim_workers": 10,
+   "gpu_per_worker": false
+  },
+  "outer": {
+   "population": 16,
+   "generations": 2,
+   "generator": "llm",
+   "rng": "shared",
+   "logs": "none",
+   "wall_weight": 0.7,
+   "noise": 0.1,
+   "parent_stdout": "drop"
+  },
+  "monitor": {
+   "capture": true,
+   "fixture_trace": "smooth",
+   "weight": 0.25
+  },
+  "campaign": {
+   "slots": 2,
+   "mode": "async",
+   "warmup": 4,
+   "notes": false
+  },
+  "record": {
+   "extras": false
+  }
+ },
+ "run": {
+  "timestamp": "2026-11-25T05:28:12+00:00",
+  "host": "laptop",
+  "slurm_job_id": null,
+  "miniapp_git": {
+   "commit": "ea5d0bfcb4b907a5af6dd46584cdf46c568e269e",
+   "dirty": true
+  },
+  "backends": [
+   "ConcurrentExecutionBackend"
+  ]
+ },
+ "counts": {
+  "agents": 2000,
+  "agents_requested": 2000,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 64000,
+  "llm_calls": 223710,
+  "tool_calls": 2000,
+  "generations": 0,
+  "candidates_by_source": {
+   "start": 0,
+   "survivor": 0,
+   "mutation": 0,
+   "model": 64000,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 64000,
+   "filled_by_model": 64000
+  },
+  "suspensions": 64000,
+  "sim_tasks": 64000,
+  "memory_writes": 63855,
+  "reports": 2000,
+  "feasible_agents": 115,
+  "expected_per_agent": {
+   "sims": 32,
+   "llm_calls": 112
+  },
+  "campaigns": 2000,
+  "hosted_agents": 10000,
+  "agents_per_campaign": 5,
+  "roles": [
+   "coordinator",
+   "generator",
+   "evaluator",
+   "monitor"
+  ],
+  "by_role": {
+   "coordinator": {
+    "agents": 2000,
+    "finished": 2000,
+    "model_calls": 63855,
+    "model_asks": 63855,
+    "model_tries": 63855,
+    "model_fallbacks": 0,
+    "lookups": 2000,
+    "messages_sent": 131710,
+    "messages_received": 63855,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 216223.148,
+     "n": 2000,
+     "mean": 108.1116,
+     "p50": 108.095,
+     "p95": 110.8266,
+     "max": 111.1288
+    }
+   },
+   "generator": {
+    "agents": 2000,
+    "finished": 2000,
+    "model_calls": 32000,
+    "model_asks": 32000,
+    "model_tries": 32000,
+    "model_fallbacks": 0,
+    "lookups": 2000,
+    "messages_sent": 68000,
+    "messages_received": 193565,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 213910.271,
+     "n": 2000,
+     "mean": 106.9551,
+     "p50": 106.9408,
+     "p95": 109.7314,
+     "max": 110.0452
+    }
+   },
+   "evaluator": {
+    "agents": 2000,
+    "finished": 2000,
+    "model_calls": 63855,
+    "model_asks": 63855,
+    "model_tries": 63855,
+    "model_fallbacks": 0,
+    "lookups": 0,
+    "messages_sent": 127710,
+    "messages_received": 66000,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 217619.901,
+     "n": 2000,
+     "mean": 108.81,
+     "p50": 108.7955,
+     "p95": 111.6578,
+     "max": 111.9716
+    }
+   },
+   "monitor": {
+    "agents": 4000,
+    "finished": 4000,
+    "model_calls": 64000,
+    "model_asks": 64000,
+    "model_tries": 64000,
+    "model_fallbacks": 0,
+    "lookups": 0,
+    "messages_sent": 64000,
+    "messages_received": 68000,
+    "messages_dropped": 0,
+    "suspensions": 64000,
+    "simulations": 64000,
+    "traces": 64000,
+    "reports": 64000,
+    "message_wait_s": {
+     "sum": 5103.069,
+     "n": 4000,
+     "mean": 1.2758,
+     "p50": 1.1905,
+     "p95": 1.5325,
+     "max": 1.5451
+    }
+   }
+  },
+  "expected_by_role": {
+   "coordinator": {
+    "sims": 0,
+    "llm_calls": 32,
+    "lookups": 1,
+    "sent": [
+     4,
+     66
+    ],
+    "received": [
+     1,
+     32
+    ]
+   },
+   "generator": {
+    "sims": 0,
+    "llm_calls": 16,
+    "lookups": 1,
+    "sent": 34,
+    "received": [
+     4,
+     97
+    ]
+   },
+   "evaluator": {
+    "sims": 0,
+    "llm_calls": 32,
+    "lookups": 0,
+    "sent": [
+     2,
+     64
+    ],
+    "received": 33
+   },
+   "monitor": {
+    "sims": 32,
+    "llm_calls": 32,
+    "lookups": 0,
+    "sent": 32,
+    "received": 34
+   }
+  },
+  "asynchronous": {
+   "results_scored": 64000,
+   "results_kept": 35813,
+   "results_scored_after_warmup": 56000,
+   "results_kept_after_warmup": 27813,
+   "cycles": {
+    "coordinator": 63855,
+    "generator": 32000,
+    "evaluator": 63855,
+    "monitor": 64000
+   },
+   "survivor_waits": 0,
+   "parameters_filled": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    64000
+   ]
+  }
+ },
+ "llm_service": {
+  "calls": 223710,
+  "budgets": {
+   "256": 223710
+  },
+  "empty": 127855,
+  "errors": 0,
+  "retries": 0,
+  "finish_reasons": {
+   "stop": 223710
+  },
+  "tokens": {
+   "prompt": 70932481,
+   "completion": 2469547,
+   "reasoning": 0
+  }
+ },
+ "llm_check": {
+  "model_share": 1.0,
+  "empty_share": 0.5715211657950025,
+  "refill_slots": {
+   "asked": 64000,
+   "filled": 64000
+  },
+  "replies": {
+   "calls": 223710,
+   "empty": 127855
+  },
+  "min_model_share": 0.5,
+  "max_empty_share": 0.1,
+  "fail": []
+ },
+ "lookups": {
+  "constraints": 2000,
+  "abstract": 2000
+ },
+ "touch_check": {
+  "evaluations": 64000,
+  "fixture": 64000,
+  "pass": 0,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 0,
+  "checkpoint_load": 0,
+  "context_build": 0,
+  "device_to_host": 0,
+  "geometry_read": 0,
+  "graph_forward": 0,
+  "handoff_file_read": 0,
+  "handoff_file_rewrite": 0,
+  "handoff_file_write": 0,
+  "handoff_memory": 0,
+  "host_to_device": 0,
+  "library_import": 0,
+  "mesh_read": 0,
+  "model_to_device": 0,
+  "result_return": 0,
+  "small_forward": 0
+ },
+ "devices": {
+  "none": 64000
+ },
+ "wall_seconds": 115.377,
+ "results_sha256": "d0702c25c982bbb120ff228fadea4c92eff23aabf6640ce1565e99d3a624de2e",
+ "speed": {
+  "coverage": {
+   "campaigns_timed": 2000,
+   "campaigns_requested": 2000,
+   "complete": true
+  },
+  "campaigns_live": {
+   "max": 2000,
+   "mean": 1940.95,
+   "requested": 2000,
+   "time_ge_95pct_s": 105.901,
+   "ramp_up_s": 0.153
+  },
+  "agent_phase_s": 112.179,
+  "startup_s": 0.044,
+  "shutdown_s": 3.371,
+  "rates_per_s": {
+   "evaluations": 570.515,
+   "model_calls": 1994.219,
+   "model_calls_all_agents": 1994.219,
+   "generations": 0.0,
+   "campaigns": 17.829
+  },
+  "sims_in_flight": {
+   "max": 8000,
+   "mean": 7421.37
+  },
+  "sims_executing": {
+   "max": 10,
+   "mean": 9.46
+  },
+  "sim_s": {
+   "n": 64000,
+   "mean": 0.0166,
+   "p50": 0.0146,
+   "p95": 0.0279,
+   "max": 0.3517
+  },
+  "queue_wait_s": {
+   "n": 64000,
+   "mean": 12.9916,
+   "p50": 13.8637,
+   "p95": 14.6976,
+   "max": 14.8815
+  },
+  "generation_s": {
+   "n": 0
+  },
+  "model_latency_s": {
+   "n": 223710,
+   "mean": 0.0043,
+   "p50": 0.0014,
+   "p95": 0.0022,
+   "max": 0.4554
+  },
+  "loop_lag": [
+   {
+    "samples": 1075,
+    "p50_ms": 0.6,
+    "p95_ms": 5.7,
+    "max_ms": 1261.1,
+    "share_over_100ms": 0.0149
+   }
+  ],
+  "sim_workers": 10,
+  "sim_bound_ratio": 0.9459,
+  "model_requests_in_flight": {
+   "side": "client",
+   "what": "model requests admitted and sent whose reply is not back (time queued inside a server included)",
+   "source": "each call's [t_end - service_s, t_end] (its call record)",
+   "emulated": true,
+   "calls_timed": 223710,
+   "calls_untimed": 0,
+   "calls_retried": 0,
+   "max": 512,
+   "mean": 8.6427,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 10000,
+     "50": 0.0,
+     "90": 0.0,
+     "95": 0.0
+    }
+   },
+   "time_s": {
+    "n": 223710,
+    "mean": 0.0043,
+    "p50": 0.0014,
+    "p95": 0.0022,
+    "max": 0.4554
+   },
+   "autonmi_sampled": {
+    "source": "AUTONMI's summary.json: agent_states_over_time.model_request (Flowgentic's agents in MODEL_REQUEST, sampled at each export, about every 10 s) and agent_seconds_by_state.model_request (its agent-seconds) / agent_phase_s",
+    "samples": 14,
+    "max_sampled": 5,
+    "agent_seconds": 967.726,
+    "mean": 8.6266
+   },
+   "littles_law": {
+    "autonmi_agent_seconds_per_s": 8.6266,
+    "fusion_calls_per_s_x_mean_time_in_flight": 8.5752,
+    "calls_per_s_x_stub_latency_s": 1.9942,
+    "autonmi_agent_seconds_per_wall_s": 8.3875,
+    "per": "per second of the agent phase (agent_phase_s), the calls' rate too; the last figure per second of the whole run (wall_seconds: start-up and shut-down included)"
+   },
+   "loop_lag": {
+    "p95_ms": 5.7,
+    "max_ms": 1261.1,
+    "share_over_100ms": 0.0149,
+    "high": true,
+    "rule": "high: the loop's 95th-percentile lag is at least 10% of the mean time in flight, which it lands inside (the count then measures the loop as well as the model)"
+   }
+  },
+  "model_requests_queued": {
+   "side": "client",
+   "what": "model requests waiting for the client's admission caps (llm.max_in_flight, llm.admission_tokens)",
+   "source": "each call's wait_s before its time in flight",
+   "emulated": true,
+   "max": 2000,
+   "mean": 16.069,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 10000,
+     "50": 0.0,
+     "90": 0.0,
+     "95": 0.0
+    }
+   },
+   "time_s": {
+    "n": 223710,
+    "mean": 0.0081,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.689
+   },
+   "autonmi_built_in": {
+    "agent_seconds": 1805.702,
+    "mean": 16.0966
+   }
+  },
+  "model_tokens_per_s": {
+   "window": [
+    0.15,
+    0.85
+   ],
+   "window_s": 78.525,
+   "calls": 156112,
+   "prompt_per_s": 655123.897,
+   "generated_per_s": 22079.532,
+   "emulated": true
+  },
+  "agents_live": {
+   "source": "AUTONMI's rows (app/agents-p*.jsonl): each hosted agent's t_start to t_end",
+   "hosted_agents": 10000,
+   "timed": 10000,
+   "max": 10000,
+   "mean": 9704.78,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 10000,
+     "50": 108.859,
+     "90": 106.229,
+     "95": 105.901
+    }
+   },
+   "ramp_up_s": 0.153,
+   "all_live_s": 105.573,
+   "by_role": {
+    "coordinator": {
+     "timed": 2000,
+     "max": 2000,
+     "mean": 1940.95,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 2000,
+       "50": 108.86,
+       "90": 106.229,
+       "95": 105.901
+      }
+     },
+     "ramp_up_s": 0.153
+    },
+    "generator": {
+     "timed": 2000,
+     "max": 2000,
+     "mean": 1940.96,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 2000,
+       "50": 108.86,
+       "90": 106.229,
+       "95": 105.902
+      }
+     },
+     "ramp_up_s": 0.153
+    },
+    "evaluator": {
+     "timed": 2000,
+     "max": 2000,
+     "mean": 1940.96,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 2000,
+       "50": 108.86,
+       "90": 106.229,
+       "95": 105.902
+      }
+     },
+     "ramp_up_s": 0.153
+    },
+    "monitor": {
+     "timed": 4000,
+     "max": 4000,
+     "mean": 3881.92,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 4000,
+       "50": 108.86,
+       "90": 106.23,
+       "95": 105.902
+      }
+     },
+     "ramp_up_s": 0.153
+    }
+   }
+  },
+  "decoding_at_servers": null,
+  "decoding_at_servers_why_not": "the stub LLM: no model servers",
+  "headline": {
+   "figure": "model_requests_in_flight",
+   "label": "client side, emulated (stub LLM, llm.stub_latency_s = 0.001 s per call)",
+   "max": 512,
+   "mean": 8.6427,
+   "emulated": true
+  },
+  "live": {
+   "interval_s": 1.0,
+   "t0": 1795584376.907,
+   "fields": [
+    "t_s",
+    "agents_live",
+    "model_requests_open",
+    "model_requests_queued",
+    "decoding_at_servers",
+    "done"
+   ],
+   "series": [
+    [
+     1.11,
+     10000,
+     0,
+     2000,
+     null,
+     0
+    ],
+    [
+     2.2,
+     10000,
+     180,
+     0,
+     null,
+     0
+    ],
+    [
+     3.2,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     4.2,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     5.2,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     6.2,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     7.2,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     8.21,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     9.21,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     10.21,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     11.21,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     12.21,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     13.21,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     14.21,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     15.22,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     16.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     17.22,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     18.22,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     19.22,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     20.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     21.22,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     22.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     23.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     24.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     25.22,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     26.22,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     27.22,
+     10000,
+     0,
+     0,
+     null,
+     0
+    ],
+    [
+     28.23,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     29.23,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     30.23,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     31.23,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     32.23,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     33.23,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     34.23,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     35.23,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     36.23,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     37.26,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     38.26,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     39.26,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     40.26,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     41.26,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     42.26,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     43.47,
+     10000,
+     1,
+     0,
+     null,
+     0
+    ],
+    [
+     44.47,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     45.47,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     46.47,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     47.47,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     48.47,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     49.47,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     50.47,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     51.48,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     52.48,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     53.49,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     54.49,
+     10000,
+     1,
+     0,
+     null,
+     0
+    ],
+    [
+     55.49,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     56.49,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     57.49,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     58.49,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     59.49,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     60.5,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     61.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     62.5,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     63.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     64.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     65.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     66.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     67.5,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     68.5,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     69.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     70.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     71.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     72.5,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     73.5,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     74.5,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     75.51,
+     10000,
+     1,
+     0,
+     null,
+     0
+    ],
+    [
+     76.51,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     77.51,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     78.51,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     79.51,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     80.51,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     81.51,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     82.52,
+     10000,
+     1,
+     0,
+     null,
+     0
+    ],
+    [
+     83.52,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     84.53,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     85.53,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     86.53,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     87.53,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     88.53,
+     10000,
+     5,
+     0,
+     null,
+     0
+    ],
+    [
+     89.53,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     90.53,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     91.53,
+     10000,
+     0,
+     0,
+     null,
+     0
+    ],
+    [
+     92.54,
+     10000,
+     1,
+     0,
+     null,
+     0
+    ],
+    [
+     93.54,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     94.54,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     95.54,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     96.54,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     97.54,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     98.74,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     99.74,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     100.74,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     101.74,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     102.74,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     103.74,
+     10000,
+     3,
+     0,
+     null,
+     0
+    ],
+    [
+     104.74,
+     10000,
+     4,
+     0,
+     null,
+     0
+    ],
+    [
+     105.74,
+     10000,
+     2,
+     0,
+     null,
+     0
+    ],
+    [
+     106.74,
+     8475,
+     3,
+     0,
+     null,
+     1525
+    ],
+    [
+     107.74,
+     6920,
+     4,
+     0,
+     null,
+     3080
+    ],
+    [
+     108.74,
+     5370,
+     3,
+     0,
+     null,
+     4630
+    ],
+    [
+     109.74,
+     3830,
+     3,
+     0,
+     null,
+     6170
+    ],
+    [
+     110.75,
+     2260,
+     4,
+     0,
+     null,
+     7740
+    ],
+    [
+     111.75,
+     755,
+     5,
+     0,
+     null,
+     9245
+    ],
+    [
+     112.92,
+     0,
+     0,
+     0,
+     null,
+     10000
+    ],
+    [
+     114.28,
+     0,
+     0,
+     0,
+     null,
+     10000
+    ]
+   ]
+  },
+  "start_together": {
+   "on": true,
+   "coordinator_wait_s": {
+    "n": 2000,
+    "mean": 0.6948,
+    "p50": 0.6937,
+    "p95": 0.828,
+    "max": 0.8436
+   },
+   "begin_margin_s": 0.083
+  }
+ },
+ "peak_rss_mb": {
+  "main_process": 2189.7,
+  "agent_process_max": 2154.8,
+  "agent_processes_sum": 2154.8,
+  "sim_worker_max": null
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.4",
+  "torch": "2.15.0",
+  "langgraph": "1.2.24",
+  "langchain-core": "1.7.7",
+  "flowgentic": "0.6.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.57.0",
+  "dragonhpc": null,
+  "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+  "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.3-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "not imported in this process"
+ },
+ "frameworks_imported": {
+  "academy": false,
+  "langgraph": false,
+  "flowgentic": true,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "thread",
+ "sim_workers_per_process": 10,
+ "sim_workers_total": 10,
+ "threads": null,
+ "pools": [
+  null
+ ],
+ "pruned_tasks": 0,
+ "layer_stats": [
+  {
+   "layer": "autonmi",
+   "population": 0,
+   "runtime": "local",
+   "complete": true,
+   "suspensions": 64000,
+   "runner": {
+    "model_calls": 223710,
+    "simulations": 64000,
+    "lookups": 4000,
+    "suspensions": 64000
+   },
+   "tasks": {
+    "submitted": 64000,
+    "repeats": 64000,
+    "failed": 0,
+    "refused": 0,
+    "retained": 64000
+   },
+   "outcomes": {
+    "done": 10000
+   },
+   "wall_s": 112.694,
+   "model_outages": null
+  }
+ ],
+ "autonmi": {
+  "ok": true,
+  "failed_checks": [],
+  "summary": "summary.json",
+  "runtime": "local",
+  "populations": 1,
+  "workers_per_population": 10,
+  "crashed": false,
+  "versions": {
+   "rascal": {
+    "version": "0.1.0",
+    "commit": null
+   },
+   "radical.asyncflow": {
+    "version": "0.7.0",
+    "commit": "3f18cc86596aaafa6a7efff20b7fefb8e11e9fc9"
+   },
+   "wfMiniAPI": {
+    "version": "0.2.0",
+    "commit": null
+   }
+  },
+  "framework_commit": {
+   "commit": "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75",
+   "dirty": false,
+   "from": "git",
+   "pin": "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75",
+   "matches_pin": true
+  },
+  "asyncflow_running_shim": true,
+  "gc": {
+   "automatic_full_collections": false,
+   "thresholds": [
+    700,
+    10,
+    1000000000
+   ]
+  },
+  "telemetry": {
+   "complete": true,
+   "reasons": [],
+   "tasks": {
+    "created": 64000,
+    "completed": 64000,
+    "failed": 0,
+    "canceled": 0,
+    "abandoned": 0,
+    "not_submitted": 0
+   },
+   "populations": {
+    "p000": {
+     "complete": true,
+     "tasks": {
+      "created": 64000,
+      "completed": 64000,
+      "failed": 0,
+      "canceled": 0,
+      "abandoned": 0,
+      "not_submitted": 0
+     }
+    }
+   }
+  }
+ },
+ "campaign_mode": "async"
+}

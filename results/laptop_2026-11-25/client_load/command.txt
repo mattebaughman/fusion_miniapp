@@ -1,0 +1,1 @@
+python results/laptop_2026-11-25/ladder.py --child <probe> calls -- --preset hundredk --sim fixture --agents 2400 --knobs knobs/machines/stellar_ai.yaml --knobs knobs/machines/stellar_ai_nemotron.yaml --llm openai --endpoints-file <runs>/client_load.fleet/endpoints --api-key-file <runs>/client_load.fleet/api-key --model-wait 120 --out <runs>/client_load

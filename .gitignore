@@ -17,3 +17,4 @@ results/laptop_2026-11-19_final/*/rhapsody.session.*
 # the reference problem's records (README in that folder)
 !results/ignos_shape_reference/
 !results/laptop_2026-11-21/
+!results/laptop_2026-11-25/

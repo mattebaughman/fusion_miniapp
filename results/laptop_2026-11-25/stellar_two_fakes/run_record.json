@@ -1,0 +1,848 @@
+{
+ "status": "pass",
+ "agent_layer": "autonmi",
+ "sim": "fixture",
+ "llm": "openai",
+ "emulated": true,
+ "method": "miniapp_standin",
+ "note": "all physics output is synthetic (random-weight stand-in models)",
+ "knobs": {
+  "sim": {
+   "nodes_per_plane": 2000,
+   "planes": 4,
+   "rollout_steps": 2,
+   "puffs": 3,
+   "fixed_point_cap": 15,
+   "model_width": 32,
+   "checkpoint_mb": 1,
+   "device": "cuda",
+   "cold_start_fraction": 0.0,
+   "keep_artifacts": false,
+   "work_root": "$TMPDIR",
+   "threads_per_worker": "auto"
+  },
+  "agents": {
+   "count": 20,
+   "first": 0,
+   "per_process": 10000,
+   "max_live": null,
+   "start_together": true,
+   "cost_scale": 1.0,
+   "thinking_budget": 4096,
+   "budget_scales_with_cost": false
+  },
+  "tools": {
+   "constraints_lookup": true,
+   "abstract_lookup": true,
+   "latency_ms": 0
+  },
+  "llm": {
+   "mode": "openai",
+   "base_url_env": "OPENAI_BASE_URL",
+   "api_key_env": "OPENAI_API_KEY",
+   "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+   "send_thinking_budget": false,
+   "timeout_s": 86400,
+   "max_retries": 2,
+   "min_model_share": 0.5,
+   "max_empty_share": 0.1,
+   "stub_latency_s": 0.001,
+   "max_in_flight": 1000000,
+   "admission_tokens": 0,
+   "thinking": "off",
+   "reply_cap": 4096,
+   "temperature": 1.0,
+   "top_p": 0.95,
+   "outage_s": 300
+  },
+  "workers": {
+   "sim_workers": 80,
+   "gpu_per_worker": true
+  },
+  "outer": {
+   "population": 16,
+   "generations": 2,
+   "generator": "llm",
+   "rng": "shared",
+   "logs": "none",
+   "wall_weight": 0.7,
+   "noise": 0.1,
+   "parent_stdout": "drop"
+  },
+  "monitor": {
+   "capture": true,
+   "fixture_trace": "smooth",
+   "weight": 0.25
+  },
+  "campaign": {
+   "slots": 2,
+   "mode": "async",
+   "warmup": 4,
+   "notes": false
+  },
+  "record": {
+   "extras": false
+  }
+ },
+ "run": {
+  "timestamp": "2026-11-25T06:08:13+00:00",
+  "host": "laptop",
+  "slurm_job_id": null,
+  "miniapp_git": {
+   "commit": "ea5d0bfcb4b907a5af6dd46584cdf46c568e269e",
+   "dirty": true
+  },
+  "backends": [
+   "ConcurrentExecutionBackend"
+  ]
+ },
+ "counts": {
+  "agents": 20,
+  "agents_requested": 20,
+  "agents_failed": 0,
+  "agent_processes": 1,
+  "failed_agent_processes": [],
+  "sims": 640,
+  "llm_calls": 1864,
+  "tool_calls": 20,
+  "generations": 0,
+  "candidates_by_source": {
+   "start": 0,
+   "survivor": 0,
+   "mutation": 0,
+   "model": 640,
+   "restart": 0
+  },
+  "refill_slots": {
+   "asked": 640,
+   "filled_by_model": 640
+  },
+  "suspensions": 640,
+  "sim_tasks": 640,
+  "memory_writes": 452,
+  "reports": 20,
+  "feasible_agents": 2,
+  "expected_per_agent": {
+   "sims": 32,
+   "llm_calls": 112
+  },
+  "campaigns": 20,
+  "hosted_agents": 100,
+  "agents_per_campaign": 5,
+  "roles": [
+   "coordinator",
+   "generator",
+   "evaluator",
+   "monitor"
+  ],
+  "by_role": {
+   "coordinator": {
+    "agents": 20,
+    "finished": 20,
+    "model_calls": 452,
+    "model_asks": 452,
+    "model_tries": 452,
+    "model_fallbacks": 0,
+    "lookups": 20,
+    "messages_sent": 944,
+    "messages_received": 452,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 15.37,
+     "n": 20,
+     "mean": 0.7685,
+     "p50": 0.7552,
+     "p95": 0.8847,
+     "max": 0.9428
+    }
+   },
+   "generator": {
+    "agents": 20,
+    "finished": 20,
+    "model_calls": 320,
+    "model_asks": 320,
+    "model_tries": 320,
+    "model_fallbacks": 0,
+    "lookups": 20,
+    "messages_sent": 680,
+    "messages_received": 1376,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 15.697,
+     "n": 20,
+     "mean": 0.7849,
+     "p50": 0.7793,
+     "p95": 0.8544,
+     "max": 0.8557
+    }
+   },
+   "evaluator": {
+    "agents": 20,
+    "finished": 20,
+    "model_calls": 452,
+    "model_asks": 452,
+    "model_tries": 452,
+    "model_fallbacks": 0,
+    "lookups": 0,
+    "messages_sent": 904,
+    "messages_received": 660,
+    "messages_dropped": 0,
+    "suspensions": 0,
+    "simulations": 0,
+    "traces": 0,
+    "reports": 0,
+    "message_wait_s": {
+     "sum": 22.702,
+     "n": 20,
+     "mean": 1.1351,
+     "p50": 1.1203,
+     "p95": 1.2942,
+     "max": 1.3308
+    }
+   },
+   "monitor": {
+    "agents": 40,
+    "finished": 40,
+    "model_calls": 640,
+    "model_asks": 640,
+    "model_tries": 640,
+    "model_fallbacks": 0,
+    "lookups": 0,
+    "messages_sent": 640,
+    "messages_received": 680,
+    "messages_dropped": 0,
+    "suspensions": 640,
+    "simulations": 640,
+    "traces": 640,
+    "reports": 640,
+    "message_wait_s": {
+     "sum": 38.852,
+     "n": 40,
+     "mean": 0.9713,
+     "p50": 0.9621,
+     "p95": 1.0544,
+     "max": 1.1511
+    }
+   }
+  },
+  "expected_by_role": {
+   "coordinator": {
+    "sims": 0,
+    "llm_calls": 32,
+    "lookups": 1,
+    "sent": [
+     4,
+     66
+    ],
+    "received": [
+     1,
+     32
+    ]
+   },
+   "generator": {
+    "sims": 0,
+    "llm_calls": 16,
+    "lookups": 1,
+    "sent": 34,
+    "received": [
+     4,
+     97
+    ]
+   },
+   "evaluator": {
+    "sims": 0,
+    "llm_calls": 32,
+    "lookups": 0,
+    "sent": [
+     2,
+     64
+    ],
+    "received": 33
+   },
+   "monitor": {
+    "sims": 32,
+    "llm_calls": 32,
+    "lookups": 0,
+    "sent": 32,
+    "received": 34
+   }
+  },
+  "asynchronous": {
+   "results_scored": 640,
+   "results_kept": 341,
+   "results_scored_after_warmup": 560,
+   "results_kept_after_warmup": 261,
+   "cycles": {
+    "coordinator": 452,
+    "generator": 320,
+    "evaluator": 452,
+    "monitor": 640
+   },
+   "survivor_waits": 0,
+   "parameters_filled": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    640
+   ]
+  }
+ },
+ "llm_service": {
+  "calls": 1864,
+  "budgets": {
+   "4096": 1864
+  },
+  "empty": 0,
+  "errors": 0,
+  "retries": 0,
+  "finish_reasons": {
+   "stop": 1864
+  },
+  "tokens": {
+   "prompt": 186400,
+   "completion": 93200,
+   "reasoning": 0
+  },
+  "served_models": [
+   {
+    "id": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+    "owned_by": "fusion-test-fixture"
+   }
+  ]
+ },
+ "llm_check": {
+  "model_share": 1.0,
+  "empty_share": 0.0,
+  "refill_slots": {
+   "asked": 640,
+   "filled": 640
+  },
+  "replies": {
+   "calls": 1864,
+   "empty": 0
+  },
+  "min_model_share": 0.5,
+  "max_empty_share": 0.1,
+  "fail": []
+ },
+ "lookups": {
+  "constraints": 20,
+  "abstract": 20
+ },
+ "touch_check": {
+  "evaluations": 640,
+  "fixture": 640,
+  "pass": 0,
+  "fail": {}
+ },
+ "touches": {
+  "artifact_write": 0,
+  "checkpoint_load": 0,
+  "context_build": 0,
+  "device_to_host": 0,
+  "geometry_read": 0,
+  "graph_forward": 0,
+  "handoff_file_read": 0,
+  "handoff_file_rewrite": 0,
+  "handoff_file_write": 0,
+  "handoff_memory": 0,
+  "host_to_device": 0,
+  "library_import": 0,
+  "mesh_read": 0,
+  "model_to_device": 0,
+  "result_return": 0,
+  "small_forward": 0
+ },
+ "devices": {
+  "none": 640
+ },
+ "wall_seconds": 2.903,
+ "results_sha256": "cc4ad2795cb076de2147330aee506977bf00797fea582a05384a8fccdca288bf",
+ "speed": {
+  "coverage": {
+   "campaigns_timed": 20,
+   "campaigns_requested": 20,
+   "complete": true
+  },
+  "campaigns_live": {
+   "max": 20,
+   "mean": 19.3,
+   "requested": 20,
+   "time_ge_95pct_s": 2.601,
+   "ramp_up_s": 0.001
+  },
+  "agent_phase_s": 2.768,
+  "startup_s": 0.091,
+  "shutdown_s": 0.076,
+  "rates_per_s": {
+   "evaluations": 231.212,
+   "model_calls": 673.406,
+   "model_calls_all_agents": 673.406,
+   "generations": 0.0,
+   "campaigns": 7.225
+  },
+  "sims_in_flight": {
+   "max": 40,
+   "mean": 11.49
+  },
+  "sims_executing": {
+   "max": 37,
+   "mean": 1.31
+  },
+  "sim_s": {
+   "n": 640,
+   "mean": 0.0057,
+   "p50": 0.0042,
+   "p95": 0.0168,
+   "max": 0.0295
+  },
+  "queue_wait_s": {
+   "n": 640,
+   "mean": 0.044,
+   "p50": 0.0447,
+   "p95": 0.0753,
+   "max": 0.0943
+  },
+  "generation_s": {
+   "n": 0
+  },
+  "model_latency_s": {
+   "n": 1864,
+   "mean": 0.0721,
+   "p50": 0.0665,
+   "p95": 0.0893,
+   "max": 0.4228
+  },
+  "loop_lag": [
+   {
+    "samples": 23,
+    "p50_ms": 5.5,
+    "p95_ms": 11.3,
+    "max_ms": 361.8,
+    "share_over_100ms": 0.0435
+   }
+  ],
+  "sim_workers": 80,
+  "sim_bound_ratio": 0.0164,
+  "model_requests_in_flight": {
+   "side": "client",
+   "what": "model requests admitted and sent whose reply is not back (time queued inside a server included)",
+   "source": "each call's [t_end - service_s, t_end] (its call record)",
+   "emulated": false,
+   "calls_timed": 1864,
+   "calls_untimed": 0,
+   "calls_retried": 0,
+   "max": 88,
+   "mean": 48.5467,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 100,
+     "50": 1.622,
+     "90": 0.0,
+     "95": 0.0
+    }
+   },
+   "time_s": {
+    "n": 1864,
+    "mean": 0.0721,
+    "p50": 0.0665,
+    "p95": 0.0893,
+    "max": 0.4228
+   },
+   "autonmi_sampled": {
+    "source": "AUTONMI's summary.json: agent_states_over_time.model_request (Flowgentic's agents in MODEL_REQUEST, sampled at each export, about every 10 s) and agent_seconds_by_state.model_request (its agent-seconds) / agent_phase_s",
+    "samples": 3,
+    "max_sampled": 0,
+    "agent_seconds": 134.362,
+    "mean": 48.5412
+   },
+   "littles_law": {
+    "autonmi_agent_seconds_per_s": 48.5412,
+    "fusion_calls_per_s_x_mean_time_in_flight": 48.5529,
+    "calls_per_s_x_stub_latency_s": null,
+    "autonmi_agent_seconds_per_wall_s": 46.2838,
+    "per": "per second of the agent phase (agent_phase_s), the calls' rate too; the last figure per second of the whole run (wall_seconds: start-up and shut-down included)"
+   },
+   "loop_lag": {
+    "p95_ms": 11.3,
+    "max_ms": 361.8,
+    "share_over_100ms": 0.0435,
+    "high": true,
+    "rule": "high: the loop's 95th-percentile lag is at least 10% of the mean time in flight, which it lands inside (the count then measures the loop as well as the model)"
+   }
+  },
+  "model_requests_queued": {
+   "side": "client",
+   "what": "model requests waiting for the client's admission caps (llm.max_in_flight, llm.admission_tokens)",
+   "source": "each call's wait_s before its time in flight",
+   "emulated": false,
+   "max": 0,
+   "mean": 0.0,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 100,
+     "50": 0.0,
+     "90": 0.0,
+     "95": 0.0
+    }
+   },
+   "time_s": {
+    "n": 1864,
+    "mean": 0.0,
+    "p50": 0.0,
+    "p95": 0.0,
+    "max": 0.0
+   },
+   "autonmi_built_in": {
+    "agent_seconds": 0.021,
+    "mean": 0.0076
+   }
+  },
+  "model_tokens_per_s": {
+   "window": [
+    0.15,
+    0.85
+   ],
+   "window_s": 1.938,
+   "calls": 1541,
+   "prompt_per_s": 79530.894,
+   "generated_per_s": 39765.447,
+   "emulated": false
+  },
+  "agents_live": {
+   "source": "AUTONMI's rows (app/agents-p*.jsonl): each hosted agent's t_start to t_end",
+   "hosted_agents": 100,
+   "timed": 100,
+   "max": 100,
+   "mean": 96.52,
+   "time_ge_pct_s": {
+    "hosted_agents": {
+     "of": 100,
+     "50": 2.684,
+     "90": 2.612,
+     "95": 2.601
+    }
+   },
+   "ramp_up_s": 0.001,
+   "all_live_s": 2.6,
+   "by_role": {
+    "coordinator": {
+     "timed": 20,
+     "max": 20,
+     "mean": 19.3,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 20,
+       "50": 2.684,
+       "90": 2.612,
+       "95": 2.601
+      }
+     },
+     "ramp_up_s": 0.001
+    },
+    "generator": {
+     "timed": 20,
+     "max": 20,
+     "mean": 19.3,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 20,
+       "50": 2.685,
+       "90": 2.612,
+       "95": 2.601
+      }
+     },
+     "ramp_up_s": 0.001
+    },
+    "evaluator": {
+     "timed": 20,
+     "max": 20,
+     "mean": 19.3,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 20,
+       "50": 2.685,
+       "90": 2.612,
+       "95": 2.601
+      }
+     },
+     "ramp_up_s": 0.001
+    },
+    "monitor": {
+     "timed": 40,
+     "max": 40,
+     "mean": 38.61,
+     "time_ge_pct_s": {
+      "hosted_agents": {
+       "of": 40,
+       "50": 2.685,
+       "90": 2.612,
+       "95": 2.601
+      }
+     },
+     "ramp_up_s": 0.001
+    }
+   }
+  },
+  "decoding_at_servers": {
+   "source": "the model servers' /metrics, vllm:num_requests_running summed over the servers, sampled by AUTONMI's VllmSampler (vllm/vllm.json)",
+   "note": "the servers' running batches: prompt processing included (vLLM has no decode-only count); total only (a server does not know which agent sent a request)",
+   "servers": 2,
+   "interval_s": 2.0,
+   "sample_errors": 0,
+   "hold_s": 5.0,
+   "stale_s": [
+    0.0,
+    0.0
+   ],
+   "stale_rule": "a server's reading counts until its next one, at most hold_s (2.5 sampling intervals, or 2.5 median gaps); stale_s: each server's seconds of the agent phase with no reading counted (it stopped answering /metrics, or before its first), counted as 0",
+   "running": {
+    "samples": 10,
+    "max": 36,
+    "mean": 10.5661,
+    "time_ge_pct_s": {
+     "hosted_agents": {
+      "of": 100,
+      "50": 0.0,
+      "90": 0.0,
+      "95": 0.0
+     }
+    }
+   },
+   "waiting": {
+    "samples": 10,
+    "max": 0,
+    "mean": 0.0
+   },
+   "kv_cache_usage": {
+    "samples": 10,
+    "max": 0.0412,
+    "mean": 0.0121
+   },
+   "gauges_missing": null
+  },
+  "decoding_at_servers_why_not": null,
+  "headline": {
+   "figure": "decoding_at_servers",
+   "label": "the servers' running count",
+   "max": 36,
+   "mean": 10.5661,
+   "served_by": [
+    "fusion-test-fixture"
+   ],
+   "emulated": false
+  },
+  "live": {
+   "interval_s": 1.0,
+   "t0": 1795586890.313,
+   "fields": [
+    "t_s",
+    "agents_live",
+    "model_requests_open",
+    "model_requests_queued",
+    "decoding_at_servers",
+    "done"
+   ],
+   "series": [
+    [
+     1.05,
+     100,
+     50,
+     0,
+     0,
+     0
+    ],
+    [
+     2.06,
+     100,
+     64,
+     0,
+     36,
+     0
+    ],
+    [
+     2.88,
+     0,
+     0,
+     0,
+     0,
+     100
+    ]
+   ]
+  },
+  "start_together": {
+   "on": true,
+   "coordinator_wait_s": {
+    "n": 20,
+    "mean": 0.3727,
+    "p50": 0.3917,
+    "p95": 0.394,
+    "max": 0.3943
+   },
+   "begin_margin_s": 0.007
+  }
+ },
+ "peak_rss_mb": {
+  "main_process": 179.8,
+  "agent_process_max": 179.8,
+  "agent_processes_sum": 179.8,
+  "sim_worker_max": null
+ },
+ "versions": {
+  "fusion_miniapp": "0.1.0",
+  "numpy": "2.5.5",
+  "scipy": "1.18.1",
+  "netCDF4": "1.7.5.1.post1",
+  "PyYAML": "6.0.4",
+  "torch": "2.15.0",
+  "langgraph": "1.2.24",
+  "langchain-core": "1.7.7",
+  "flowgentic": "0.6.0",
+  "rhapsody-py": "0.7.0",
+  "academy-py": "1.0.0",
+  "openai": "3.57.0",
+  "dragonhpc": null,
+  "flowgentic_commit": "22434ac9bb8e75b8b4aedd6256e57ecddd393a34",
+  "rhapsody_commit": "857e093b8d31f970fdf3bf915efe23481f951655"
+ },
+ "parent": {
+  "source": "FusionFM/Demo",
+  "branch": "evo-innerloop-upgrade",
+  "commit": "9768bcb"
+ },
+ "device_probe": {
+  "python": "3.12.13",
+  "platform": "macOS-26.7.3-arm64-arm-64bit",
+  "cpu_count": 12,
+  "torch": "not imported in this process"
+ },
+ "frameworks_imported": {
+  "academy": false,
+  "langgraph": false,
+  "flowgentic": true,
+  "rhapsody": true,
+  "torch": false
+ },
+ "sim_pool": "thread",
+ "sim_workers_per_process": 80,
+ "sim_workers_total": 80,
+ "threads": null,
+ "pools": [
+  null
+ ],
+ "pruned_tasks": 0,
+ "layer_stats": [
+  {
+   "layer": "autonmi",
+   "population": 0,
+   "runtime": "local",
+   "complete": true,
+   "suspensions": 640,
+   "runner": {
+    "model_calls": 1864,
+    "simulations": 640,
+    "lookups": 40,
+    "suspensions": 640
+   },
+   "tasks": {
+    "submitted": 640,
+    "repeats": 640,
+    "failed": 0,
+    "refused": 0,
+    "retained": 640
+   },
+   "outcomes": {
+    "done": 100
+   },
+   "wall_s": 2.817,
+   "model_outages": {
+    "outage_s": 300.0,
+    "outages": {},
+    "down_s": {},
+    "gave_up": {},
+    "check_failures": {}
+   }
+  }
+ ],
+ "autonmi": {
+  "ok": true,
+  "failed_checks": [],
+  "summary": "summary.json",
+  "runtime": "local",
+  "populations": 1,
+  "workers_per_population": 80,
+  "crashed": false,
+  "versions": {
+   "rascal": {
+    "version": "0.1.0",
+    "commit": null
+   },
+   "radical.asyncflow": {
+    "version": "0.7.0",
+    "commit": "3f18cc86596aaafa6a7efff20b7fefb8e11e9fc9"
+   },
+   "wfMiniAPI": {
+    "version": "0.2.0",
+    "commit": null
+   }
+  },
+  "framework_commit": {
+   "commit": "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75",
+   "dirty": false,
+   "from": "git",
+   "pin": "e20861a8cf5d996c4b1fb332f57d7758bfeb4c75",
+   "matches_pin": true
+  },
+  "asyncflow_running_shim": true,
+  "gc": {
+   "automatic_full_collections": false,
+   "thresholds": [
+    700,
+    10,
+    1000000000
+   ]
+  },
+  "telemetry": {
+   "complete": true,
+   "reasons": [],
+   "tasks": {
+    "created": 640,
+    "completed": 640,
+    "failed": 0,
+    "canceled": 0,
+    "abandoned": 0,
+    "not_submitted": 0
+   },
+   "populations": {
+    "p000": {
+     "complete": true,
+     "tasks": {
+      "created": 640,
+      "completed": 640,
+      "failed": 0,
+      "canceled": 0,
+      "abandoned": 0,
+      "not_submitted": 0
+     }
+    }
+   }
+  },
+  "inner_loop_gpus": {
+   "gpus": [],
+   "workers_placed": 0
+  }
+ },
+ "campaign_mode": "async"
+}

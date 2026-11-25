@@ -413,7 +413,9 @@ model that never answers would leave every campaign on the parent's mutants, and
   record with `status: interrupted` is written, with the campaigns that finished (exit 143). On the AUTONMI layer
   the populations report into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check
   `every_population_ran` then fails, and `autonmi.telemetry` gives each population's task counts. At 10,000
-  campaigns on a laptop the run exited about 55 s after SIGTERM (measured).
+  campaigns on a laptop the run exited about 55 s after SIGTERM (measured). The AUTONMI layer's interrupted record
+  has no per-role counts and no model-call figures: AUTONMI's rows and the population's call sums are written when
+  a population ends (measured in the 2026-11-25 ladder).
 - An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
   exits when its worker dies.
 
@@ -800,8 +802,21 @@ performance claims for a machine. Every number below is measured unless marked o
     evaluations per second), peak memory 621, 2,096 and 8,428 MiB; about half of the results scored after
     warm-up were kept (49.8% at `monitor.weight` 0, 50.0 to 50.7% at 0.25).
   - With the stub at 2 s a call (emulated) and 500 campaigns, about 4.2 of a campaign's 5 agents were in a model
-    call over the middle of the run, on battery in Low Power Mode, where the agents' one process saturated a core
-    (measured once; not repeated on AC power).
+    call over the middle of the run, on battery in Low Power Mode, where the agents' one process saturated a core.
+    On AC power the ladder below gives about 4.7 to 4.8 (4.82 in its run, 4.74 in four repeats).
+- **The laptop ladder of 2026-11-25** (the final shape, fixture inner loop, one population, AC power; every model
+  call to the stub or to fake servers, and in the generations mode, with `campaign.notes` off by default, only the
+  refill and the summary call the model; records, figures and the script in `results/laptop_2026-11-25/`):
+  - every hosted agent live at once at 2,500, 10,000 and 50,000 agents (500, 2,000 and 10,000 campaigns, the
+    asynchronous mode; the generations mode at 500 too);
+  - 4.82, 4.81 and 4.79 of a campaign's 5 agents in a model call with the stub at 2 s, 8 s and 40 s a call
+    (emulated; one run each, and 4.74 in four repeats at 500), against 4.9 modelled; in the asynchronous mode
+    with the stub at 1 ms, 542 to 584 evaluations per second; peak memory 9,169 MiB at 10,000 campaigns;
+  - SIGTERM at 10,000 campaigns: exit 143 and a record of the 5,060 campaigns that had finished, without their
+    model-call figures (an interrupted record has none);
+  - the StellarAI knob file against two fake servers: every request carried its settings, and both servers
+    answered every role; and 12,000 model calls open at once from one process against two fake servers, none
+    failed.
 - **The StellarAI run path:** its launch script and check ran only on the laptop, against fake Slurm tools, fake
   model jobs and fake vLLM servers (FIXTURES). No real model server, GPU or MPS daemon has run.
 - **10,000 campaigns on the LangGraph and Academy layers** (by 2026-11-21, hundredk shape, fixture on 10 threads,

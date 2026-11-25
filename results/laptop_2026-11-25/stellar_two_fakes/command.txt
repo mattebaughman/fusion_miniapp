@@ -1,0 +1,1 @@
+python results/laptop_2026-11-25/ladder.py --child <probe> calls -- --preset hundredk --sim fixture --agents 20 --knobs knobs/machines/stellar_ai.yaml --knobs knobs/machines/stellar_ai_nemotron.yaml --llm openai --endpoints-file <runs>/stellar_two_fakes.fleet/endpoints --api-key-file <runs>/stellar_two_fakes.fleet/api-key --model-wait 120 --out <runs>/stellar_two_fakes

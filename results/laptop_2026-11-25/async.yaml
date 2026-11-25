@@ -1,0 +1,2 @@
+# The asynchronous mode at the hundredk preset's other settings (stub LLM at 1 ms a call, its default caps).
+campaign: {mode: async}

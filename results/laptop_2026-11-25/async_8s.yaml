@@ -1,0 +1,4 @@
+# The asynchronous mode with the stub LLM at 8 s a call (emulated) and the client's admission caps out of reach,
+# as in knobs/machines/stellar_ai_nemotron.yaml: at least the hosted agents in flight, no token cap.
+campaign: {mode: async}
+llm: {stub_latency_s: 8.0, max_in_flight: 1000000, admission_tokens: 0}

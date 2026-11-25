@@ -1,0 +1,1 @@
+python results/laptop_2026-11-25/ladder.py --child <probe> - -- --preset hundredk --sim fixture --agents 10000 --knobs <repo>/results/laptop_2026-11-25/async.yaml --out <runs>/r10000_async_1ms

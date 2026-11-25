@@ -1,0 +1,952 @@
+{
+ "rung": "client_load",
+ "configured": {
+  "campaigns": 2400,
+  "hosted_agents_per_campaign": 5,
+  "mode": "async",
+  "llm_mode": "openai",
+  "stub_latency_s": null,
+  "max_in_flight": 1000000,
+  "admission_tokens": 0,
+  "fake_servers": 2,
+  "fake_latency_s": 30.0,
+  "record_extras": false,
+  "population": 16,
+  "generations": 2,
+  "slots": 2,
+  "knob_files": [
+   "stellar_ai.yaml",
+   "stellar_ai_nemotron.yaml"
+  ]
+ },
+ "run": {
+  "exit": 0,
+  "outer_wall_s": 688.0,
+  "rss_peak_mb": 3068.2,
+  "status": "pass",
+  "campaign_lines": 2400,
+  "campaigns_recorded": 2400,
+  "wall_seconds": 683.296,
+  "agent_phase_s": 679.546,
+  "startup_s": 0.079,
+  "shutdown_s": 3.903,
+  "autonmi_ok": true,
+  "autonmi_failed_checks": []
+ },
+ "check1_all_live": {
+  "hosted_agents": 12000,
+  "agents_live_max": 12000,
+  "all_live_s": 613.22,
+  "by_role_max": {
+   "coordinator": 2400,
+   "generator": 2400,
+   "evaluator": 2400,
+   "monitor": 4800
+  },
+  "live_line_agents_live_max": 12000,
+  "pass": true
+ },
+ "check3_rates_and_memory": {
+  "evaluations": 76800,
+  "evaluations_per_s_agent_phase": 113.017,
+  "evaluations_per_s_wall": 112.4,
+  "model_calls_per_s_agent_phase": 288.601,
+  "peak_rss_mb_record": 3059.2,
+  "rss_peak_mb_sampled_1s": 3068.2,
+  "mib_per_campaign": 1.275
+ },
+ "model_calls_per_campaign": {
+  "coordinator": 16.86,
+  "generator": 16.0,
+  "evaluator": 16.86,
+  "monitor": 32.0
+ },
+ "model_fallbacks": {
+  "coordinator": 0,
+  "generator": 0,
+  "evaluator": 0,
+  "monitor": 0
+ },
+ "model_requests_in_flight": {
+  "max": 12000,
+  "mean": 8948.222
+ },
+ "decoding_at_servers": {
+  "max": null,
+  "mean": null
+ },
+ "live_line_model_requests_open_max": 12000,
+ "queue_wait_s": {
+  "n": 76800,
+  "mean": 3.3956,
+  "p50": 2.2903,
+  "p95": 10.9457,
+  "max": 27.9781
+ },
+ "sim_s_mean": 0.068,
+ "loop_lag": [
+  {
+   "samples": 5520,
+   "p50_ms": 2.2,
+   "p95_ms": 74.1,
+   "max_ms": 2830.5,
+   "share_over_100ms": 0.0433
+  }
+ ],
+ "prompts_chars": {
+  "coordinator": {
+   "asked": 40459,
+   "max_chars": 2069,
+   "mean_chars": 1416,
+   "max_rows": 4,
+   "of_bound": 0.0962
+  },
+  "evaluator": {
+   "asked": 40459,
+   "max_chars": 3367,
+   "mean_chars": 1912,
+   "max_rows": 4,
+   "of_bound": 0.1566
+  },
+  "generator": {
+   "asked": 38400,
+   "max_chars": 3989,
+   "mean_chars": 2547,
+   "max_rows": 2,
+   "of_bound": 0.1855
+  },
+  "monitor": {
+   "asked": 76800,
+   "max_chars": 873,
+   "mean_chars": 867,
+   "max_rows": 0,
+   "of_bound": 0.0406
+  }
+ },
+ "prompt_bound_chars": 21504,
+ "check2_in_a_model_call": {
+  "window_s": 475.682,
+  "by_role": {
+   "coordinator": 0.914,
+   "generator": 0.8575,
+   "evaluator": 0.9394,
+   "monitor": 1.8281
+  },
+  "all_of_5": 4.539,
+  "monitor_per_slot": 0.9141,
+  "modelled_all_of_5": 4.9,
+  "calls_seen": 196118
+ },
+ "power_before": {
+  "time": "2026-11-25 01:08:14 EST",
+  "pmset_batt": "Now drawing from 'AC Power'\n -InternalBattery-0\t85%; charging; 0:47 remaining present: true",
+  "powermode": 2,
+  "ac_power": true,
+  "uptime": "1:08  up 4 days,  9:16, 8 users, load averages: 2.10 2.28 2.47",
+  "load_1min": 2.1,
+  "waited_s": 0
+ },
+ "power_after": {
+  "time": "2026-11-25 01:19:43 EST",
+  "pmset_batt": "Now drawing from 'AC Power'\n -InternalBattery-0\t93%; charging; 0:22 remaining present: true",
+  "powermode": 2,
+  "ac_power": true,
+  "uptime": "1:19  up 4 days,  9:28, 8 users, load averages: 1.79 2.02 2.19",
+  "load_1min": 1.79
+ },
+ "fake_servers": [
+  {
+   "url": "http://127.0.0.1:60788",
+   "latency_s": 30.0,
+   "successes": 97929,
+   "running_max": 5992,
+   "waiting_max": 1,
+   "by_role": {
+    "generator": {
+     "requests": 19232,
+     "max_chars": 3988
+    },
+    "monitor": {
+     "requests": 38272,
+     "max_chars": 873
+    },
+    "evaluator": {
+     "requests": 20195,
+     "max_chars": 3343
+    },
+    "coordinator": {
+     "requests": 20230,
+     "max_chars": 2064
+    }
+   },
+   "settings": [
+    {
+     "count": 38272,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "monitor"
+    },
+    {
+     "count": 20230,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "coordinator"
+    },
+    {
+     "count": 20195,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "evaluator"
+    },
+    {
+     "count": 19232,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "response_format": {
+       "json_schema": {
+        "name": "candidates",
+        "schema": {
+         "items": {
+          "additionalProperties": false,
+          "properties": {
+           "Delta": {
+            "type": "number"
+           },
+           "a1_Te": {
+            "type": "number"
+           },
+           "a1_ne": {
+            "type": "number"
+           },
+           "a2_Te": {
+            "type": "number"
+           },
+           "a2_ne": {
+            "type": "number"
+           },
+           "gamma_Te": {
+            "type": "number"
+           },
+           "gamma_ne": {
+            "type": "number"
+           }
+          },
+          "type": "object"
+         },
+         "maxItems": 2,
+         "minItems": 2,
+         "type": "array"
+        }
+       },
+       "type": "json_schema"
+      },
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "generator"
+    }
+   ]
+  },
+  {
+   "url": "http://127.0.0.1:60789",
+   "latency_s": 30.0,
+   "successes": 98189,
+   "running_max": 6008,
+   "waiting_max": 1,
+   "by_role": {
+    "generator": {
+     "requests": 19168,
+     "max_chars": 3989
+    },
+    "monitor": {
+     "requests": 38528,
+     "max_chars": 872
+    },
+    "evaluator": {
+     "requests": 20264,
+     "max_chars": 3367
+    },
+    "coordinator": {
+     "requests": 20229,
+     "max_chars": 2069
+    }
+   },
+   "settings": [
+    {
+     "count": 38528,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "monitor"
+    },
+    {
+     "count": 20264,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "evaluator"
+    },
+    {
+     "count": 20229,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "coordinator"
+    },
+    {
+     "count": 19168,
+     "body": {
+      "chat_template_kwargs": {
+       "enable_thinking": false
+      },
+      "max_tokens": 4096,
+      "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+      "response_format": {
+       "json_schema": {
+        "name": "candidates",
+        "schema": {
+         "items": {
+          "additionalProperties": false,
+          "properties": {
+           "Delta": {
+            "type": "number"
+           },
+           "a1_Te": {
+            "type": "number"
+           },
+           "a1_ne": {
+            "type": "number"
+           },
+           "a2_Te": {
+            "type": "number"
+           },
+           "a2_ne": {
+            "type": "number"
+           },
+           "gamma_Te": {
+            "type": "number"
+           },
+           "gamma_ne": {
+            "type": "number"
+           }
+          },
+          "type": "object"
+         },
+         "maxItems": 2,
+         "minItems": 2,
+         "type": "array"
+        }
+       },
+       "type": "json_schema"
+      },
+      "temperature": 1.0,
+      "top_p": 0.95
+     },
+     "role": "generator"
+    }
+   ]
+  }
+ ],
+ "servers_running_max_sum": 12000,
+ "tcp_every_10s": [
+  {
+   "t_s": 10,
+   "established_to_servers": {
+    "60788": 1202,
+    "60789": 1198
+   },
+   "time_wait": 147
+  },
+  {
+   "t_s": 21,
+   "established_to_servers": {
+    "60788": 1202,
+    "60789": 1198
+   },
+   "time_wait": 178
+  },
+  {
+   "t_s": 31,
+   "established_to_servers": {
+    "60788": 1202,
+    "60789": 1198
+   },
+   "time_wait": 81
+  },
+  {
+   "t_s": 41,
+   "established_to_servers": {
+    "60788": 3594,
+    "60789": 3606
+   },
+   "time_wait": 552
+  },
+  {
+   "t_s": 52,
+   "established_to_servers": {
+    "60788": 3594,
+    "60789": 3606
+   },
+   "time_wait": 531
+  },
+  {
+   "t_s": 62,
+   "established_to_servers": {
+    "60788": 3594,
+    "60789": 3606
+   },
+   "time_wait": 523
+  },
+  {
+   "t_s": 73,
+   "established_to_servers": {
+    "60788": 3289,
+    "60789": 3338
+   },
+   "time_wait": 608
+  },
+  {
+   "t_s": 83,
+   "established_to_servers": {
+    "60788": 4792,
+    "60789": 4808
+   },
+   "time_wait": 4162
+  },
+  {
+   "t_s": 93,
+   "established_to_servers": {
+    "60788": 4792,
+    "60789": 4808
+   },
+   "time_wait": 4167
+  },
+  {
+   "t_s": 104,
+   "established_to_servers": {
+    "60788": 4807,
+    "60789": 4815
+   },
+   "time_wait": 3133
+  },
+  {
+   "t_s": 114,
+   "established_to_servers": {
+    "60788": 4539,
+    "60789": 4588
+   },
+   "time_wait": 548
+  },
+  {
+   "t_s": 124,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 3531
+  },
+  {
+   "t_s": 135,
+   "established_to_servers": {
+    "60788": 5968,
+    "60789": 5978
+   },
+   "time_wait": 3593
+  },
+  {
+   "t_s": 145,
+   "established_to_servers": {
+    "60788": 5449,
+    "60789": 5420
+   },
+   "time_wait": 3974
+  },
+  {
+   "t_s": 155,
+   "established_to_servers": {
+    "60788": 3986,
+    "60789": 3988
+   },
+   "time_wait": 4263
+  },
+  {
+   "t_s": 166,
+   "established_to_servers": {
+    "60788": 4958,
+    "60789": 5070
+   },
+   "time_wait": 6104
+  },
+  {
+   "t_s": 176,
+   "established_to_servers": {
+    "60788": 5432,
+    "60789": 4886
+   },
+   "time_wait": 5293
+  },
+  {
+   "t_s": 187,
+   "established_to_servers": {
+    "60788": 5342,
+    "60789": 5298
+   },
+   "time_wait": 2356
+  },
+  {
+   "t_s": 197,
+   "established_to_servers": {
+    "60788": 5006,
+    "60789": 5099
+   },
+   "time_wait": 2076
+  },
+  {
+   "t_s": 207,
+   "established_to_servers": {
+    "60788": 5204,
+    "60789": 5371
+   },
+   "time_wait": 1910
+  },
+  {
+   "t_s": 218,
+   "established_to_servers": {
+    "60788": 5918,
+    "60789": 5929
+   },
+   "time_wait": 1553
+  },
+  {
+   "t_s": 228,
+   "established_to_servers": {
+    "60788": 5448,
+    "60789": 5451
+   },
+   "time_wait": 1029
+  },
+  {
+   "t_s": 238,
+   "established_to_servers": {
+    "60788": 5708,
+    "60789": 5811
+   },
+   "time_wait": 1074
+  },
+  {
+   "t_s": 249,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 1268
+  },
+  {
+   "t_s": 259,
+   "established_to_servers": {
+    "60788": 5968,
+    "60789": 6001
+   },
+   "time_wait": 352
+  },
+  {
+   "t_s": 269,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 295
+  },
+  {
+   "t_s": 280,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 128
+  },
+  {
+   "t_s": 290,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 98
+  },
+  {
+   "t_s": 300,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 111
+  },
+  {
+   "t_s": 311,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 83
+  },
+  {
+   "t_s": 321,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 98
+  },
+  {
+   "t_s": 331,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 169
+  },
+  {
+   "t_s": 342,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 159
+  },
+  {
+   "t_s": 352,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 156
+  },
+  {
+   "t_s": 362,
+   "established_to_servers": {
+    "60788": 5860,
+    "60789": 5931
+   },
+   "time_wait": 253
+  },
+  {
+   "t_s": 373,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 258
+  },
+  {
+   "t_s": 383,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 262
+  },
+  {
+   "t_s": 393,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6000
+   },
+   "time_wait": 61
+  },
+  {
+   "t_s": 404,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 58
+  },
+  {
+   "t_s": 414,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 61
+  },
+  {
+   "t_s": 424,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 50
+  },
+  {
+   "t_s": 435,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 113
+  },
+  {
+   "t_s": 445,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 113
+  },
+  {
+   "t_s": 455,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 115
+  },
+  {
+   "t_s": 466,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 129
+  },
+  {
+   "t_s": 476,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 120
+  },
+  {
+   "t_s": 486,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 122
+  },
+  {
+   "t_s": 497,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 70
+  },
+  {
+   "t_s": 507,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 73
+  },
+  {
+   "t_s": 517,
+   "established_to_servers": {
+    "60788": 5992,
+    "60789": 6008
+   },
+   "time_wait": 69
+  },
+  {
+   "t_s": 528,
+   "established_to_servers": {
+    "60788": 5977,
+    "60789": 6005
+   },
+   "time_wait": 63
+  },
+  {
+   "t_s": 538,
+   "established_to_servers": {
+    "60788": 5851,
+    "60789": 5870
+   },
+   "time_wait": 510
+  },
+  {
+   "t_s": 548,
+   "established_to_servers": {
+    "60788": 5684,
+    "60789": 5647
+   },
+   "time_wait": 903
+  },
+  {
+   "t_s": 559,
+   "established_to_servers": {
+    "60788": 5387,
+    "60789": 5376
+   },
+   "time_wait": 1453
+  },
+  {
+   "t_s": 569,
+   "established_to_servers": {
+    "60788": 4714,
+    "60789": 4699
+   },
+   "time_wait": 2355
+  },
+  {
+   "t_s": 579,
+   "established_to_servers": {
+    "60788": 4077,
+    "60789": 4064
+   },
+   "time_wait": 3246
+  },
+  {
+   "t_s": 590,
+   "established_to_servers": {
+    "60788": 3500,
+    "60789": 3595
+   },
+   "time_wait": 3538
+  },
+  {
+   "t_s": 600,
+   "established_to_servers": {
+    "60788": 2948,
+    "60789": 2937
+   },
+   "time_wait": 3824
+  },
+  {
+   "t_s": 610,
+   "established_to_servers": {
+    "60788": 2498,
+    "60789": 2602
+   },
+   "time_wait": 3470
+  },
+  {
+   "t_s": 621,
+   "established_to_servers": {
+    "60788": 2300,
+    "60789": 2260
+   },
+   "time_wait": 2946
+  },
+  {
+   "t_s": 631,
+   "established_to_servers": {
+    "60788": 2122,
+    "60789": 2068
+   },
+   "time_wait": 1836
+  },
+  {
+   "t_s": 641,
+   "established_to_servers": {
+    "60788": 1793,
+    "60789": 1802
+   },
+   "time_wait": 1545
+  },
+  {
+   "t_s": 652,
+   "established_to_servers": {
+    "60788": 1486,
+    "60789": 1543
+   },
+   "time_wait": 1609
+  },
+  {
+   "t_s": 662,
+   "established_to_servers": {
+    "60788": 1289,
+    "60789": 1422
+   },
+   "time_wait": 1485
+  },
+  {
+   "t_s": 672,
+   "established_to_servers": {
+    "60788": 1104,
+    "60789": 1185
+   },
+   "time_wait": 1325
+  },
+  {
+   "t_s": 683,
+   "established_to_servers": {
+    "60788": 0,
+    "60789": 0
+   },
+   "time_wait": 3074
+  }
+ ],
+ "check5_request_settings": {
+  "expected": {
+   "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
+   "chat_template_kwargs": {
+    "enable_thinking": false
+   },
+   "max_tokens": 4096,
+   "temperature": 1.0,
+   "top_p": 0.95
+  },
+  "bodies_checked": 196118,
+  "bodies_not_as_expected": 0,
+  "requests_by_server_and_role": {
+   "http://127.0.0.1:60788": {
+    "generator": 19232,
+    "monitor": 38272,
+    "evaluator": 20195,
+    "coordinator": 20230
+   },
+   "http://127.0.0.1:60789": {
+    "generator": 19168,
+    "monitor": 38528,
+    "evaluator": 20264,
+    "coordinator": 20229
+   }
+  },
+  "pass": true
+ }
+}

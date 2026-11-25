@@ -1,0 +1,143 @@
+{
+ "rung": "r500_async_1ms",
+ "configured": {
+  "campaigns": 500,
+  "hosted_agents_per_campaign": 5,
+  "mode": "async",
+  "llm_mode": "stub",
+  "stub_latency_s": 0.001,
+  "max_in_flight": 512,
+  "admission_tokens": 2000000,
+  "fake_servers": 0,
+  "fake_latency_s": null,
+  "record_extras": false,
+  "population": 16,
+  "generations": 2,
+  "slots": 2,
+  "knob_files": [
+   "async.yaml"
+  ]
+ },
+ "run": {
+  "exit": 0,
+  "outer_wall_s": 29.4,
+  "rss_peak_mb": 645.6,
+  "status": "pass",
+  "campaign_lines": 500,
+  "campaigns_recorded": 500,
+  "wall_seconds": 28.202,
+  "agent_phase_s": 27.383,
+  "startup_s": 0.039,
+  "shutdown_s": 0.844,
+  "autonmi_ok": true,
+  "autonmi_failed_checks": []
+ },
+ "check1_all_live": {
+  "hosted_agents": 2500,
+  "agents_live_max": 2500,
+  "all_live_s": 25.801,
+  "by_role_max": {
+   "coordinator": 500,
+   "generator": 500,
+   "evaluator": 500,
+   "monitor": 1000
+  },
+  "live_line_agents_live_max": 2500,
+  "pass": true
+ },
+ "check3_rates_and_memory": {
+  "evaluations": 16000,
+  "evaluations_per_s_agent_phase": 584.305,
+  "evaluations_per_s_wall": 567.3,
+  "model_calls_per_s_agent_phase": 2043.973,
+  "peak_rss_mb_record": 659.0,
+  "rss_peak_mb_sampled_1s": 645.6,
+  "mib_per_campaign": 1.318
+ },
+ "model_calls_per_campaign": {
+  "coordinator": 31.97,
+  "generator": 16.0,
+  "evaluator": 31.97,
+  "monitor": 32.0
+ },
+ "model_fallbacks": {
+  "coordinator": 0,
+  "generator": 0,
+  "evaluator": 0,
+  "monitor": 0
+ },
+ "model_requests_in_flight": {
+  "max": 500,
+  "mean": 6.8021
+ },
+ "decoding_at_servers": {
+  "max": null,
+  "mean": null
+ },
+ "live_line_model_requests_open_max": 5,
+ "queue_wait_s": {
+  "n": 16000,
+  "mean": 3.1376,
+  "p50": 3.3453,
+  "p95": 3.5765,
+  "max": 3.6121
+ },
+ "sim_s_mean": 0.016,
+ "loop_lag": [
+  {
+   "samples": 266,
+   "p50_ms": 0.5,
+   "p95_ms": 5.8,
+   "max_ms": 390.2,
+   "share_over_100ms": 0.015
+  }
+ ],
+ "prompts_chars": {
+  "coordinator": {
+   "asked": 15985,
+   "max_chars": 1452,
+   "mean_chars": 1141,
+   "max_rows": 2,
+   "of_bound": 0.0675
+  },
+  "evaluator": {
+   "asked": 15985,
+   "max_chars": 1670,
+   "mean_chars": 1136,
+   "max_rows": 2,
+   "of_bound": 0.0777
+  },
+  "generator": {
+   "asked": 8000,
+   "max_chars": 3931,
+   "mean_chars": 2594,
+   "max_rows": 2,
+   "of_bound": 0.1828
+  },
+  "monitor": {
+   "asked": 16000,
+   "max_chars": 873,
+   "mean_chars": 867,
+   "max_rows": 0,
+   "of_bound": 0.0406
+  }
+ },
+ "prompt_bound_chars": 21504,
+ "power_before": {
+  "time": "2026-11-25 00:24:51 EST",
+  "pmset_batt": "Now drawing from 'AC Power'\n -InternalBattery-0\t43%; charging; 1:48 remaining present: true",
+  "powermode": 2,
+  "ac_power": true,
+  "uptime": "0:24  up 4 days,  8:33, 8 users, load averages: 1.79 3.05 3.24",
+  "load_1min": 1.79,
+  "waited_s": 0
+ },
+ "power_after": {
+  "time": "2026-11-25 00:25:20 EST",
+  "pmset_batt": "Now drawing from 'AC Power'\n -InternalBattery-0\t44%; charging; 1:58 remaining present: true",
+  "powermode": 2,
+  "ac_power": true,
+  "uptime": "0:25  up 4 days,  8:33, 8 users, load averages: 2.12 3.01 3.22",
+  "load_1min": 2.12
+ }
+}
