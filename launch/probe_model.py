@@ -15,7 +15,9 @@ It stops the launch (exit 1) on:
 - a prompt whose characters (at least its tokens) plus max_tokens exceed the max_model_len a server reports;
 - a request that ends in an HTTP error, a time-out (--timeout, 300 s: this check's own, not the run's) or an empty
   reply;
-- a Traceback or EngineDeadError in a vllm-<i>.log under DIR (--logs: the model jobs' folders).
+- a Traceback or EngineDeadError in a vllm-<i>.log under DIR (--logs: the model jobs' folders), except in what a
+  server prints once it is stopping: from a line with [shutdown] until the next line that starts with "=== "
+  (model.sh's line before each start).
 It reports each server's replies without judging them: the finish reason, whether the role's parse could use the
 reply (for the Generator, how many of the 7 parameters each candidate's object filled), token usage and latency.
 One JSON line per server on stdout, the verdict on stderr. The servers' key is read from its file and never printed.
@@ -35,6 +37,7 @@ from pathlib import Path
 from fusion_miniapp import decide, knobs as knob_files, layer_autonmi, sim, tools
 
 LOG_PROBLEMS = ("Traceback", "EngineDeadError")
+LOG_START, LOG_STOPPING = "=== ", "[shutdown]"   # model.sh's line before each start; vLLM's lines once it is stopping
 
 
 def role_requests(knobs: dict) -> list[dict]:
@@ -158,11 +161,17 @@ def check_server(url: str, key: str | None, knobs: dict, reqs: list[dict], timeo
 
 
 def log_problems(folder: str | None) -> list[str]:
-    """The first Traceback or EngineDeadError line of each vllm-<i>.log under `folder`."""
+    """The first Traceback or EngineDeadError line of each vllm-<i>.log under `folder`, outside what a server prints
+    once it is stopping (from a LOG_STOPPING line until the next line that starts with LOG_START)."""
     out = []
     for f in sorted(Path(folder).rglob("vllm-*.log")) if folder else []:
+        stopping = False
         for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
-            if any(p in line for p in LOG_PROBLEMS):
+            if line.startswith(LOG_START):
+                stopping = False
+            elif LOG_STOPPING in line:
+                stopping = True
+            elif not stopping and any(p in line for p in LOG_PROBLEMS):
                 out.append(f"{f}: line {i}: {line.strip()[:200]}")
                 break
     return out

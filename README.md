@@ -505,14 +505,15 @@ model that never answers would leave every campaign on the parent's mutants, and
   StellarAI run path"): the campaigns are cancelled through the event loop and a record with `status:
   interrupted` is written, with the campaigns that finished (exit 143). On the AUTONMI layer the populations report
   into the run first (at most AUTONMI's `cancel_grace_s`, 60 s), AUTONMI's check `every_population_ran` then
-  fails, and `autonmi.telemetry` gives each population's task counts. At 10,000 campaigns on a laptop the run
-  exited 37.8 s after SIGTERM in the ladder of 2026-11-25, and about 55 s in a run recorded here on 2026-11-23
-  (measured). The AUTONMI layer's interrupted record keeps the model figures of every call made up to the signal,
-  the unfinished campaigns' included, and says so (`speed.coverage.model_calls`): each population that has not
-  ended writes its call sums and its roles' model counts then (`Script.cut_short`). `counts.by_role`'s other counts
-  come from AUTONMI's rows, which a population writes only when it ends. The top-level `counts.llm_calls` sums the
-  finished campaigns only (0 when none had finished): the figures of every call are under `llm_service` and
-  `counts.by_role`.
+  fails (in `autonmi.failed_checks`; stderr says `run interrupted: AUTONMI's check every_population_ran is recorded
+  as failed for the populations the signal cancelled`, not `run failed: ...`), and `autonmi.telemetry` gives each
+  population's task counts. At 10,000 campaigns on a laptop the run exited 37.8 s after SIGTERM in the ladder of
+  2026-11-25, and about 55 s in a run recorded here on 2026-11-23 (measured). The AUTONMI layer's interrupted
+  record keeps the model figures of every call made up to the signal, the unfinished campaigns' included, and says
+  so (`speed.coverage.model_calls`): each population that has not ended writes its call sums and its roles' model
+  counts then (`Script.cut_short`). `counts.by_role`'s other counts come from AUTONMI's rows, which a population
+  writes only when it ends. The top-level `counts.llm_calls` sums the finished campaigns only (0 when none had
+  finished): the figures of every call are under `llm_service` and `counts.by_role`.
 - An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
   exits when its worker dies.
 
@@ -590,8 +591,10 @@ also hold:
 - in the record: each role's share of time in a model call over the steady window (`speed.model_call_share`), the
   request settings sent (`llm_service.requests`: each distinct body besides the messages, as the transport makes
   it, by role, with its count of requests), the model servers in the order of a call's `server`
-  (`llm_service.servers`), and with `--llm openai` a copy of the model servers' setup files without their secrets
-  (`<run>/model_service/`, `llm_service.model_service`; The model service, below).
+  (`llm_service.servers`), each role's first 5 replies that it could not use, each cut to 200 characters
+  (`llm_service.unusable_samples`, by role; only when a reply was refused), and with `--llm openai` a copy of the
+  model servers' setup files without their secrets (`<run>/model_service/`, `llm_service.model_service`; The model
+  service, below).
 
 **The `speed` section**, for the goal of 100,000 agents working at once:
 - campaigns live at once (maximum, time-weighted mean, seconds with at least 95% of the requested campaigns
@@ -724,12 +727,15 @@ not".
 - `launch/probe_model.py`: the check before each run. With the run's own arguments it sends one request of each
   role (built by `decide.py` from fixture values) to every server with the run's settings. It stops the launch on
   a server that does not list `llm.model`, a prompt that does not fit `max_model_len` with the reply cap, an HTTP
-  error, a time-out (300 s, its own) or an empty reply, a Traceback or EngineDeadError in a server log, and with
-  `--idle` a server that is not idle. It reports each reply's finish reason, whether the role could use it,
-  usage and latency. It never prints the key. On the machine (2026-11-25) the scan passed once on 8 real, clean
-  logs. A vLLM 0.27.1 server stopped by SIGTERM often leaves one `Traceback` and one `EngineDeadError` line as it
-  shuts down (5 of 16 stops, later 6 of 8; measured); by the rule above, a later launch whose fleet folder still
-  holds such a log would stop (inferred; not run).
+  error, a time-out (300 s, its own) or an empty reply, a Traceback or EngineDeadError in a server log (except
+  in what a server prints once it is stopping: from a line with `[shutdown]` until the next line that starts with
+  `=== `, `model.sh`'s line before each start), and with `--idle` a server that is not idle. It reports each
+  reply's finish reason, whether the role could use it, usage and latency. It never prints the key. On the
+  machine (2026-11-25) the scan passed once on 8 real, clean logs. A vLLM 0.27.1 server stopped by SIGTERM often
+  leaves one `Traceback` and one `EngineDeadError` line as it shuts down, after its first `[shutdown]` lines (5
+  of 16 stops, later 6 of 8; measured). The scan skips those lines: checked on a laptop with lines copied from
+  such a log, not run on the machine. No server crashed in those runs, so how a real crash orders its lines is
+  not known: one that prints `[shutdown]` before its trace would be skipped too.
 
 **How the launch script gets the servers:**
 
@@ -746,9 +752,12 @@ them, and keeps `fleet/endpoints` current after a requeue. The servers of a laun
 have stopped by its end, and the check refuses them.
 
 What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
-1. A run folder `$FUSION_SCRATCH/fusion-miniapp/<job name>-<job id>`, its fleet folder `fleet/`, and each model
-   job's folder `fleet/model-<k>/`; node-local temporary files (`TMPDIR`) named for the run; the open-files limit
-   raised to the hard limit (each open call holds a socket); the campaign venv activated.
+1. A run folder `$FUSION_SCRATCH/fusion-miniapp/<run name>-<job id>`, the run name being `FUSION_RUN_NAME`, else
+   the job name. Set `FUSION_RUN_NAME` when the script runs more than once in one job: its steps share the job id,
+   and two launches with one name would share the run folder and the node-local folder. Then the script's PID in
+   `<run folder>/launch.pid`; its fleet folder `fleet/`, and each model job's folder `fleet/model-<k>/`;
+   node-local temporary files (`TMPDIR`) named for the run; the open-files limit raised to the hard limit (each
+   open call holds a socket); the campaign venv activated.
 2. One key for every server (`fleet/api-key`, owner-only, copied into each model job's folder before it starts,
    since `model.sh` keeps a key it finds). The key is never printed.
 3. The servers started, and waited for (`FUSION_MODEL_WAIT`, 3,600 s; it stops early if `model.sh` or a model
@@ -772,16 +781,25 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    early, use `scancel --batch --signal=TERM <job id>`: it signals the script alone, as Slurm's warning does. A
    plain `scancel` sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which can
    come before the run has written its record and before step 8, so the model jobs serve on until
-   `FUSION_MODEL_TIME` (inferred from Slurm's documentation; not yet run on the machine). On the machine
-   (2026-11-25) SIGTERM to the launch script's PID gave an interrupted record and exit 143 after 19 s and 12 s at
-   10,000 agents (measured); the run also printed `run failed: AUTONMI's check every_population_ran`, which is
-   that check failing for the cancelled populations. Slurm's own delivery (`sbatch`, `--signal`, `scancel
+   `FUSION_MODEL_TIME` (inferred from Slurm's documentation; not yet run on the machine). Run with `bash` inside
+   an allocation, the `#SBATCH` lines do nothing: no signal comes before the time limit, and `scancel --batch`
+   signals the allocation's own batch script, not this one (inferred from Slurm's documentation; not run). Stop
+   such a run with `kill -TERM $(cat <run folder>/launch.pid)` on the node. On the machine (2026-11-25) SIGTERM to
+   the launch script's PID gave an interrupted record and exit 143 after 19 s and 12 s at 10,000 agents
+   (measured; `launch.pid` did not exist yet, so the PID was saved by hand). The run also printed
+   `run failed: AUTONMI's check every_population_ran`, which is that check failing for the cancelled populations;
+   that line now reads `run interrupted: AUTONMI's check every_population_ran is recorded as failed for the
+   populations the signal cancelled` (checked on a laptop). Slurm's own delivery (`sbatch`, `--signal`, `scancel
    --batch`, a plain `scancel`) is still not run.
 8. At the end, whatever happened: when this launch started the servers (and `FUSION_KEEP_SERVERS=1` did not keep
    them), a stop file in each model job's folder (`model.sh` then stops its servers and the job ends), and a model
    job not yet serving cancelled (not running, without its endpoints, or with no state from `squeue`: it would
    remove its stop file when it starts); the MPS daemon quit; the GPUs checked for processes left; the node-local
-   folder removed. It exits with the run's status.
+   folder removed. It exits with the run's status. When the servers outlive the launch (a reused fleet, or
+   `FUSION_KEEP_SERVERS=1`), the GPU check counts the `VLLM::EngineCore` processes on this node and warns only
+   about any other process. It goes by the name, so it also hides a server of another fleet on this node. On the
+   machine (2026-11-25), before this rule, the launches on reused fleets ended with a warning that listed the
+   servers they were told to leave (measured); the rule is checked on a laptop only.
 
 **Under Dragon (`FUSION_RUNTIME=dragon`; the default is `local`).** Configured and checked on a laptop only, with a
 fake Dragon launcher: no launch through this script has run under Dragon. Set `FUSION_ENV` to a venv that also
@@ -892,8 +910,10 @@ FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output=
   busy or a log has a `Traceback`; the endpoints' refresh after a real requeue; the cancelling of model jobs;
   Slurm's own signals (`--signal=B:TERM@900`, `scancel --batch`); the memory guard firing; the generations mode
   and thinking on with a real model; steady state above 16,000 open calls; the real inner loop under Dragon and
-  its placement there; this script with `FUSION_RUNTIME=dragon`. Keeping and reusing servers, the refresh and the
-  cancelling are tested on a laptop with fake Slurm tools and fake model jobs.
+  its placement there; this script with `FUSION_RUNTIME=dragon`; the changes of 2026-11-26 to this script and
+  its check (`FUSION_RUN_NAME`, `launch.pid`, the scan's skipping of a stopping server's lines, the GPU check's
+  count of the servers left) and the record's `llm_service.unusable_samples`. Keeping and reusing servers, the
+  refresh and the cancelling are tested on a laptop with fake Slurm tools and fake model jobs.
 - **The next checks under Dragon on the machine, in order** (the first three by hand, as "What `--runtime dragon`
   needs" gives the command):
   1. The case that failed, again: 400 campaigns with `--sim real` in 8 populations of 8 workers, beside the
@@ -994,27 +1014,29 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
   counts, one Monitor report per inner loop, the store at the end); the same results at 1, 2 or 16 Monitor slots,
   in 1, 2 or 5 populations, with caps and workers; the Monitors' numbers and the planted split; the mailbox,
   candidate queue and inboxes; an injected failure of each role ending its campaign alone; SIGTERM, and the model
-  figures it keeps (with the stub and the fake server); the record toggle. Under Dragon, with fakes only (no
-  laptop test reaches Dragon): the refusal of the unplaced real inner loop, `head.pid`, the GPU list reaching
-  every inner-loop task, the workers placing themselves (`tests/test_pool.py`), and what a population hands the
-  head by file. In the asynchronous mode: the invariants, a replay of recorded orders through the pure functions, each
-  role's call counted and its reply reaching where it goes, the request settings against the fake server, a
-  server that fails every call (3 tries, each role's fallback, the same campaign as with no model calls), the
-  prompt-length check, the Evaluator's limit of results per call, verify() catching each broken invariant.
-  Planted fake secrets never reach a copied setup file, with one model job's folder or several.
+  figures it keeps (with the stub and the fake server); the record toggle, also the refused replies it keeps.
+  Under Dragon, with fakes only (no laptop test reaches Dragon): the refusal of the unplaced real inner loop,
+  `head.pid`, the GPU list reaching every inner-loop task, the workers placing themselves (`tests/test_pool.py`),
+  and what a population hands the head by file. In the asynchronous mode: the invariants, a replay of recorded
+  orders through the pure functions, each role's call counted and its reply reaching where it goes, the request
+  settings against the fake server, a server that fails every call (3 tries, each role's fallback, the same
+  campaign as with no model calls), the prompt-length check, the Evaluator's limit of results per call, verify()
+  catching each broken invariant. Planted fake secrets never reach a copied setup file, with one model job's
+  folder or several.
 - **The rule itself** (`tests/test_async.py`): q against the parent's `select_survivors`, survival, warm-up, the
   Generator's profiles, reconciling, one order and one seed giving one campaign, each role's longest prompt within
   the bound.
 - **The launchers** (`tests/test_launch.py`): the three batch files against a stub `srun`; the StellarAI knob file
   and env file (also sourced last in a `local.env` made from AUTONMI's example); the StellarAI launch script's
-  `bash -n`, its dry run in each of its three ways, a whole launch against two fake model nodes (fake Slurm and
-  GPU tools, fake vLLM servers on localhost), SIGTERM reaching the run (also with `FUSION_RUNTIME=dragon`, through
-  `head.pid`, past a fake Dragon launcher, also a signal held until `head.pid` is there, with its own dry run),
-  the wiring check with a fake `model.sh` (late endpoints, the endpoints' refresh, the stop file), launches that
-  stop before the run (a `model.sh` that ends, also under Dragon without `dragon-cleanup`, model jobs that never
-  start, a server down, a failure under `set -u`; a model job's state from squeue:
-  one failed call, an end state, none at the end), and servers kept by one launch and
-  reused by the next; `launch/probe_model.py` against two fake servers, and each reason it stops a launch.
+  `bash -n`, its dry run in each of its three ways (and the run name), a whole launch against two fake model nodes
+  (fake Slurm and GPU tools, fake vLLM servers on localhost), SIGTERM reaching the run (its PID in `launch.pid`;
+  also with `FUSION_RUNTIME=dragon`, through `head.pid`, past a fake Dragon launcher, also a signal held until
+  `head.pid` is there, with its own dry run), the wiring check with a fake `model.sh` (late endpoints, the
+  endpoints' refresh, the stop file), launches that stop before the run (a `model.sh` that ends, also under Dragon
+  without `dragon-cleanup`, model jobs that never start, a server down, a failure under `set -u`; a model job's
+  state from squeue: one failed call, an end state, none at the end), and servers kept by one launch and reused by
+  the next (with the GPU check's count of the servers left); `launch/probe_model.py` against two fake servers,
+  each reason it stops a launch, and a stopping server's trace it skips.
 - `tests/test_decode_metric.py` checks the decoding metric's arithmetic against brute-force recounts.
 
 ## What has run, and what has not
@@ -1053,7 +1075,9 @@ and laptop timings, not performance claims for a machine. Every number below is 
 - **The StellarAI run path:** on the laptop its launch script and check ran against fake Slurm tools, fake
   model jobs and fake vLLM servers (FIXTURES); with `FUSION_RUNTIME=dragon`, a dry run and a launch whose Dragon
   launcher is a FIXTURE that runs the layer locally. The layer's other Dragon pieces of 2026-11-26 (the guard,
-  the placement, the populations' files) ran in unit tests with fakes only.
+  the placement, the populations' files) ran in unit tests with fakes only. Also of 2026-11-26 and run on the
+  laptop only: `FUSION_RUN_NAME`, `launch.pid`, the check's skipping of a stopping server's lines, the GPU check's
+  count of the servers left, the reworded line of an interrupted run, and `llm_service.unusable_samples`.
 - **The StellarAI run path on one 8 x B200 node, 2026-11-25** (dev `8c1450f`, vLLM 0.27.1, AUTONMI at `e20861a`;
   launches with `bash` as `srun` steps, servers from a stand-in for `model.sh` and reused; the asynchronous mode,
   32 evaluations per campaign; one run per configuration; the rows, probe, load-ladder and A/B files and every

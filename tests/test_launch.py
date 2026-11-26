@@ -262,7 +262,8 @@ def test_a_dry_run_prints_the_launch_and_runs_nothing(tmp_path, how):
     servers. Always: a key (never printed), the setup-file list, launch/probe_model.py with the run's own
     arguments, then the run with the hundredk preset, the two StellarAI knob files, the script's arguments after
     them, --llm openai, the fleet's endpoints and key files, --model-wait 3600 and a new --out; then the stop
-    files when this launch started the servers, the GPU check and the node-local folder removed."""
+    files when this launch started the servers, the GPU check and the node-local folder removed. The run folder is
+    named for FUSION_RUN_NAME, else the job name; launch.pid is not written in a dry run."""
     for name in ("sbatch", "srun", "squeue", "scancel", "nvidia-smi", "nvidia-cuda-mps-control"):
         fixture_tool(tmp_path, name, "sys.exit(99)\n")
     env = stellar_env(tmp_path, "41", FUSION_DRY_RUN="1", **DRY[how])
@@ -310,6 +311,14 @@ def test_a_dry_run_prints_the_launch_and_runs_nothing(tmp_path, how):
                                                                            if k != "FUSION_SCRATCH"},
                                capture_output=True, text=True, timeout=60)
         assert unset.returncode != 0 and "FUSION_SCRATCH" in unset.stderr
+        for named, end in (({"FUSION_RUN_NAME": "a"}, "a-7"), ({}, "x-7")):   # the run name, else the job name
+            step = subprocess.run(["bash", str(STELLAR)], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                                  env={**env, "SLURM_JOB_ID": "7", "SLURM_JOB_NAME": "x", **named})
+            run_dir = f"{tmp_path}/scratch/fusion-miniapp/{end}"
+            assert step.returncode == 0 and f"run folder {run_dir};" in step.stdout, step.stderr
+            assert f"[dry run] write this script's PID to {run_dir}/launch.pid" in step.stdout
+            assert f"rm -rf /tmp/fusion-{os.environ.get('USER', 'user')}-{end}" in step.stdout
+        assert tool_calls(tmp_path) == [] and not (tmp_path / "scratch").exists()
 
 
 def test_a_dry_run_under_dragon_prints_dragons_launcher(tmp_path):
@@ -473,7 +482,7 @@ def test_sigterm_to_the_launch_reaches_the_run_and_releases_the_servers(tmp_path
     """Slurm's warning before the time limit (SIGTERM to the batch shell, --signal=B:TERM@900) while the run is
     under way, its fake server (a FIXTURE) answering each call in 1 s: the script sends SIGTERM to the run's PID
     alone, the run writes its interrupted record and exits 143, and the script still writes the model job's stop
-    file and quits the MPS daemon, and exits 143."""
+    file and quits the MPS daemon, and exits 143. The script's PID, the one signalled, is in <run folder>/launch.pid."""
     job = f"78{os.getpid()}"
     p, fakes, env = stellar_run(tmp_path, 1, job, latency_s=1.0)
     run = tmp_path / "scratch" / "fusion-miniapp" / f"test-{job}" / "run"
@@ -490,6 +499,7 @@ def test_sigterm_to_the_launch_reaches_the_run_and_releases_the_servers(tmp_path
             f.__exit__(None, None, None)
     log = (tmp_path / "job.out").read_text()
     assert "signal: SIGTERM to the run" in log and "the run exited with status 143" in log
+    assert (run.parent / "launch.pid").read_text() == f"{p.pid}\n"   # the PID signalled, as kill -TERM would
     assert json.loads((run / "run_record.json").read_text())["status"] == "interrupted"
     assert (run.parent / "fleet" / "model-0" / "stop").exists()
     assert [c[1:] for c in tool_calls(tmp_path) if c[0] == "nvidia-cuda-mps-control"] == [["-d", ""], ["quit\n"]]
@@ -734,10 +744,11 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
     ends at once; two model jobs still PENDING and CONFIGURING when FUSION_MODEL_WAIT (1 s) runs out, both stop
     files written and both jobs cancelled (each would remove its stop file when it starts); two running model jobs
     (FIXTURES), one of whose servers is down, so the check fails and no run starts, both stop files written, both
-    jobs end and neither is cancelled. And a step of the launch's own shell that fails under set -u once the
-    teardown is set (an activation that unsets the script's variable `fleet`, before any server is started): exit
-    1, where bash 3.2 alone would give 0. Under FUSION_RUNTIME=dragon a launch that stops before the run started no
-    Dragon, so runs no dragon-cleanup (a FIXTURE here)."""
+    jobs end and neither is cancelled, and a server process still on the GPUs is warned about. And a step of the
+    launch's own shell that fails under set -u once the teardown is set (an activation that unsets the script's
+    variable `fleet`, before any server is started): exit 1, where bash 3.2 alone would give 0. Under
+    FUSION_RUNTIME=dragon a launch that stops before the run started no Dragon, so runs no dragon-cleanup (a
+    FIXTURE here)."""
     cases = {
         "model.sh ends": ({}, 'echo "vLLM 0 exited before it was ready"; exit 1\n'),
         "jobs not started": ({"FUSION_MODEL_NODES": "2", "FUSION_MODEL_WAIT": "1",
@@ -756,6 +767,8 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
                 f.write("unset fleet\n")
         for tool in ("dragon-cleanup", "timeout") if "FUSION_RUNTIME" in extra else ():
             fixture_tool(d, tool, "")
+        if case == "a server down":   # a server process still on this node, of a launch that stops its servers
+            fixture_tool(d, "nvidia-smi", "print('1, VLLM::EngineCore, 100 MiB')\n")
         try:
             done[case] = launch(d, env)
         finally:
@@ -774,6 +787,7 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
     assert "not every model job wrote its endpoints within 1 s" in done["jobs not started"].stderr
     down = done["a server down"].stderr
     assert "http://127.0.0.1:9: /v1/models did not answer" in down and "the model servers failed the check" in down
+    assert "warning: still on the GPUs: 1, VLLM::EngineCore, 100 MiB" in down   # its servers are not left: warned
     fleet = tmp_path / "case2" / "scratch" / "fusion-miniapp" / "test-722" / "fleet"
     assert all((fleet / f"model-{k}" / "ended").exists() for k in range(2))
     assert "fleet: unbound variable" in done["unset variable"].stderr
@@ -824,8 +838,11 @@ def test_servers_kept_by_one_launch_are_reused_by_the_next(tmp_path):
     servers are idle, submits no job, runs against them with the same key (the MPS daemon started and quit for its
     inner loop) and leaves them serving. Once the stop file is written the job ends, and a third launch on that
     fleet fails its check and starts no run. FUSION_KEEP_SERVERS=1 without FUSION_MODEL_NODES is refused, since
-    model.sh on the launch's own node ends with its job."""
+    model.sh on the launch's own node ends with its job. The GPU check at the end of a launch that leaves the
+    servers running (kept or reused) counts their VLLM::EngineCore processes (a FIXTURE nvidia-smi) and warns only
+    about any other process."""
     fake = fake_jobs(tmp_path)
+    fixture_tool(tmp_path, "nvidia-smi", "print('1, VLLM::EngineCore, 100 MiB')\n")   # a server left on this node
     runs = tmp_path / "scratch" / "fusion-miniapp"
     fleet = runs / "test-731" / "fleet"
     try:
@@ -836,6 +853,9 @@ def test_servers_kept_by_one_launch_are_reused_by_the_next(tmp_path):
         assert not (fleet / "model-0" / "stop").exists() and not (fleet / "model-0" / "ended").exists()
         reused = launch(tmp_path, stellar_env(tmp_path, "732", FUSION_MODEL_FLEET=str(fleet), **fake))
         assert reused.returncode == 0, (reused.stdout + reused.stderr)[-3000:]
+        for done in (kept, reused):   # the servers it leaves are counted, not warned about
+            assert "warning: still on the GPUs" not in done.stderr
+            assert "on the GPUs: only the model servers this launch leaves running (1)" in done.stdout
         for name in ("731", "732"):
             rec = json.loads((runs / f"test-{name}" / "run" / "run_record.json").read_text())
             assert rec["status"] == "pass" and rec["autonmi"]["ok"], (name, rec["autonmi"])
@@ -849,9 +869,13 @@ def test_servers_kept_by_one_launch_are_reused_by_the_next(tmp_path):
         while not (fleet / "model-0" / "ended").exists():
             assert time.time() < deadline
             time.sleep(0.1)
+        fixture_tool(tmp_path, "nvidia-smi", "print('1, VLLM::EngineCore, 100 MiB\\n2, python, 10 MiB')\n")
         gone = launch(tmp_path, stellar_env(tmp_path, "733", FUSION_MODEL_FLEET=str(fleet), **fake))
         assert gone.returncode == 1 and "/v1/models did not answer" in gone.stderr, gone.stderr[-3000:]
         assert not (runs / "test-733" / "run").exists()
+        warned = [x for x in gone.stderr.splitlines() if "still on the GPUs" in x]   # only the other process
+        assert len(warned) == 1 and warned[0].endswith("warning: still on the GPUs: 2, python, 10 MiB"), gone.stderr
+        assert "VLLM::EngineCore" not in gone.stderr
     finally:
         stop_fake_jobs(tmp_path)
     alone = launch(tmp_path, stellar_env(tmp_path, "734", FUSION_KEEP_SERVERS="1", **fake))
@@ -876,7 +900,8 @@ def test_probe_model_reports_both_servers_and_stops_the_launch_when_one_is_down(
     and each reply is reported (usable, the Generator's 7 parameters filled for each of its 2 candidates); exit 0.
     Then the stops, each exit 1 with the server and the reason: one server down; one that serves another model;
     one whose context cannot hold a prompt and the reply cap; with --idle, one with requests running; a server
-    log with a Traceback. The key is never printed."""
+    log with a Traceback, and one with a Traceback after a restart. A server's own shutdown trace (the lines of a
+    real one: after [shutdown], until the next start) does not stop the launch. The key is never printed."""
     from fake_vllm import FakeVllm
 
     key = "FAKE-probe-key-3c9d1e7a"
@@ -909,7 +934,23 @@ def test_probe_model_reports_both_servers_and_stops_the_launch_when_one_is_down(
         (tmp_path / "model-0" / "vllm-1.log").write_text("INFO ready\nTraceback (most recent call last):\n")
         logged = probe_model(tmp_path, [one.url], "--logs", str(tmp_path), key=key)
         assert logged.returncode == 1 and "vllm-1.log: line 2: Traceback" in logged.stderr
-        for done in (ok, down, busy, logged):
+        # what a vLLM 0.27.1 server stopped by SIGTERM left in its log on StellarAI (2026-11-25): skipped, until the
+        # next start (model.sh's "=== " line)
+        stopped = ("(APIServer pid=2832910) INFO 11-25 14:07:46 [core_client.py:690] [shutdown] MPClient: engine "
+                   "manager stopped\n"
+                   "(APIServer pid=2832910) ERROR 11-25 14:07:46 [async_llm.py:724] Traceback (most recent call "
+                   "last):\n"
+                   "(APIServer pid=2832910) ERROR 11-25 14:07:46 [async_llm.py:724] vllm.v1.engine.exceptions."
+                   "EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.\n")
+        scans, start = {}, "=== start vllm 1\n"
+        for case, text in (("stopped", stopped), ("restarted", stopped + start + "INFO ready\n"),
+                           ("failed after a restart", stopped + start + "Traceback (most recent call last):\n")):
+            (tmp_path / "model-0" / "vllm-1.log").write_text(text)
+            scans[case] = probe_model(tmp_path, [one.url], "--logs", str(tmp_path), key=key)
+        assert scans["stopped"].returncode == 0 and scans["restarted"].returncode == 0, scans["stopped"].stderr
+        failed = scans["failed after a restart"]
+        assert failed.returncode == 1 and "vllm-1.log: line 5: Traceback" in failed.stderr
+        for done in (ok, down, busy, logged, *scans.values()):
             assert key not in done.stdout + done.stderr
     with FakeVllm(model="another-model") as other, FakeVllm(model=NEMOTRON, max_model_len=4096) as small:
         wrong = probe_model(tmp_path, [other.url, small.url])

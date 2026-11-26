@@ -953,8 +953,9 @@ def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(t
     finished, and it exits 143. 50 live campaigns per population of 16 candidates keep hundreds of
     evaluations queued when the first campaign finishes: the signal cuts them off, and the record gives
     AUTONMI's telemetry verdict (complete: the populations are waited for) with every population's task
-    counts, those abandoned included, and AUTONMI's check every_population_ran failed. In both modes (in the
-    asynchronous one a campaign's line has no generations, and each evaluation's submission time)."""
+    counts, those abandoned included, and AUTONMI's check every_population_ran failed, which stderr says as `run
+    interrupted: ...`, not as a failed run. In both modes (in the asynchronous one a campaign's line has no
+    generations, and each evaluation's submission time)."""
     knobs = {"tools": {"latency_ms": 500}, "agents": {"max_live": 50}, "campaign": {"mode": mode},
              "outer": {"population": 16, "generations": 2, "parent_stdout": "drop", "logs": "none"}}
     out = tmp_path / "autonmi"
@@ -997,6 +998,9 @@ def test_sigterm_writes_an_interrupted_record_with_the_campaigns_that_finished(t
     assert rec["autonmi"]["failed_checks"] == ["every_population_ran"] and not rec["autonmi"]["ok"]
     ran = next(c["detail"] for c in summary["checks"] if c["name"] == "every_population_ran")
     assert (ran["cancelled"], ran["still_running"], ran["interrupted"]) == (["p000", "p001"], [], True)
+    err = (tmp_path / "stderr.txt").read_text()   # said as what it is, not as a failed run
+    assert ("run interrupted: AUTONMI's check every_population_ran is recorded as failed for the populations the "
+            "signal cancelled") in err and "run failed: AUTONMI's check" not in err
 
 
 @pytest.mark.parametrize("mode, llm", (("async", "stub"), ("async", "fake vLLM"), ("generations", "fake vLLM")))
@@ -2153,6 +2157,7 @@ def test_the_record_toggle_adds_the_model_calls_extras(tmp_path):
     assert {json.dumps({"role": x["role"], "body": x["body"]}, sort_keys=True): x["requests"]
             for x in svc["requests"]} == dict(by_role)
     assert {x["role"] for x in svc["requests"]} == set(ROLES)
+    assert "unusable_samples" not in svc   # every reply could be used
     assert all(x["body"]["chat_template_kwargs"] == {"enable_thinking": False} and x["body"]["model"] == "stand-in"
                for x in svc["requests"])
     share = rec["speed"]["model_call_share"]
@@ -2440,13 +2445,18 @@ def test_each_roles_reply_reaches_where_it_goes(tmp_path):
 def test_a_reply_that_cannot_be_used_is_tried_again_and_a_late_answer_is_used(tmp_path):
     """Tries at the layer, against the fake vLLM server (FIXTURE), asynchronous mode. Replies the Generator and the
     Evaluator cannot use (plain text): each of their calls is answered 3 times, then falls back, counted (the
-    Monitors' and the Coordinator's calls are answered at once). Every request failing twice and answered the third
-    time: each call is tried 3 times and answered, no fallback, and the run passes."""
+    Monitors' and the Coordinator's calls are answered at once). With record.extras the record keeps each of those
+    two roles' first 5 refused replies over both populations, cut to 200 characters (llm_service.unusable_samples);
+    without it, none. Every request failing twice and answered the third time: each call is tried 3 times and
+    answered, no fallback, and the run passes."""
     knobs = {**SERVER_KNOBS, "llm": {**SERVER_KNOBS["llm"], "thinking": "off"}, "campaign": {"mode": "async"}}
+
+    refused = {"evaluator": "No scores today. " * 20, "generator": "No candidates today. " * 20}   # 340, 420 characters
 
     def unusable(content: str) -> str | None:
         last = content.splitlines()[-1]
-        return "No JSON today." if last == decide.SCORES_ASK or "JSON list of" in last else None
+        return refused["evaluator"] if last == decide.SCORES_ASK else refused["generator"] if "JSON list of" in last \
+            else None
     (tmp_path / "unusable").mkdir()
     with FakeVllm(reply=unusable) as server:
         rec, sent = run_on_a_server(tmp_path / "unusable", knobs, server, code=1)   # the model filled nothing
@@ -2459,6 +2469,11 @@ def test_a_reply_that_cannot_be_used_is_tried_again_and_a_late_answer_is_used(tm
         b = by[role]
         assert b["model_tries"] == b["model_calls"] == b["model_asks"] > 0 and b["model_fallbacks"] == 0
     assert len(sent) == sum(by[role]["model_tries"] for role in ROLES)
+    assert "unusable_samples" not in rec["llm_service"]   # record.extras off: no reply is kept
+    (tmp_path / "kept").mkdir()
+    with FakeVllm(reply=unusable) as server:
+        rec, _ = run_on_a_server(tmp_path / "kept", {**knobs, "record": {"extras": True}}, server, code=1)
+    assert rec["llm_service"]["unusable_samples"] == {role: [text[:200]] * 5 for role, text in refused.items()}
 
     seen = Counter()
 

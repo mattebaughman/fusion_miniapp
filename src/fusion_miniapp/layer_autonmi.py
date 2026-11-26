@@ -195,6 +195,7 @@ FAIL_ENV = "FUSION_AUTONMI_FAIL"   # tests only: "<agent id>:<g>" fails that age
                                    # the asynchronous mode g is the agent's cycle from 0, a Monitor's call id c<k>)
 QUEUE = "candidates"   # each campaign's candidate queue: the Generator puts, a free Monitor takes the next
 TRIES = 3   # tries of a model call (an error, or for a role's own call a reply that cannot be used) before its fallback
+UNUSABLE_SAMPLES, UNUSABLE_CHARS = 5, 200   # record.extras: the refused replies kept per role, and their length
 
 
 def agent_names(knobs: dict) -> list[str]:
@@ -532,8 +533,10 @@ class CallSums:
     counts of requests in flight and queued, and the tokens per second, that record.write makes from each call's
     times and tokens), and written at the population's end beside its campaign lines (`write`, calls-p<index>.npz),
     where part() reads them (`read`); write_record removes the file once the record is written. With
-    record.extras it also counts the requests sent, by role and settings (`requests`: Script._ask). A population
-    that SIGTERM stops before its end writes the same file, with each role's model counts (Script.cut_short)."""
+    record.extras it also counts the requests sent, by role and settings (`requests`: Script._ask), and keeps the
+    first UNUSABLE_SAMPLES replies of each role that its parse refused, each cut to UNUSABLE_CHARS characters
+    (`unusable`). A population that SIGTERM stops before its end writes the same file, with each role's model
+    counts (Script.cut_short)."""
 
     def __init__(self) -> None:
         self.n = Counter()   # calls, errors, empty, retried
@@ -542,6 +545,7 @@ class CallSums:
         self.times = array("d")     # each answered call's t_end, service_s, recovery_s, wait_s, prompt and
                                     # completion tokens
         self.requests = Counter()   # record.extras: JSON of {"role", "body": the request's settings} -> requests
+        self.unusable: dict[str, list[str]] = {}   # record.extras: role -> its first replies refused (Script._ask)
 
     def add(self, d: dict) -> None:
         """One call's details, as on_call and _ask make them."""
@@ -564,7 +568,7 @@ class CallSums:
         of a population that SIGTERM stopped, Script.cut_short)."""
         if self.n["calls"] or self.requests or by_role is not None:
             counts = {"n": self.n, "budgets": self.budgets, "finish_reasons": self.finish_reasons,
-                      "tokens": self.tokens, "requests": self.requests}
+                      "tokens": self.tokens, "requests": self.requests, "unusable": self.unusable}
             if by_role is not None:
                 counts["by_role"] = by_role
             np.savez(path, counts=json.dumps(counts), latency=np.array(self.latency, dtype=float),
@@ -1505,7 +1509,8 @@ class Script:
         while the call fails (an error); then None, the step's fallback (the refill keeps the parent's mutants, the
         summary is left out), counted. The other layers end the campaign at the first failed call. With it (the
         roles' own calls): parse(reply), tried up to TRIES times while the call fails or parse gives None (a reply
-        it cannot use); then None, the role's fallback.
+        it cannot use; with record.extras the role's first such replies are kept, CallSums.unusable); then None,
+        the role's fallback.
         A role's call whose prompt is too long for the servers' context (the prompt-length check: its characters,
         at least its tokens, plus max_tokens over the context) is not sent and not tried again: it fails at once,
         with the error PromptTooLong."""
@@ -1543,6 +1548,10 @@ class Script:
             out = parse(reply)
             if out is not None:
                 return out
+            if self.extras:   # the role's first replies refused, for the record (llm_service.unusable_samples)
+                kept = self.sums.unusable.setdefault(role, [])
+                if len(kept) < UNUSABLE_SAMPLES:
+                    kept.append(str(reply or "")[:UNUSABLE_CHARS])
         self.fallbacks[me] += 1
         return None
 
@@ -2305,9 +2314,10 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     interrupted population has none). The counts from the lines are those of the campaigns that reported. The
     model calls not in the lines (CallSums) count in llm_service, and their times and tokens (`call_times`) in
     record.write's client-side counts and tokens per second; with record.extras its requests' settings
-    (`requests`). A population that SIGTERM stopped before its rows: every call up to then, and its roles' model
-    counts (`by_role`, Script.cut_short). Under Dragon its event loop's lag and its process's peak memory are
-    those it handed over at its end (handed_file; none when it did not end)."""
+    (`requests`) and its roles' first replies refused (`unusable`). A population that SIGTERM stopped before its
+    rows: every call up to then, and its roles' model counts (`by_role`, Script.cut_short). Under Dragon its event
+    loop's lag and its process's peak memory are those it handed over at its end (handed_file; none when it did
+    not end)."""
     lines = [json.loads(x) for x in lines_file.read_text().splitlines() if x]
     sums = CallSums.read(sums_file(lines_file, index))   # the calls not in the lines
     done = [r for r in lines if "error" not in r]
@@ -2322,6 +2332,7 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
         "call_times": None if sums is None else {"calls": sums["n"].get("calls", 0),
                                                  "retried": sums["n"].get("retried", 0), "times": sums["times"]},
         "requests": (sums or {}).get("requests"),   # record.extras: the request settings sent (write_record)
+        "unusable": (sums or {}).get("unusable"),   # record.extras: each role's first replies refused (write_record)
         "by_role": (sums or {}).get("by_role"),     # cut short by SIGTERM: its roles' model counts (write_record)
         "tool_calls": dict(Counter(what for _ in done for what in decide.lookups(knobs))),
         "sim_tasks": runner.get("simulations", sum(r["n_sims"] for r in done)),
@@ -2639,13 +2650,14 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     (`telemetry_verdict`), and the framework's commit against its pin (`pin`, autonmi_pin) in its `autonmi`
     section; and the decoding metric's other counts in `speed` (decoding_metric). With record.extras also: each
     role's share of time in a model call (record.write's `model_call_share`), the request settings sent, by role
-    and counted (`llm_service.requests`), the model servers in the order of a call's `server` (`llm_service.servers`)
-    and a copy of their setup files without their secrets (`model_service/`: copy_model_service). With
-    workers.gpu_per_worker, the GPUs the inner-loop workers were placed on (`autonmi.inner_loop_gpus`). A run
-    whose AUTONMI checks fail fails. When SIGTERM stopped a population before its rows, its model figures are
-    of every call up to then (Script.cut_short), which `speed.coverage.model_calls` says. Under Dragon each
-    population's event-loop lag, peak memory and gc thresholds are those it handed over (handed_file), and the
-    workers placed are the counter file's (workers_placed)."""
+    and counted (`llm_service.requests`), the model servers in the order of a call's `server` (`llm_service.servers`),
+    when a reply was refused each role's first UNUSABLE_SAMPLES replies refused, cut to UNUSABLE_CHARS characters
+    (`llm_service.unusable_samples`), and a copy of the servers' setup files without their secrets
+    (`model_service/`: copy_model_service). With workers.gpu_per_worker, the GPUs the inner-loop workers were
+    placed on (`autonmi.inner_loop_gpus`). A run whose AUTONMI checks fail fails. When SIGTERM stopped a
+    population before its rows, its model figures are of every call up to then (Script.cut_short), which
+    `speed.coverage.model_calls` says. Under Dragon each population's event-loop lag, peak memory and gc thresholds
+    are those it handed over (handed_file), and the workers placed are the counter file's (workers_placed)."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -2705,6 +2717,12 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
         rec["llm_service"]["requests"] = [{**json.loads(k), "requests": v} for k, v in
                                           sorted(sent_n.items(), key=lambda kv: (json.loads(kv[0])["role"], -kv[1]))]
         rec["llm_service"]["servers"] = live.servers if live is not None else None
+        refused: dict[str, list[str]] = {}
+        for p in parts:   # each role's first replies refused, in the populations' order
+            for role, texts in (p.get("unusable") or {}).items():
+                refused[role] = (refused.get(role, []) + texts)[:UNUSABLE_SAMPLES]
+        if refused:   # only when a reply was refused
+            rec["llm_service"]["unusable_samples"] = dict(sorted(refused.items()))
         if knobs["llm"]["mode"] == "openai" and a.endpoints_file:
             try:
                 rec["llm_service"]["model_service"] = copy_model_service(Path(a.endpoints_file), a.api_key_file, out)
@@ -2781,7 +2799,11 @@ def main(argv=None) -> int:
     for reason in rec["llm_check"]["fail"]:
         print(f"run failed: {reason}", file=sys.stderr)
     for name in rec["autonmi"]["failed_checks"]:
-        print(f"run failed: AUTONMI's check {name}", file=sys.stderr)
+        if rec["status"] == "interrupted" and name == "every_population_ran":   # the check fails for what was cancelled
+            print(f"run interrupted: AUTONMI's check {name} is recorded as failed for the populations the signal "
+                  "cancelled", file=sys.stderr)
+        else:
+            print(f"run failed: AUTONMI's check {name}", file=sys.stderr)
     return {"pass": 0, "interrupted": 143}.get(rec["status"], 1)
 
 

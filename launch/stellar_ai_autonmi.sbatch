@@ -15,7 +15,8 @@
 # Export FUSION_MINIAPP_DIR (this checkout, absolute), FUSION_ENV (the campaign's venv), FUSION_SCRATCH (your GPFS
 # scratch directory) and RASCAL_REPO (the AUTONMI checkout, whose jobs/local.env sources
 # launch/stellar_ai_model.env); with FUSION_MODEL_NODES also FUSION_MODEL_TIME, the model jobs' --time (this job's
-# plus a margin, at most 24:00:00). Export SBATCH_ACCOUNT and SBATCH_PARTITION, or give -A and -p. Then:
+# plus a margin, at most 24:00:00). FUSION_RUN_NAME names the run folder in place of the job name: needed when the
+# script runs more than once in one job. Export SBATCH_ACCOUNT and SBATCH_PARTITION, or give -A and -p. Then:
 #
 #   sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" \
 #       --agents 100 --sim fixture
@@ -28,10 +29,11 @@
 # knob files (so a --knobs file given here wins), then come --llm openai, the fleet's endpoints and key files,
 # --model-wait 3600 and --out. FUSION_DRY_RUN=1 prints what it would do and runs nothing (no Slurm needed).
 #
-# What it does, in order: a run folder $FUSION_SCRATCH/fusion-miniapp/<job name>-<job id> (the fleet folder
-# fleet/ in it, each model job's folder fleet/model-<k>/); node-local temporary files (TMPDIR) named for the run;
-# the open-files limit raised to the hard limit; the venv activated; one key for every server (fleet/api-key,
-# readable by the owner only, copied into each model job's folder before it starts, never printed); the servers
+# What it does, in order: a run folder $FUSION_SCRATCH/fusion-miniapp/<run name>-<job id> (FUSION_RUN_NAME, else
+# the job name; this script's PID in launch.pid there; the fleet folder fleet/ in it, each model job's folder
+# fleet/model-<k>/); node-local temporary files (TMPDIR) named for the run; the open-files limit raised to the
+# hard limit; the venv activated; one key for every server (fleet/api-key, readable by the owner only, copied
+# into each model job's folder before it starts, never printed); the servers
 # started and waited for (FUSION_MODEL_WAIT, 3600 s); fleet/endpoints written from the model jobs' own, in order,
 # and rewritten whenever one changes (a requeued job; also on a reused fleet); fleet/setup-files, the files a run
 # with record.extras copies into its record (and nothing else from these folders); launch/probe_model.py, whose
@@ -42,13 +44,15 @@
 # each model job's folder, and a model job not yet serving (not running, without its endpoints, or with no state
 # from squeue: it would remove its stop file when it starts) cancelled; with FUSION_KEEP_SERVERS=1 (and FUSION_MODEL_NODES) servers that passed
 # the check are left running instead, for a later launch's FUSION_MODEL_FLEET, until FUSION_MODEL_TIME or
-# `touch DIR/model-*/stop`. Then the MPS daemon quit, the GPUs checked for processes left, the node-local folder
-# removed. It exits with the run's status.
+# `touch DIR/model-*/stop`. Then the MPS daemon quit, the GPUs checked for processes left (when the servers outlive
+# this launch, a reused fleet or FUSION_KEEP_SERVERS=1, their VLLM::EngineCore processes are counted, not warned
+# about), the node-local folder removed. It exits with the run's status.
 #
 # To stop a run early: scancel --batch --signal=TERM <job id>, which signals this script alone, as Slurm's warning
 # does. A plain scancel sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which
 # can come before the run has written its record and before the end above: the model jobs then serve until
-# FUSION_MODEL_TIME. (Inferred from Slurm's documentation; not yet run on the machine.)
+# FUSION_MODEL_TIME. (Inferred from Slurm's documentation; not yet run on the machine.) Run with bash inside an
+# allocation, as on the machine, stop it with kill -TERM $(cat <run folder>/launch.pid) on the node.
 #
 # FUSION_RUNTIME=dragon (default local) runs the layer under Dragon: FUSION_ENV must then be a venv with Dragon and
 # RaDEX's client (README, "What --runtime dragon needs"). The run is `python -m dragon -s
@@ -178,7 +182,7 @@ on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to
 }
 
 teardown() {   # always: the servers released if this launch started them, MPS quit, the GPUs checked, node files removed
-	local rc=$? k id left state cancel
+	local rc=$? k id left mine state cancel
 	set +e
 	if [[ $rc == 0 && -z $finished ]]; then rc=1; fi   # ended early (bash 3.2 gives an unset variable's exit 0)
 	trap - TERM INT
@@ -213,7 +217,11 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 		x nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
 	elif command -v nvidia-smi > /dev/null; then
 		left=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1)
-		[[ -z $left ]] && say "no process left on the GPUs" || say "warning: still on the GPUs: $left" >&2
+		mine=$left
+		if [[ -n $reuse ]] || (( keep )); then mine=$(grep -v 'VLLM::EngineCore' <<< "$left"); fi
+		if [[ -z $left ]]; then say "no process left on the GPUs"
+		elif [[ -z $mine ]]; then say "on the GPUs: only the model servers this launch leaves running ($(grep -c . <<< "$left"))"
+		else say "warning: still on the GPUs: $mine" >&2; fi
 	fi
 	x rm -rf "$node_tmp"
 	say "ended with status $rc"
@@ -230,7 +238,7 @@ main() {
 	launcher= starting= held=
 	local root name run_dir k id rc probe args run
 	root=$(cd "$FUSION_MINIAPP_DIR" && pwd -P)
-	job=${SLURM_JOB_ID:-dry} name=${SLURM_JOB_NAME:-fusion-autonmi}
+	job=${SLURM_JOB_ID:-dry} name=${FUSION_RUN_NAME:-${SLURM_JOB_NAME:-fusion-autonmi}}
 	run_dir="$FUSION_SCRATCH/fusion-miniapp/$name-$job"
 	if [[ ${SLURM_RESTART_COUNT:-0} != 0 ]]; then run_dir+="-restart-$SLURM_RESTART_COUNT"; fi
 	fleet=${reuse:-$run_dir/fleet}
@@ -269,6 +277,8 @@ main() {
 	trap on_signal TERM INT
 
 	x mkdir -p "$run_dir" "$node_tmp"
+	if [[ $dry == 1 ]]; then say "[dry run] write this script's PID to $run_dir/launch.pid"
+	else echo $$ > "$run_dir/launch.pid"; fi   # to stop a launch run with bash: kill -TERM $(cat .../launch.pid)
 	export TMPDIR=$node_tmp   # node-local: the inner loop's work folders (sim.work_root) and every temporary file
 	x ulimit -n "$(ulimit -Hn)" || say "warning: the open-files limit stays at $(ulimit -n)" >&2   # a model call holds a socket
 	set +u   # activation hooks may read unset variables
