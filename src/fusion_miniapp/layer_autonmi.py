@@ -757,6 +757,10 @@ class Fusion:
         bound_full_collections()
         self.populations[f"p{pop.index:03d}"] = asyncio.current_task()
         script = self.scripts[f"p{pop.index:03d}"] = Script(self, pop)
+        # CROSS-CAMPAIGN [XC-A1] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): with cross_campaign.observe, this
+        #   population's progress table would be attached to the process's plane here (one per process: a local launch's
+        #   populations share it; under Dragon one per population process). Its tick would run on this loop; encoding
+        #   and writes would run in a daemon thread of its own, never joined at exit.
         if os.getpid() != self.head_pid:
             self.lag = record.LoopLag()
             self.lag.start()
@@ -799,6 +803,9 @@ class Fusion:
                     for a in pop.agent_ids]
         self.scripts.pop(f"p{pop.index:03d}", None)   # its model figures are written here
         sc.lines.close()
+        # CROSS-CAMPAIGN [XC-A2] (see CROSS_CAMPAIGN_PLAN.md): P0 and P1 (planned): the population has ended. Its last
+        #   progress file (marked end) would be written here and, with cross_campaign.work_keys, its work-key rows
+        #   beside the call sums (keys-p<index>.npz). The process's last population stops the plane.
         sc.sums.write(sums_file(Path(sc.lines.name), pop.index))
         if self.lag is not None:   # under Dragon: what the head cannot see from its own process
             self.writer.cancel()
@@ -955,6 +962,8 @@ class Fusion:
                     ge["messages_received"] != (co["messages_sent"] - 2) + ev["messages_sent"] // 2 + 1 or \
                     co["messages_received"] != ev["messages_sent"] // 2:
                 off += [r["agent_id"] for rs in x.values() for r in rs]
+            # CROSS-CAMPAIGN [XC-C12] (see CROSS_CAMPAIGN_PLAN.md): P3b, not in this plan: a stopped campaign would be
+            #   checked against its stopped_at instead of B here, and in the message bounds.
             if not (co["candidates_distinct"] == B and co["candidate_max"] == B - 1 and co["candidates_repeated"] == 0):
                 once.append(c)
             if co["survivors_max"] > o["population"]:
@@ -1095,6 +1104,9 @@ class Script:
         fn, place = run.sim_function(definition.sim), definition.placement or {}
         if place:   # under Dragon with workers.gpu_per_worker: each worker placed from inside its task
             from fusion_miniapp.sim import evaluate_placed as fn
+        # CROSS-CAMPAIGN [XC-R3] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): prepare would look the candidate up again
+        #   at take time (call_id is its id) in the process's ledger index and pass a stored result to the worker beside
+        #   the knobs. Each candidate stays one engine task, so simulations_match holds.
         self.evaluate = task_tool(
             fn, suspend=True, name="evaluate", args_schema=EvaluateArgs,
             description="Evaluate one candidate profile with the turned-down IGNOS inner loop.",
@@ -1137,6 +1149,9 @@ class Script:
             with activity(AgentState.TOOL_WAIT):
                 await self.mail.all_started.wait()
             self.start_wait[me] = round(time.perf_counter() - t, 6)
+        # CROSS-CAMPAIGN [XC-C1] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): the campaign has begun. With
+        #   cross_campaign.observe it would be marked running in its population's progress table here (a list write,
+        #   inside the plane's guard).
         self.began[me] = time.time()
 
     async def _coordinator(self, s: dict, event, ask):
@@ -1170,6 +1185,10 @@ class Script:
         """The Coordinator's generation: the Generator's population (at g = 0 with the count of its own
         lookups), then the Evaluator's results, then selection, best-so-far and log, and the memory."""
         me, g = s["agent_id"], cst["generation"]
+        # CROSS-CAMPAIGN [XC-C7] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned), generations mode: no per-generation
+        #   Coordinator prompt exists, so a live note would ride on a repopulate message (msg["note"]) to the refill
+        #   prompt (XC-C8), never on initialize. Acked applied only when a request carrying it is sent, else
+        #   not_applicable (outer.generator mutation, no slot to fill, a fallback).
         self._send(me, "generator", "make", g, msg)
         reply = await self.mail.receive(me, "population", g)
         cst = {**cst, "n_tool_calls": cst["n_tool_calls"] + reply.get("lookups", 0)}
@@ -1194,6 +1213,10 @@ class Script:
             if g == 0:   # the Coordinator's lookups, and its own: the refill prompt reads both
                 msg = {**msg, "context": {**msg.get("context", {}), **ctx}}
             gst, reply = await decide.generator_step(gst, msg, self.knobs, ask_model)
+            # CROSS-CAMPAIGN [XC-G1] (see CROSS_CAMPAIGN_PLAN.md): where a Generator makes its candidates (generations
+            #   mode). The plane would not change them here: a hit served here breaks verify's counts and
+            #   decide.collect, and a new draw shifts the shared stream. P1 counts at XC-W1; P2 (gated) reuses at XC-R1
+            #   and XC-R2.
             self._send(me, "coordinator", "population", g, {**reply, "lookups": len(ctx)} if g == 0 else reply)
             t0 = time.time()
             for call in decide.evaluation_calls(reply["population"], g):
@@ -1217,6 +1240,10 @@ class Script:
                 raise CampaignFailed(self.mail.failed[campaign])
             call = s["call"]
             (result,), (tr,) = trace.split([event])
+            # CROSS-CAMPAIGN [XC-W1] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): with cross_campaign.work_keys, one row
+            #   per evaluation here, on the loop (about 11 us on a laptop): the work key of result["params"], an 8-byte
+            #   digest of the result's science fields and trace sections, campaign, candidate, call["t0"], now,
+            #   inner-loop seconds and the seven. Written at XC-A2. P2 would publish here too.
             numbers = None
             if tr is not None:
                 self.traced[me] += 1
@@ -1353,6 +1380,10 @@ class Script:
                 replay["results"] += rows
                 replay["survivors"] = [x["candidate"] for x in cst["survivors"]]
             self._hook(me, self.cycles[me] - 1)
+            # CROSS-CAMPAIGN [XC-C5] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned): survival is decided above and is never
+            #   steered. With cross_campaign.steer, this campaign's newest live note would be read here from the plane's
+            #   in-memory set (no I/O) for the guidance prompt below, and its version and ack recorded (not_applicable
+            #   when llm.mode is off).
             self.mail.deliver(me, "generator", "survivors", decide.async_survivors(cst))
             if self.calls_on:
                 text = await self._ask(me, ask, decide.guidance_messages(cst, rows, self.knobs),
@@ -1360,6 +1391,9 @@ class Script:
                 self.mail.deliver(me, "generator", "guidance", {"n": cst["cycles"], "text": text})
                 if replay is not None:
                     replay["guidance"].append(text)
+            # CROSS-CAMPAIGN [XC-C9] (see CROSS_CAMPAIGN_PLAN.md): P3b, not in this plan: a stop or budget directive
+            #   would change this bound on B. XC-C10, XC-C11 and XC-C12 hold the same bound, so all four would change
+            #   together. Whole-run stop stays the launch script's SIGTERM.
             return _state(s, "cycle" if cst["arrived"] < self.B else "ending", cst=cst), \
                 Remember(decide.async_memory(cst))
         if phase == "ending":
@@ -1386,6 +1420,8 @@ class Script:
             with activity(AgentState.TOOL_WAIT):
                 await self.mail.all_started.wait()
         gst, replay = decide.async_generator_state(campaign, s["seed"], self.knobs, ctx), self._replay(campaign)
+        # CROSS-CAMPAIGN [XC-C10] (see CROSS_CAMPAIGN_PLAN.md): P3b, not in this plan: a stop would end this loop at its
+        #   next take and tell the Coordinator how many candidates were made (XC-C9).
         while gst["made"] < self.B:
             await self.mail.emptied(me, QUEUE)
             gst = decide.async_on_survivors(gst, await self.mail.take_all(me, "survivors", wait=False))
@@ -1399,6 +1435,9 @@ class Script:
                 calls = await self._reconcile(me, ask, gst, calls, s["seed"])
             self._hook(me, self.cycles[me])
             t0 = time.time()
+            # CROSS-CAMPAIGN [XC-G2] (see CROSS_CAMPAIGN_PLAN.md): where a Generator queues its candidates (async), with
+            #   the final params after the model's reconcile. The plane would not change them here, as at XC-G1 (a new
+            #   draw shifts stream 0). A crowded region could reach the campaigns as a P3 note instead.
             for call in calls:
                 self.mail.put(me, QUEUE, {**call, "t0": t0})
             if replay is not None:
@@ -1437,6 +1476,8 @@ class Script:
         me, campaign = s["agent_id"], s["campaign"]
         scored_n, replay = 0, self._replay(campaign)
         limit = decide.SHOWN_RESULTS if self.calls_on else None
+        # CROSS-CAMPAIGN [XC-C11] (see CROSS_CAMPAIGN_PLAN.md): P3b, not in this plan: with a stop, this bound would
+        #   become the Generator's count made, brought by a sentinel report so that the take below wakes.
         while scored_n < self.B:
             reports = await self.mail.take_all(me, "report", limit=limit)
             stats = self._stats(campaign)
@@ -1593,11 +1634,18 @@ class Script:
 
     def remember(self, agent_id: str, state: dict) -> None:
         """The Coordinator's memory after each generation, in the population's store (RaDEX under Dragon)."""
+        # CROSS-CAMPAIGN [XC-C2] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): the one Coordinator digest hook, passed at
+        #   every async cycle and every generation. With cross_campaign.observe, n, kept, best, feas and gain_n would
+        #   be derived from this memory into the population's progress table, inside the plane's guard. The store
+        #   stays the memory's only home.
         self.pop.store.put(f"campaign/{campaign_of(agent_id)}", json.dumps(state, default=str))
 
     def report(self, agent_id: str, result: dict) -> None:
         """A campaign's result to the campaign manager: its line, as run.Services.report writes it."""
         campaign = campaign_of(agent_id)
+        # CROSS-CAMPAIGN [XC-C3] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): the campaign is done; its final n and best
+        #   would be marked done in the progress table here. The line below stays the record's source; with steer it
+        #   would also carry the notes applied (P3).
         self.reported.add(campaign)
         self.llm_calls[campaign] = result["n_llm_calls"]
         self.answered.pop(campaign, None)
@@ -1638,6 +1686,9 @@ class Script:
             self.finished.add(result.id)
         elif result.status == "failed":
             if campaign not in self.reported and campaign not in self.mail.failed:
+                # CROSS-CAMPAIGN [XC-C4] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): a campaign's first failure; it
+                #   would be marked failed in the progress table here, with its role and the error cut to 200
+                #   characters.
                 self._line({"agent_id": campaign, "error": result.error or result.status,
                             "role": role_of(result.id), "llm_call_details": self.calls.pop(campaign, [])})
                 self.numbers.pop(campaign, None)
@@ -1662,6 +1713,10 @@ class Script:
         for k, counts in (("model_asks", self.asks), ("model_tries", self.tries), ("model_fallbacks", self.fallbacks)):
             for agent, n in counts.items():
                 out[role_of(agent)][k] += n
+        # CROSS-CAMPAIGN [XC-A3] (see CROSS_CAMPAIGN_PLAN.md): P0 and P1 (planned), SIGTERM, local runtime only: one
+        #   bounded flush (at most 2 s) here: the last progress file, its unfinished campaigns marked interrupted, and
+        #   the work-key rows so far, as the call sums are written. Under Dragon this is not called (the head holds no
+        #   population's Script): the last tick's file stands and the population shows as lost.
         self.sums.write(sums_file(Path(self.lines.name), self.pop.index), by_role=out)
 
 
@@ -2024,6 +2079,9 @@ def parse(argv=None) -> argparse.Namespace:
                    help="--llm openai: do not sample the servers' /metrics (no decoding counts, and none of "
                         "AUTONMI's checks against the servers' counters, which a server restart, a requeue, a "
                         "request the client gave up on, or servers shared with another run fail)")
+    # CROSS-CAMPAIGN [XC-A5] (see CROSS_CAMPAIGN_PLAN.md): P0b (planned): --xc-dir DIR would be added here, the plane
+    #   folder that every launch of one run shares (the launch script gives $run_dir/xc). Refused without
+    #   cross_campaign.observe. A path, so not a knob and not in the record.
     p.add_argument("--stagger-batch", type=int, default=500, help="first-wave campaign starts per batch")
     p.add_argument("--stagger-interval", type=float, default=0.01, help="seconds between those batches")
     return p.parse_args(argv)
@@ -2241,6 +2299,10 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
         app=app,
     )
     try:
+        # CROSS-CAMPAIGN [XC-A4] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): the plane would be opened here for this
+        #   launch: the --xc-dir folder (default <out>/xc), the run manifest when no launch script wrote one (tmp, then
+        #   os.link; on an existing one, read it and refuse a disagreeing launch), and the run id. The finally below
+        #   would close it: the last files, waited for at most 2 s (its daemon thread is never joined).
         await campaign.start_services()
         try:
             async with live.during(out):
@@ -2730,6 +2792,9 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
             "every call up to the signal, the unfinished campaigns' included: llm_service, counts.by_role's model "
             "counts and speed's model figures (not model_call_share)")
     gc_populations = None if a.runtime == "local" else populations_gc(out, a.populations)   # before their files go
+    # CROSS-CAMPAIGN [XC-W2] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): the populations' work-key rows would be counted
+    #   here into rec["cross_campaign"]["work_keys"] (repeats and ideal hits by scope, the twin check, coverage) and
+    #   kept as one work_keys.npz for merge_records, before the files below are removed.
     for i in range(a.populations):   # summed into the record (part): not kept beside it
         sums_file(out / f"agents-p{i:03d}.jsonl", i).unlink(missing_ok=True)
         for kind in ("proc", "live"):   # what a population in a process of its own handed over (under Dragon)
@@ -2763,6 +2828,9 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                                       "begin_margin_s": begin_margin_s(rows)}
     if live is not None and live.served is not None:   # what each server's /v1/models said serves llm.model
         rec["llm_service"]["served_models"] = live.served
+    # CROSS-CAMPAIGN [XC-K4] (see CROSS_CAMPAIGN_PLAN.md): P0 to P3 (planned): with a plane knob on, the record's
+    #   cross_campaign section would be written here (run id, files, write and tick figures, errors by hook, the last
+    #   roll-up, work_keys, directives with acks). With every plane knob off, no key.
     if knobs["record"]["extras"]:
         sent_n = Counter()
         for p in parts:

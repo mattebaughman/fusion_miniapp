@@ -246,6 +246,10 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
     picks it up.
     """
     sim, watch = sim_section(knobs), monitor_section(monitor)
+    # CROSS-CAMPAIGN [XC-R1] (see CROSS_CAMPAIGN_PLAN.md): P2, only if P1's gate passes (planned): reuse here, inside
+    #   the worker, keeps every count of the layer and of AUTONMI. A stored result from prepare (XC-R3) whose params and
+    #   sim knobs equal these exactly would be returned rebound (this candidate_idx, no touches, touch_check "reused");
+    #   else the inner loop runs.
     if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):
         return _cold(candidate=candidate, knobs=knobs, agent_id=agent_id, seed=seed, params=params,
                      candidate_idx=candidate_idx, generation=generation, monitor=monitor)
@@ -318,6 +322,9 @@ def evaluate_fixture(candidate: dict | None = None, knobs: dict | None = None, a
     evo, fil = _parent()
     params = _params(candidate, seed, evo, params)
     profile = evo.generate_profile(psi=None, model=PROFILE[0], kind=PROFILE[1], params=dict(params))
+    # CROSS-CAMPAIGN [XC-R2] (see CROSS_CAMPAIGN_PLAN.md): P1 and P2 (planned): the work key hashes params as this
+    #   digest does (sorted JSON, so 3 and 3.0 differ). With P2 reuse the fixture would check and return a stored result
+    #   here, as evaluate does at XC-R1, so fixture tests reach the reuse path.
     digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).digest()
     u = np.random.default_rng(int.from_bytes(digest[:8], "little")).uniform(size=5)
     selected = int(u[4] * sim["puffs"])

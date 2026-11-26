@@ -1373,3 +1373,4 @@ FlowGentic's MCP tool route. The 2026-11-19 ladder in
   user-directory names. They must stay byte-identical here; decide before publishing whether they ship as they
   are.
 - **Publishing:** a lockfile, a release tag, and the AUTONMI framework's own release.
+- **Cross-campaign communication** is planned and not implemented: see `CROSS_CAMPAIGN_PLAN.md`.

@@ -534,6 +534,9 @@ def write(out: Path, *, knobs: dict, layer: str, sim: str, parts: list[dict], wa
         "llm_service": service,
         "llm_check": llm_check(knobs, refill, service),
         "lookups": dict(tool_calls),
+        # CROSS-CAMPAIGN [XC-R4] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): reused results would be counted apart here,
+        #   as fixture ones are, so that a reuse is never a touch-check failure (the status below). The record would
+        #   also give logical and physical executions apart.
         "touch_check": {"evaluations": sum(devices.values()), "fixture": c["fixture"],
                         "pass": verdicts.pop("pass", 0), "fail": dict(verdicts)},
         "touches": dict(touches), "devices": dict(devices),

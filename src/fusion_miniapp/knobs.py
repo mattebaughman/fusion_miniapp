@@ -106,6 +106,9 @@ SCHEMA = {
         "notes": ("bool",),                   # the generations mode: also a Monitor call per candidate (its note) and
                                               # an Evaluator call per generation (its assessment); they change no result
     },
+    # CROSS-CAMPAIGN [XC-K1] (see CROSS_CAMPAIGN_PLAN.md): the plane's knobs would go in a new cross_campaign section
+    #   before this one, all off by default: observe, tick_s, work_keys, steer, note_chars (P2 adds reuse). Not in
+    #   record or campaign, which tests/test_sim_knobs.py pins. Each would also go in smoke.yaml and the tests' NEWER.
     "record": {
         "extras": ("bool",),                  # per-candidate detail (the Monitor's numbers and note, the Evaluator's
                                               # scores, the Coordinator's guidance) and the model calls' (each call's
@@ -231,6 +234,8 @@ def validate(knobs: dict | None, where: str = "knobs", modes: tuple = ("generati
     if out["campaign"]["mode"] == "async" and out["outer"]["generator"] == "mutation" and out["llm"]["mode"] != "off":
         raise KnobError("outer.generator mutation is the generations mode's: in the asynchronous mode the Generator's "
                         "model call reconciles every candidate; for no model calls set llm.mode off")
+    # CROSS-CAMPAIGN [XC-K2] (see CROSS_CAMPAIGN_PLAN.md): run.py's layers would refuse any cross_campaign knob not at
+    #   its default here, as they refuse AUTONMI_ONLY; steer without observe would be refused too.
     if "async" not in modes:   # run.py's layers send each call as before and make no Monitor or Evaluator call
         unread = [f"llm.{k}" for k in AUTONMI_ONLY if out["llm"][k] is not None] + \
             (["campaign.notes"] if out["campaign"]["notes"] else []) + \

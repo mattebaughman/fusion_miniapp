@@ -115,6 +115,9 @@ def budget(knobs: dict, seed: int) -> int:
 
 def sim_knobs(knobs: dict, seed: int) -> dict:
     """The `sim` section this campaign's evaluate() gets: its cost scale multiplies graph size and fixed-point cap."""
+    # CROSS-CAMPAIGN [XC-W4] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): the work key's namespace holds this
+    #   section's nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap and model_width after the cost
+    #   scale, with the inner loop, the device kind and the code commits.
     s, c = dict(knobs["sim"]), cost_scale(knobs, seed)
     s["nodes_per_plane"] = max(16, round(s["nodes_per_plane"] * c))
     s["fixed_point_cap"] = max(1, round(s["fixed_point_cap"] * c))
@@ -249,6 +252,8 @@ def refill_messages(gst: dict, msg: dict, n: int, knobs: dict) -> list[dict]:
     kept = sum(r["survived"] for r in msg["results"])
     notes = (f"Generation {g + 1} of {G} results (survivors go into the next generation unchanged):\n"
              + "\n".join(rows) + f"\n\n{kept} candidates survive; propose the other {n}.")
+    # CROSS-CAMPAIGN [XC-C8] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned): the message's note, cut to
+    #   cross_campaign.note_chars, would go in as one line before the ask, which stays the last line.
     ask = (f"Generation {g + 2} of {G}: reply with a JSON list of {n} objects, each with numeric values "
            f"for exactly these keys: {', '.join(ranges())}.")
     return [{"role": "system", "content": system}, {"role": "user", "content": notes + "\n\n" + ask}]
@@ -492,6 +497,8 @@ def on_evaluated(cst: dict, reply: dict, knobs: dict, run_dir) -> tuple[dict, di
     kept = {id(s) for s in survivors}
     touches, devices, checks = dict(cst["touches"]), dict(cst["devices"]), dict(cst["touch_checks"])
     for e in evaluated:
+        # CROSS-CAMPAIGN [XC-R5] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): a reused result would add no touches,
+        #   device or touch verdict here (the verdict below would count it as a failure); it is counted as reused.
         for kind, n in (e.get("touches") or {}).items():
             touches[kind] = touches.get(kind, 0) + n
         devices[str(e.get("device"))] = devices.get(str(e.get("device")), 0) + 1
@@ -573,6 +580,9 @@ async def run_campaign(agent_id: str, seed: int, knobs: dict, svc: Services, gen
     cst, msg = on_population(cst, await generator.initialize(start(cst, knobs, run_dir, getattr(svc, "sim", "real"))))
     while True:
         cst, nxt = on_evaluated(cst, await evaluator.evaluate(msg["population"], msg["generation"]), knobs, run_dir)
+        # CROSS-CAMPAIGN [XC-C13] (see CROSS_CAMPAIGN_PLAN.md): the Academy layer's generation boundary (its file is
+        #   locked): where its digest would be made. LangGraph's is in its own coordinate, after decide.on_evaluated
+        #   (locked too). Until then knobs.validate would refuse the plane for both (XC-K2).
         await svc.remember(agent_id, memory(cst))
         if nxt is None:
             break
@@ -764,6 +774,8 @@ def async_on_scored(cst: dict, scored: list[dict], knobs: dict, run_dir) -> tupl
         if s.get("filled") is not None:   # it went through the Generator's model call: asked, and filled by it
             refill["asked"] += 1
             refill["filled"] += s["filled"] > 0
+        # CROSS-CAMPAIGN [XC-R6] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): as XC-R5, in the asynchronous mode: a
+        #   reused result would add no touches, device or touch verdict here; it is counted as reused.
         for kind, k in (e.get("touches") or {}).items():
             touches[kind] = touches.get(kind, 0) + k
         devices[str(e.get("device"))] = devices.get(str(e.get("device")), 0) + 1
@@ -993,6 +1005,9 @@ def guidance_messages(cst: dict, rows: list[dict], knobs: dict) -> list[dict]:
               + (f"{_shown(seen[r['candidate']])}; profile {json.dumps(_seven(seen[r['candidate']]['params']))}"
                  if r["candidate"] in seen else "") for r in rows]
     b = cst["best"]
+    # CROSS-CAMPAIGN [XC-C6] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned): a live note, cut to cross_campaign.note_chars,
+    #   would go in as one line before GUIDANCE_ASK, which stays the last line (the stub and tests/fake_vllm.py answer
+    #   by it).
     user = ("Results just judged:\n" + "\n".join(judged) + f"\n\n{cst['arrived']} of {async_budget(knobs)} results "
             f"in, {cst['kept']} kept; {len(cst['survivors'])} survivors held. Best so far: te_core_metric="
             f"{_f(b['te_core_metric'])}, te_wall_eV={_f(b.get('te_wall_eV'))}, te_ped_eV={_f(b.get('te_ped_eV'))}, "
