@@ -74,7 +74,8 @@
 # --workers W among the arguments, the automatic threads per worker are the CPUs over k x populations x W), block i
 # of fleet/endpoints in <run folder>/launch-<i>/endpoints (k must divide the servers, and a server listed twice,
 # trailing slashes aside, stops the launch; rewritten when fleet/endpoints changes, except to such a list, which
-# leaves the blocks as they were) and --out <run folder>/run-<i>. The check runs once, on the whole fleet (with
+# leaves the blocks as they were; every block from one reading of the file, so a file replaced meanwhile cannot
+# give two launches one server) and --out <run folder>/run-<i>. The check runs once, on the whole fleet (with
 # --slice 0/k, so a k that does not divide the campaigns stops the launch there), and one MPS daemon serves every
 # launch. A signal goes to each launch still running. Once all have ended, python -m fusion_miniapp.merge_records
 # writes one record of them to <run folder>/run; a merge that fails prints a warning and does not change the exit
@@ -83,6 +84,11 @@
 # folder>/run, run-<i> or launch-<i> exists; <run folder>/run is made as under Dragon, and removed at the very end
 # when it is empty and the launches did not get to the merge. Configured and checked on a laptop only (a dry run,
 # and launches against fake servers): not run on the machine.
+#
+# Under Dragon and with FUSION_LAUNCHES > 1 a further SIGTERM or SIGINT during the end is ignored, so that the end
+# finishes (dragon-cleanup, the MPS quit, the GPU check, the release of an empty <run folder>/run) and the script
+# exits with its status; one local launch, the default, still ends at once on one, as before. Configured and
+# checked on a laptop only.
 #SBATCH --job-name=fusion-autonmi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -163,20 +169,21 @@ setup_list() {   # the files a run with record.extras copies (layer_autonmi.SETU
 }
 
 split_endpoints() {   # FUSION_LAUNCHES: block i of fleet/endpoints, in order, into launch-<i>/endpoints (replaced only when changed)
-	local i n tmp twice
-	n=$(grep -c '[^[:space:]]' "$fleet/endpoints" 2> /dev/null) || n=0
+	local i n tmp twice snapshot
+	snapshot=$(cat "$fleet/endpoints" 2> /dev/null) || snapshot=   # a reused fleet may be replaced while it is split
+	n=$(grep -c '[^[:space:]]' <<< "$snapshot") || n=0
 	if (( n == 0 || n % launches )); then
 		say "FUSION_LAUNCHES=$launches must divide the $n servers of $fleet/endpoints" >&2
 		return 1
 	fi
-	twice=$(grep '[^[:space:]]' "$fleet/endpoints" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s:/*$::' | sort | uniq -d)
+	twice=$(grep '[^[:space:]]' <<< "$snapshot" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s:/*$::' | sort | uniq -d)
 	if [[ -n $twice ]]; then   # one server in two launches; the blocks stay as they were
 		say "$fleet/endpoints names a server more than once (trailing slashes aside): $(echo $twice)" >&2
 		return 1
 	fi
 	for (( i = 0; i < launches; i++ )); do
 		tmp="$run_dir/launch-$i/endpoints.tmp"
-		grep '[^[:space:]]' "$fleet/endpoints" | sed -n "$(( i * n / launches + 1 )),$(( (i + 1) * n / launches ))p" > "$tmp"
+		grep '[^[:space:]]' <<< "$snapshot" | sed -n "$(( i * n / launches + 1 )),$(( (i + 1) * n / launches ))p" > "$tmp"
 		if cmp -s "$tmp" "$run_dir/launch-$i/endpoints"; then rm -f "$tmp"; else mv "$tmp" "$run_dir/launch-$i/endpoints"; fi
 	done
 }
@@ -226,7 +233,8 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 	local rc=$? k id left mine state cancel
 	set +e
 	if [[ $rc == 0 && -z $finished ]]; then rc=1; fi   # ended early (bash 3.2 gives an unset variable's exit 0)
-	trap - TERM INT
+	if [[ $runtime == dragon || $launches != 1 ]]; then trap : TERM INT   # finish cleanup after another stop
+	else trap - TERM INT; fi
 	if [[ $checking =~ ^[0-9]+$ ]]; then   # the check, when a signal ended the launch during it (it writes nothing)
 		kill -KILL "$checking" 2>/dev/null; wait "$checking" 2>/dev/null
 	fi

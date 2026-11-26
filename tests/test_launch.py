@@ -100,6 +100,7 @@ def test_cpu_probe_writes_evidence_and_refuses_required_gpu(tmp_path):
 
 import importlib.util
 import re
+import shutil
 import signal
 import stat
 import time
@@ -511,6 +512,60 @@ os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
         until(lambda: [p.read_text().strip() for p in outputs] == good)
         proc.terminate()
         assert proc.wait(timeout=5) == 143
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def test_several_launches_split_one_reading_of_the_fleets_endpoints(tmp_path):
+    """FUSION_LAUNCHES=2 on a reused FIXTURE fleet of two servers: fleet/endpoints is replaced (by rename, as the
+    refresh writes it) with the same two servers in the other order while the launch splits it, after block 0 is
+    written and before block 1 is (a FIXTURE grep waits there). Each launch still gets a server of its own, since
+    both blocks come from one reading of the file. The check (a FIXTURE) then fails, and the launch ends 1."""
+    job = str(os.getpid())
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    (fleet / "api-key").write_text("fixture\n")
+    (fleet / "setup-files").write_text("endpoints\n")
+    old = ["http://one.invalid", "http://two.invalid"]
+    source = fleet / "endpoints"
+    source.write_text("\n".join(old) + "\n")
+    env = stellar_env(tmp_path, job, FUSION_MODEL_FLEET=str(fleet), FUSION_LAUNCHES="2", FUSION_MPS="0",
+                      FIXTURE=str(tmp_path))
+    (tmp_path / "venv/bin/activate").write_text(":\n")
+    fixture_tool(tmp_path, "nvidia-smi", "")
+    fixture_tool(tmp_path, "python", 'if sys.argv[1].endswith("probe_model.py"):\n    sys.exit(1)\n'
+                 "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n")
+    grep = tmp_path / "bin/grep"   # the third read of the list (the duplicates, block 0, block 1) waits
+    grep.write_text(f"""#!/bin/sh
+if [ "$1" = '[^[:space:]]' ]; then
+    echo read >> "$FIXTURE/reads"
+    if [ "$(wc -l < "$FIXTURE/reads" | tr -d ' ')" = 3 ]; then
+        touch "$FIXTURE/splitting"
+        while [ ! -e "$FIXTURE/replaced" ]; do /bin/sleep 0.01; done
+    fi
+fi
+exec {shutil.which("grep")} "$@"
+""")
+    grep.chmod(0o755)
+    run_dir = tmp_path / "scratch/fusion-miniapp" / f"test-{job}"
+    log = tmp_path / "job.log"
+    with log.open("w") as stream:
+        proc = subprocess.Popen(["bash", str(STELLAR)], cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
+                                stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "splitting").exists():
+            assert proc.poll() is None and time.monotonic() < deadline, log.read_text()
+            time.sleep(0.01)
+        staged = source.with_suffix(".new")
+        staged.write_text("\n".join(reversed(old)) + "\n")
+        staged.replace(source)
+        (tmp_path / "replaced").touch()
+        assert proc.wait(timeout=10) == 1 and "failed the check" in log.read_text(), log.read_text()
+        blocks = [(run_dir / f"launch-{i}/endpoints").read_text().splitlines() for i in range(2)]
+        assert blocks == [[old[0]], [old[1]]]
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -1184,7 +1239,8 @@ def test_a_stop_during_the_check_or_dragons_start_ends_the_launch_at_once(tmp_pa
     blocked-probe: a check that ignores SIGTERM and would take 20 s; the signal ends the launch at once (143), the
     check is ended and no run starts. Under Dragon and with FUSION_LAUNCHES the launch has made <run folder>/run
     before its check, so a second launch on the same run folder is refused (exit 2, launch.pid stays the first's),
-    also while the first one's teardown runs (held at its GPU check here); the empty run/ is removed at the end.
+    also while the first one's teardown runs (held at its GPU check here); a second SIGTERM then is ignored, and the
+    teardown still removes the empty run/ at the end.
     launcher-message: the signal comes while the script prints the launcher's PID; it is held until the head has
     written head.pid and goes to the head, not to the launcher, and the record is interrupted (143).
     no-head: the launcher never writes head.pid; after the 300 s wait (its 0.5 s ticks shortened here) the
@@ -1289,6 +1345,7 @@ exec /bin/date "$@"
             p.terminate()
         if claimed:
             until(tmp_path / "in-teardown")
+            p.terminate()   # a second stop must still allow the shell to release its claim
             other = second()
             assert other.returncode == 2 and f"{run} exists" in other.stderr, other.stderr
             (tmp_path / "hold").unlink()
