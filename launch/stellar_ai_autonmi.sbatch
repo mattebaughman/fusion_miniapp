@@ -49,6 +49,15 @@
 # does. A plain scancel sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which
 # can come before the run has written its record and before the end above: the model jobs then serve until
 # FUSION_MODEL_TIME. (Inferred from Slurm's documentation; not yet run on the machine.)
+#
+# FUSION_RUNTIME=dragon (default local) runs the layer under Dragon: FUSION_ENV must then be a venv with Dragon and
+# RaDEX's client (README, "What --runtime dragon needs"). The run is `python -m dragon -s
+# <checkout>/src/fusion_miniapp/layer_autonmi.py <the same arguments> --runtime dragon`, which the check gets too;
+# DRAGON_DEFAULT_SEG_SZ is exported, 64 GiB unless set; the run folder must be new; the signals go to the PID the
+# layer writes to <run folder>/run/head.pid, not to Dragon's launcher (one that comes before that file is held until
+# it appears); the exit status is the run record's (pass 0, interrupted 143, else 1); and once Dragon has started,
+# dragon-cleanup runs at the end, before the MPS daemon quits. Configured and checked on a laptop only
+# (a dry run, and a fake Dragon launcher): no launch through this script has run under Dragon on the machine.
 #SBATCH --job-name=fusion-autonmi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -141,7 +150,21 @@ mem_guard() {   # SIGTERM to the run once the node's available memory falls belo
 	done
 }
 
+record_status() {   # the exit status a run record gives, as the layer's own: pass 0, interrupted 143, else (or none) 1
+	python -c 'import json, sys
+try:
+    status = json.load(open(sys.argv[1])).get("status")
+except (OSError, ValueError):
+    status = None
+print({"pass": 0, "interrupted": 143}.get(status, 1))' "$1" 2> /dev/null || echo 1
+}
+
 on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to the run's PID, once; before it starts, the launch ends
+	if [[ -n $starting ]]; then   # under Dragon, before the head has written its PID: held, then sent to the head
+		held=1
+		say "signal: held until the run's head process has written its PID"
+		return 0
+	fi
 	if [[ -n $pid ]]; then
 		if [[ -z $signalled ]]; then
 			signalled=1
@@ -178,6 +201,11 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 	elif (( keep )); then
 		say "the model servers are kept for FUSION_MODEL_FLEET=$fleet: they end at FUSION_MODEL_TIME, or on touch $fleet/model-*/stop"
 	fi
+	if [[ $runtime == dragon && ( $dry == 1 || -n $launcher ) ]]; then   # once Dragon has started: its processes and
+		# its memory in /dev/shm on this node, as the runs did
+		x timeout 120 dragon-cleanup || say "warning: dragon-cleanup ended with status $?" >&2
+		if [[ $dry != 1 && -d /dev/shm ]]; then say "/dev/shm after dragon-cleanup: $(ls /dev/shm | head -5 | tr '\n' ' ')"; fi
+	fi
 	if (( mps )); then
 		if [[ $dry == 1 ]]; then say "[dry run] echo quit | nvidia-cuda-mps-control"; else echo quit | nvidia-cuda-mps-control; fi
 	fi
@@ -197,9 +225,10 @@ main() {
 	: "${FUSION_MINIAPP_DIR:?set FUSION_MINIAPP_DIR to this checkout (absolute)}"
 	: "${FUSION_ENV:?set FUSION_ENV to the campaign venv (a folder with bin/activate)}"
 	: "${FUSION_SCRATCH:?set FUSION_SCRATCH to your GPFS scratch directory}"
-	dry=${FUSION_DRY_RUN:-0} nodes=${FUSION_MODEL_NODES:-0} reuse=${FUSION_MODEL_FLEET:-}
+	dry=${FUSION_DRY_RUN:-0} nodes=${FUSION_MODEL_NODES:-0} reuse=${FUSION_MODEL_FLEET:-} runtime=${FUSION_RUNTIME:-local}
 	started=0 keep=0 mps=0 jobs_n=0 model_pid= model_jobs= pid= signalled= refresh_pid= guard_pid= finished= silent=()
-	local root name run_dir k id rc probe args
+	launcher= starting= held=
+	local root name run_dir k id rc probe args run
 	root=$(cd "$FUSION_MINIAPP_DIR" && pwd -P)
 	job=${SLURM_JOB_ID:-dry} name=${SLURM_JOB_NAME:-fusion-autonmi}
 	run_dir="$FUSION_SCRATCH/fusion-miniapp/$name-$job"
@@ -208,6 +237,10 @@ main() {
 	node_tmp="/tmp/fusion-${USER:-user}-${run_dir##*/}"
 	if [[ -n $reuse && $nodes != 0 ]]; then
 		say "give FUSION_MODEL_FLEET or FUSION_MODEL_NODES, not both" >&2
+		return 2
+	fi
+	if [[ $runtime != local && $runtime != dragon ]]; then
+		say "FUSION_RUNTIME is local or dragon, not $runtime" >&2
 		return 2
 	fi
 	if [[ ${FUSION_KEEP_SERVERS:-0} == 1 && -z $reuse && $nodes == 0 ]]; then
@@ -228,6 +261,10 @@ main() {
 		say "the model servers on $nodes model nodes; the campaigns and their inner loop on this node"
 	fi
 	say "job $job on $(hostname -s); run folder $run_dir; fleet $fleet"
+	if [[ $runtime == dragon && $dry != 1 && -e $run_dir/run ]]; then   # its head.pid and record are this launch's
+		say "$run_dir/run exists: under Dragon the run folder must be new" >&2
+		return 2
+	fi
 	trap teardown EXIT
 	trap on_signal TERM INT
 
@@ -287,6 +324,13 @@ main() {
 	args=(--preset hundredk --knobs "$root/knobs/machines/stellar_ai.yaml"
 		--knobs "$root/knobs/machines/stellar_ai_nemotron.yaml" "$@" --llm openai
 		--endpoints-file "$fleet/endpoints" --api-key-file "$fleet/api-key" --model-wait 3600 --out "$run_dir/run")
+	run=(python -m fusion_miniapp.layer_autonmi)
+	if [[ $runtime == dragon ]]; then   # the layer as a script under Dragon's launcher, in its single-node mode
+		run=(python -m dragon -s "$root/src/fusion_miniapp/layer_autonmi.py")
+		args+=(--runtime dragon)   # the check parses it with the layer's own parser
+		export DRAGON_DEFAULT_SEG_SZ=${DRAGON_DEFAULT_SEG_SZ:-$(( 64 * 1024 * 1024 * 1024 ))}   # as the run that passed
+		say "under Dragon: DRAGON_DEFAULT_SEG_SZ=$DRAGON_DEFAULT_SEG_SZ"
+	fi
 	probe=(python "$root/launch/probe_model.py" --logs "$fleet")
 	if [[ -n $reuse ]]; then probe+=(--idle); fi
 	x "${probe[@]}" "${args[@]}" || { say "the model servers failed the check: no run" >&2; return 1; }
@@ -300,20 +344,37 @@ main() {
 	fi
 
 	if [[ $dry == 1 ]]; then
-		x python -m fusion_miniapp.layer_autonmi "${args[@]}"
+		x "${run[@]}" "${args[@]}"
 		finished=1
 		return 0
 	fi
-	python -m fusion_miniapp.layer_autonmi "${args[@]}" &
-	pid=$!
+	"${run[@]}" "${args[@]}" &
+	launcher=$! pid=$!
+	if [[ $runtime == dragon ]]; then   # signal the layer's head process (its head.pid), not Dragon's launcher
+		say "Dragon's launcher: $launcher"
+		starting=1
+		for (( k = 0; k < 600; k++ )); do
+			[[ -s $run_dir/run/head.pid ]] && break
+			kill -0 "$launcher" 2> /dev/null || break
+			sleep 0.5
+		done
+		pid=$(cat "$run_dir/run/head.pid" 2> /dev/null) || pid=$launcher
+		[[ $pid =~ ^[1-9][0-9]*$ ]] || pid=$launcher
+		starting=
+	fi
 	say "the run's PID: $pid"
+	if [[ -n $held ]]; then on_signal || :; fi   # a signal held while the head started (set -e: a head gone is no error)
 	mem_guard "$pid" &
 	guard_pid=$!
 	while :; do   # a trapped signal ends a wait early: wait again until the run has exited
-		wait "$pid" && rc=0 || rc=$?
-		kill -0 "$pid" 2> /dev/null || break
+		wait "$launcher" && rc=0 || rc=$?
+		kill -0 "$launcher" 2> /dev/null || break
 	done
 	say "the run exited with status $rc"
+	if [[ $runtime == dragon ]]; then   # the record decides, as the layer's own exit status does
+		rc=$(record_status "$run_dir/run/run_record.json")
+		say "its record gives status $rc"
+	fi
 	finished=1
 	return "$rc"
 }

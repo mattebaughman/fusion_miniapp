@@ -312,6 +312,56 @@ def test_a_dry_run_prints_the_launch_and_runs_nothing(tmp_path, how):
         assert unset.returncode != 0 and "FUSION_SCRATCH" in unset.stderr
 
 
+def test_a_dry_run_under_dragon_prints_dragons_launcher(tmp_path):
+    """FUSION_RUNTIME=dragon (on a reused fleet, as the runs on StellarAI were), in a dry run: the run is the layer's
+    script under Dragon's launcher in its single-node mode, `python -m dragon -s <checkout>/src/fusion_miniapp/
+    layer_autonmi.py`, with the local run's arguments and --runtime dragon after them, which the check gets too;
+    DRAGON_DEFAULT_SEG_SZ is 64 GiB unless set; dragon-cleanup runs at the end, before the MPS daemon quits. The
+    job name keeps no "dragon". FUSION_RUNTIME must be local or dragon. Not in a dry run, a run folder that exists is
+    refused before anything starts. Nothing runs: no laptop test reaches Dragon."""
+    for name in ("sbatch", "srun", "squeue", "scancel", "nvidia-smi", "nvidia-cuda-mps-control", "dragon-cleanup"):
+        fixture_tool(tmp_path, name, "sys.exit(99)\n")
+    fleet = "/scratch/earlier/fleet"
+    env = stellar_env(tmp_path, "42", FUSION_DRY_RUN="1", FUSION_MODEL_FLEET=fleet, FUSION_RUNTIME="dragon")
+    env.pop("DRAGON_DEFAULT_SEG_SZ", None)
+
+    def dry_run(**extra) -> tuple[str, list[str]]:
+        done = subprocess.run(["bash", str(STELLAR), "--agents", "100", "--sim", "fixture"], cwd=tmp_path,
+                              env={**env, **extra}, capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        return done.stdout, [x.removeprefix("[dry run] ").rstrip() for x in done.stdout.splitlines()
+                             if x.startswith("[dry run] ")]
+    out, dry = dry_run()
+    assert tool_calls(tmp_path) == [] and not (tmp_path / "scratch").exists()
+    run_dir = f"{tmp_path}/scratch/fusion-miniapp/test-42"
+    probe = next(x.split() for x in dry if "probe_model.py" in x)
+    run = next(x.split() for x in dry if "-m dragon" in x)
+    assert run[:4] == ["python", "-m", "dragon", "-s"] and run[4] == f"{ROOT}/src/fusion_miniapp/layer_autonmi.py"
+    assert run[5:] == ["--preset", "hundredk", "--knobs", str(MACHINE_KNOBS[0]), "--knobs", str(MACHINE_KNOBS[1]),
+                       "--agents", "100", "--sim", "fixture", "--llm", "openai", "--endpoints-file", f"{fleet}/endpoints",
+                       "--api-key-file", f"{fleet}/api-key", "--model-wait", "3600", "--out", f"{run_dir}/run",
+                       "--runtime", "dragon"]
+    assert probe[-len(run) + 5:] == run[5:] and "--idle" in probe
+    assert not any("-m fusion_miniapp.layer_autonmi" in x for x in dry)
+    assert f"under Dragon: DRAGON_DEFAULT_SEG_SZ={64 * 1024 ** 3}" in out
+    assert "under Dragon: DRAGON_DEFAULT_SEG_SZ=1234" in dry_run(DRAGON_DEFAULT_SEG_SZ="1234")[0]
+    lines = out.splitlines()
+    at = lambda text: next(i for i, x in enumerate(lines) if text in x)   # noqa: E731
+    assert at("[dry run] timeout 120 dragon-cleanup") < at("echo quit | nvidia-cuda-mps-control") \
+        < at("nvidia-smi --query-compute-apps")
+    local = subprocess.run(["bash", str(STELLAR)], cwd=tmp_path, env={**env, "FUSION_RUNTIME": "local"},
+                           capture_output=True, text=True, timeout=60)
+    assert local.returncode == 0 and "dragon" not in local.stdout.replace(str(tmp_path), "")
+    bad = subprocess.run(["bash", str(STELLAR)], cwd=tmp_path, env={**env, "FUSION_RUNTIME": "Dragon"},
+                         capture_output=True, text=True, timeout=60)
+    assert bad.returncode == 2 and "FUSION_RUNTIME is local or dragon" in bad.stderr
+    Path(run_dir, "run").mkdir(parents=True)   # not a dry run: under Dragon the run folder must be new
+    used = subprocess.run(["bash", str(STELLAR)], cwd=tmp_path, env={**env, "FUSION_DRY_RUN": "0"},
+                          capture_output=True, text=True, timeout=60)
+    assert used.returncode == 2 and "under Dragon the run folder must be new" in used.stderr
+    assert tool_calls(tmp_path) == [] and "ended with status" not in used.stdout   # before the teardown is set
+
+
 def fake_submit(tmp_path) -> None:
     """AUTONMI's jobs/submit as a FIXTURE: `submit model FOLDER ...` is a model job that has started at once: it
     writes the folder's endpoints (one fake vLLM server's URL each, from FAKE_URLS in order), gpu.csv, a server log
@@ -342,10 +392,10 @@ USER_KNOBS = {"outer": {"population": 4, "generations": 2, "parent_stdout": "dro
               "workers": {"sim_workers": 2}}
 
 
-def stellar_run(tmp_path, servers: int, job: str, *, latency_s: float = 0.0):
+def stellar_run(tmp_path, servers: int, job: str, *, latency_s: float = 0.0, **extra):
     """The launch script on the laptop against `servers` fake vLLM servers (FIXTURES serving the model's name), one
     model job each (fake_submit), 2 fixture campaigns of 8 candidates with record.extras; a Popen, the servers and
-    the script's environment."""
+    the script's environment (with `extra`)."""
     from fake_vllm import FakeVllm
 
     fake_submit(tmp_path)
@@ -355,7 +405,7 @@ def stellar_run(tmp_path, servers: int, job: str, *, latency_s: float = 0.0):
     fixture_tool(tmp_path, "nvidia-cuda-mps-control", "")
     fakes = [FakeVllm(model=NEMOTRON, latency_s=latency_s).__enter__() for _ in range(servers)]
     env = stellar_env(tmp_path, job, FUSION_MODEL_NODES=str(servers), FUSION_MODEL_TIME="00:20:00",
-                      FAKE_URLS=",".join(f.url for f in fakes))
+                      FAKE_URLS=",".join(f.url for f in fakes), **extra)
     user = tmp_path / "user knobs.yaml"
     user.write_text(json.dumps(USER_KNOBS))
     p = subprocess.Popen(["bash", str(STELLAR), "--agents", "2", "--sim", "fixture", "--knobs", str(user)],
@@ -443,6 +493,83 @@ def test_sigterm_to_the_launch_reaches_the_run_and_releases_the_servers(tmp_path
     assert json.loads((run / "run_record.json").read_text())["status"] == "interrupted"
     assert (run.parent / "fleet" / "model-0" / "stop").exists()
     assert [c[1:] for c in tool_calls(tmp_path) if c[0] == "nvidia-cuda-mps-control"] == [["-d", ""], ["quit\n"]]
+
+
+# Dragon's launcher as a FIXTURE package (`python -m dragon -s SCRIPT ARGS`), since Dragon cannot run on a laptop:
+# it runs SCRIPT as a child process with --runtime dragon removed (the layer then runs locally), writes the child's
+# PID to <--out>/head.pid as the layer itself does under Dragon (test_layer_autonmi checks that write; here once
+# --out holds run.lock, or a file matching FAKE_DRAGON_HEAD_AFTER), never
+# forwards a signal (it logs one it gets), and exits FAKE_DRAGON_EXIT, or else as its child did.
+FAKE_DRAGON = """import os, signal, subprocess, sys, time
+from pathlib import Path
+assert sys.argv[1] == "-s", sys.argv
+script, args = sys.argv[2], sys.argv[3:]
+at = args.index("--runtime")
+assert args[at + 1] == "dragon", args
+del args[at:at + 2]
+out = Path(args[args.index("--out") + 1])
+child = subprocess.Popen([sys.executable, script, *args])
+signal.signal(signal.SIGTERM, lambda *_: open(os.environ["FAKE_DRAGON_LOG"], "a").write("launcher: SIGTERM\\n"))
+while not list(out.glob(os.environ.get("FAKE_DRAGON_HEAD_AFTER", "run.lock"))) and child.poll() is None:
+    time.sleep(0.05)
+(out / "head.pid").write_text(f"{child.pid}\\n")
+rc = child.wait()
+print(f"+++ head proc exited, code {rc}", flush=True)
+sys.exit(int(os.environ.get("FAKE_DRAGON_EXIT", rc)))
+"""
+
+
+@AUTONMI
+@pytest.mark.parametrize("when", ["running", "starting"])
+def test_sigterm_under_dragon_reaches_the_layers_head_not_dragons_launcher(tmp_path, when):
+    """FUSION_RUNTIME=dragon with a FIXTURE Dragon launcher (FAKE_DRAGON, first on PYTHONPATH) that exits 0 whatever
+    happens: Slurm's warning while the run is under way reaches the layer's head process through head.pid, not the
+    launcher; the run writes its interrupted record; the launch takes its exit status from that record (143), not
+    from the launcher; and at the end dragon-cleanup runs (through `timeout`, a FIXTURE on PATH here) before the
+    MPS daemon quits. `starting`: the signal comes once the launcher has started and before head.pid is there
+    (FAKE_DRAGON writes it once the campaigns are being built); the script holds it and sends it to the head when
+    the file appears. What Dragon itself does on a signal is not known: no laptop test reaches Dragon."""
+    fake = tmp_path / "fake_dragon" / "dragon"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text("")
+    (fake / "__main__.py").write_text(FAKE_DRAGON)
+    fixture_tool(tmp_path, "dragon-cleanup", "")
+    fixture_tool(tmp_path, "timeout", "import subprocess\nsys.exit(subprocess.call(sys.argv[2:]))\n")
+    path = os.pathsep.join(x for x in (str(fake.parent), os.environ.get("PYTHONPATH")) if x)
+    job = f"79{os.getpid()}"
+    p, fakes, env = stellar_run(tmp_path, 1, job, latency_s=1.0, FUSION_RUNTIME="dragon", PYTHONPATH=path,
+                                FAKE_DRAGON_LOG=str(tmp_path / "launcher.log"), FAKE_DRAGON_EXIT="0",
+                                FAKE_DRAGON_HEAD_AFTER="agents-p*.jsonl" if when == "starting" else "run.lock")
+    run = tmp_path / "scratch" / "fusion-miniapp" / f"test-{job}" / "run"
+    try:
+        deadline = time.time() + 300
+        while not (list(run.glob("agents-p*.jsonl")) if when == "running" else   # the run's handler is set
+                   "Dragon's launcher:" in (tmp_path / "job.out").read_text()):
+            assert p.poll() is None and time.time() < deadline, (tmp_path / "job.out").read_text()[-4000:]
+            time.sleep(0.2)
+        if when == "running":
+            time.sleep(1.0)
+        else:
+            assert not (run / "head.pid").exists()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=120) == 143, (tmp_path / "job.out").read_text()[-4000:]
+    finally:
+        for f in fakes:
+            f.__exit__(None, None, None)
+    log = (tmp_path / "job.out").read_text()
+    head = (run / "head.pid").read_text().strip()
+    launcher = re.search(r"Dragon's launcher: (\d+)", log).group(1)
+    assert head != launcher and f"the run's PID: {head}" in log and f"signal: SIGTERM to the run ({head})" in log
+    assert ("signal: held until the run's head process has written its PID" in log) == (when == "starting")
+    assert not (tmp_path / "launcher.log").exists()   # the launcher got no signal
+    assert "+++ head proc exited, code 143" in log and "the run exited with status 0" in log
+    assert "its record gives status 143" in log and "ended with status 143" in log
+    assert json.loads((run / "run_record.json").read_text())["status"] == "interrupted"
+    calls = [c[0] for c in tool_calls(tmp_path)]
+    assert calls.index("dragon-cleanup") < len(calls) - 1 - calls[::-1].index("nvidia-cuda-mps-control")
+    assert [c for c in tool_calls(tmp_path) if c[0] in ("timeout", "dragon-cleanup")] == [
+        ["timeout", "120", "dragon-cleanup", ""], ["dragon-cleanup", ""]]
+    assert (run.parent / "fleet" / "model-0" / "stop").exists()
 
 
 # Model jobs as processes (FIXTURES), for the paths that need servers to start late, end on their stop file, or
@@ -609,13 +736,15 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
     (FIXTURES), one of whose servers is down, so the check fails and no run starts, both stop files written, both
     jobs end and neither is cancelled. And a step of the launch's own shell that fails under set -u once the
     teardown is set (an activation that unsets the script's variable `fleet`, before any server is started): exit
-    1, where bash 3.2 alone would give 0."""
+    1, where bash 3.2 alone would give 0. Under FUSION_RUNTIME=dragon a launch that stops before the run started no
+    Dragon, so runs no dragon-cleanup (a FIXTURE here)."""
     cases = {
         "model.sh ends": ({}, 'echo "vLLM 0 exited before it was ready"; exit 1\n'),
         "jobs not started": ({"FUSION_MODEL_NODES": "2", "FUSION_MODEL_WAIT": "1",
                               "FAKE_STATES": "PENDING,CONFIGURING"}, None),
         "a server down": ({"FUSION_MODEL_NODES": "2", "FAKE_DOWN": "9201"}, None),
         "unset variable": ({}, None),
+        "model.sh ends, under Dragon": ({"FUSION_RUNTIME": "dragon"}, 'echo "vLLM 0 exited"; exit 1\n'),
     }
     done = {}
     for i, (case, (extra, model_sh)) in enumerate(cases.items()):
@@ -625,6 +754,8 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
         if case == "unset variable":
             with open(d / "venv" / "bin" / "activate", "a") as f:
                 f.write("unset fleet\n")
+        for tool in ("dragon-cleanup", "timeout") if "FUSION_RUNTIME" in extra else ():
+            fixture_tool(d, tool, "")
         try:
             done[case] = launch(d, env)
         finally:
@@ -638,6 +769,7 @@ def test_a_launch_that_cannot_use_its_servers_stops_and_releases_them(tmp_path):
         cancelled = [c[1] for c in tool_calls(d) if c[0] == "scancel"]
         assert cancelled == (["9200", "9201"] if case == "jobs not started" else []), case
         assert not Path(f"/tmp/fusion-{os.environ.get('USER', 'user')}-test-72{i}").exists()
+        assert not [c for c in tool_calls(d) if c[0] in ("dragon-cleanup", "timeout")], case
     assert "model.sh ended before its servers were ready" in done["model.sh ends"].stderr
     assert "not every model job wrote its endpoints within 1 s" in done["jobs not started"].stderr
     down = done["a server down"].stderr

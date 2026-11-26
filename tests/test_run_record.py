@@ -17,6 +17,22 @@ def test_occupancy_counts_open_intervals():
     assert record.occupancy([0, 1], [1, 2], 0, 2)["max"] == 1                # an end counts before a start
 
 
+def test_the_loop_lags_summary_without_awaiting_is_stops_result():
+    """record.LoopLag.summary(), for code that cannot await (a population's rows under Dragon), ends the sampling and
+    gives what stop() gives; with no sample, {"samples": 0}."""
+    async def sampled():
+        lag = record.LoopLag()
+        lag.start()
+        await asyncio.sleep(0.45)
+        now = lag.summary()
+        await asyncio.sleep(0.25)   # no sample after it
+        return now, await lag.stop()
+    now, stopped = asyncio.run(sampled())
+    assert now == stopped and now["samples"] >= 2 and set(now) == {"samples", "p50_ms", "p95_ms", "max_ms",
+                                                                    "share_over_100ms"}
+    assert record.LoopLag().summary() == {"samples": 0}
+
+
 def test_the_steady_windows_tokens_per_second_and_share_of_time_in_a_call():
     """The steady window is 15% to 85% of the agent phase: [15, 85] of [0, 100]. Tokens per second count the calls
     answered in it (t_end 10 and 90 are out); a role's share of time in a call is its calls' time open in it over

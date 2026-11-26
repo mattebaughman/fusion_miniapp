@@ -37,7 +37,8 @@ other layers end the campaign at the first failed call). What runs them is AUTON
   /metrics are sampled through the run (AUTONMI's VllmSampler, into vllm/vllm.json), unless
   --no-vllm-metrics.
 - The head process prints one line to stderr per record.ticker interval (LiveLine): agents live, model
-  requests open and queued at the client, sequences decoding at the model servers, agents done. The
+  requests open and queued at the client, sequences decoding at the model servers, agents done (under Dragon
+  from the files the populations write once a second). The
   record keeps the same values as a series, and the counts' maxima, means and times at or above shares of
   the hosted agents (`speed`; write_record), and the model calls' prompt and generated tokens per second over
   the steady window (record.write).
@@ -104,6 +105,7 @@ MODULE = "fusion_miniapp.layer_autonmi"
 _POOLS: list = []   # this process's simulation pools, told to stop rebuilding on SIGTERM
 _GPUS: list = []    # workers.gpu_per_worker: the GPUs this process's inner-loop workers are placed on (inner_loop_gpus)
 _GPU_COUNTER = None   # the workers placed so far, one counter for every population's pool here (sim_pool)
+GPU_COUNTER_FILE = "inner_loop_gpus.count"   # under Dragon, that count in a file of the run folder (pool.on_gpu_file)
 _OWN_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)   # the run's, not its engines' (run_until_signalled)
 
 
@@ -583,6 +585,22 @@ def sums_file(lines_file: Path, index: int) -> Path:
     return lines_file.with_name(f"calls-p{index:03d}.npz")
 
 
+def handed_file(out: Path, index: int, kind: str) -> Path:
+    """What population `index` hands the head by file when it runs in a process of its own (under Dragon), in the
+    run folder: `proc`, its event loop's lag, peak memory and gc thresholds at its end (Fusion.rows); `live`, its
+    agents started and ended and its model requests open and queued, once a second (Fusion._live). Read by part(),
+    write_record and LiveLine, and removed with the call sums once the record is written."""
+    return Path(out) / f"{kind}-p{index:03d}.json"
+
+
+def handed(out: Path, index: int, kind: str) -> dict:
+    """The contents of handed_file; {} without it (or while it cannot be read)."""
+    try:
+        return json.loads(handed_file(out, index, kind).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
 def sim_pool(workers: int):
     """The executor of a population's real evaluations (AUTONMI's PopulationConfig.executor): spawned
     worker processes, as run.py's, which rebuild once when a worker dies and stop within run.SHUTDOWN_S. With
@@ -602,15 +620,25 @@ def sim_pool(workers: int):
     return pool
 
 
-def inner_loop_gpus(knobs: dict, device: dict | None) -> list[str]:
+def visible_gpus() -> list[str]:
+    """CUDA_VISIBLE_DEVICES's entries in this process (none when it is unset or empty)."""
+    return [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
+
+
+def inner_loop_gpus(knobs: dict, device: dict | None, dragon: bool = False) -> list[str]:
     """workers.gpu_per_worker: the GPUs to place the inner-loop workers on, one each: the n GPUs the device probe
     saw where the inner loops run (CUDA_VISIBLE_DEVICES's first n entries when it is set, else 0 .. n - 1); none
-    without the knob or without a GPU (also the fixture and Dragon, which have no probe here)."""
-    n = len((device or {}).get("gpus") or [])
-    if not knobs["workers"]["gpu_per_worker"] or not n:
+    without the knob or without a GPU (also the fixture, which has no probe here). `dragon`: the real inner loop
+    under Dragon, which has no probe here either: CUDA_VISIBLE_DEVICES's entries in this process, the head's (none
+    when it is unset); the workers are then placed inside their tasks (sim.evaluate_placed)."""
+    if not knobs["workers"]["gpu_per_worker"]:
         return []
-    seen = [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
-    return (seen or [str(k) for k in range(n)])[:n]
+    if dragon:
+        return visible_gpus()
+    n = len((device or {}).get("gpus") or [])
+    if not n:
+        return []
+    return (visible_gpus() or [str(k) for k in range(n)])[:n]
 
 
 class FixturePool(run.FixturePool):
@@ -674,6 +702,10 @@ class Fusion:
         self.live: Counter = Counter()   # agents started and ended in this process (LiveLine)
         self.context: int | None = None   # the model servers' context (max_model_len), for the prompt-length check
         self.transport = transport_settings(None)   # what the transports send with every call (record.extras)
+        # workers.gpu_per_worker under Dragon: {"gpu_counter", "gpus"} for sim.evaluate_placed (miniapp_workflow)
+        self.placement: dict | None = None
+        self.head_pid = os.getpid()   # a population whose build runs in another process (under Dragon) hands its
+        self.lag, self.writer = None, None   # loop's lag (record.LoopLag) and live counts to the head by file
 
     def agents(self):
         """Each campaign's agents (agent_names), one after another (AUTONMI cuts this list into contiguous
@@ -700,11 +732,33 @@ class Fusion:
         """Called in the task that runs the population (locally, a block of the run's engine), which is
         kept so that an interrupted run can wait for the population to end (miniapp_workflow), with its Script,
         whose model figures SIGTERM writes when the population has not written its rows (Script.cut_short).
-        Before the population's host starts: the full collections' setting (bound_full_collections)."""
+        Before the population's host starts: the full collections' setting (bound_full_collections). In a process
+        of the population's own (under Dragon, one population per process): its event loop's lag, and its live
+        counts into its `live` file once a second (handed_file), which rows() ends."""
         bound_full_collections()
         self.populations[f"p{pop.index:03d}"] = asyncio.current_task()
         script = self.scripts[f"p{pop.index:03d}"] = Script(self, pop)
+        if os.getpid() != self.head_pid:
+            self.lag = record.LoopLag()
+            self.lag.start()
+            self.writer = asyncio.ensure_future(self._live(pop.index))
         return script.agent()
+
+    def _write_live(self, index: int) -> None:
+        """This process's agents started and ended (Script's counts) and its model requests open and queued
+        (_model_states), into population `index`'s `live` file, replaced whole."""
+        states = _model_states() or (None, None)
+        path = handed_file(self.out, index, "live")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"started": self.live["started"], "ended": self.live["ended"],
+                                   "open": states[0], "queued": states[1]}))
+        os.replace(tmp, path)
+
+    async def _live(self, index: int) -> None:
+        while True:
+            with contextlib.suppress(OSError):   # a reading missed, not the population
+                self._write_live(index)
+            await asyncio.sleep(record.LIVE_INTERVAL_S)
 
     def rows(self, pop) -> list[dict]:
         """At the population's end, in its process: one row per hosted agent, with its role and campaign,
@@ -718,7 +772,8 @@ class Fusion:
         every agent to start and when it began its campaign (`t_begin`, after that wait); a Monitor's also
         its slot, the inner-loop traces it got (monitor.capture) and the reports it sent. The campaign's
         candidate queue is its Monitors' inbox: what is left on it, or dropped, counts as its first slot's. The
-        population's calls not in its campaigns' lines are written beside them (CallSums)."""
+        population's calls not in its campaigns' lines are written beside them (CallSums); in a process of its own
+        also its event loop's lag, peak memory and gc thresholds, and its last live counts (handed_file)."""
         sc = pop.state.get("script")
         if sc is None:   # the population ended before its agents were built
             return [{"agent_id": a, "finished": False, "simulations": 0, "population": pop.index}
@@ -726,6 +781,13 @@ class Fusion:
         self.scripts.pop(f"p{pop.index:03d}", None)   # its model figures are written here
         sc.lines.close()
         sc.sums.write(sums_file(Path(sc.lines.name), pop.index))
+        if self.lag is not None:   # under Dragon: what the head cannot see from its own process
+            self.writer.cancel()
+            with contextlib.suppress(OSError):
+                self._write_live(pop.index)
+            handed_file(self.out, pop.index, "proc").write_text(json.dumps(
+                {"loop_lag": self.lag.summary(), "peak_rss_mb": record.peak_rss_mb(),
+                 "gc_thresholds": list(gc.get_threshold())}))
         mail, left, out = sc.mail, sc.mail.left(), []
         for a in pop.agent_ids:
             campaign, role = campaign_of(a), role_of(a)
@@ -1011,12 +1073,15 @@ class Script:
         self.fail_at = os.environ.get(FAIL_ENV)
         self.lines = open(self.out / f"agents-p{pop.index:03d}.jsonl", "w", buffering=1)  # noqa: SIM115 (rows())
         pop.state.update(script=self, mailbox=self.mail)
+        fn, place = run.sim_function(definition.sim), definition.placement or {}
+        if place:   # under Dragon with workers.gpu_per_worker: each worker placed from inside its task
+            from fusion_miniapp.sim import evaluate_placed as fn
         self.evaluate = task_tool(
-            run.sim_function(definition.sim), suspend=True, name="evaluate", args_schema=EvaluateArgs,
+            fn, suspend=True, name="evaluate", args_schema=EvaluateArgs,
             description="Evaluate one candidate profile with the turned-down IGNOS inner loop.",
             prepare=lambda agent_id, call_id, args: {**args, "knobs": definition.sim_knobs(args["seed"]),
                                                      "monitor": self.knobs["monitor"],
-                                                     "agent_id": campaign_of(agent_id)})
+                                                     "agent_id": campaign_of(agent_id), **place})
 
     def agent(self) -> ScriptedAgent:
         """One definition for all the roles (AUTONMI has one per population), so one model-call limit: the
@@ -1611,19 +1676,35 @@ class LiveLine:
     live and done: hosted agents started and not ended, and ended (Script's counts); model_requests_open
     and queued: client side, Flowgentic's agent states (_model_states); decoding_at_servers: the sampler's
     latest reading of the model servers' running batches, summed ("-" without a sampler, as with the stub).
-    Under Dragon the populations run in processes of their own, and only the servers' count is seen here."""
+    Under Dragon (`local` false) the populations run in processes of their own: live, done, open and queued are
+    then the sums of the `live` files they write once a second into the run folder `out` (handed_file; "-"
+    until one has, and open and queued "-" when a population cannot count them)."""
 
     FIELDS = ("t_s", "agents_live", "model_requests_open", "model_requests_queued", "decoding_at_servers", "done")
 
-    def __init__(self, local: bool = True) -> None:
+    def __init__(self, local: bool = True, out: Path | None = None) -> None:
         self.local, self.counts, self.sampler, self.servers, self.served = local, Counter(), None, None, None
-        self.t0, self.series, self.why_no_sampler = time.time(), [], None
+        self.t0, self.series, self.why_no_sampler, self.out = time.time(), [], None, out
 
     def read(self) -> list:
-        states = _model_states() if self.local else None
-        started, ended = self.counts["started"], self.counts["ended"]
-        return [round(time.time() - self.t0, 2), started - ended if self.local else None,
-                *(states or (None, None)), self._decoding(), ended if self.local else None]
+        if self.local:
+            states, started, ended = _model_states(), self.counts["started"], self.counts["ended"]
+        else:
+            states, started, ended = self._populations()
+        return [round(time.time() - self.t0, 2), None if started is None else started - ended,
+                *(states or (None, None)), self._decoding(), ended]
+
+    def _populations(self) -> tuple:
+        """Under Dragon: the populations' live files, summed: (open, queued) or None, started, ended."""
+        rows = []
+        for f in sorted(Path(self.out).glob("live-p*.json")) if self.out is not None else ():
+            with contextlib.suppress(OSError, ValueError):   # gone, or not yet whole
+                rows.append(json.loads(f.read_text()))
+        if not rows:
+            return None, None, None
+        states = None if any(r["open"] is None or r["queued"] is None for r in rows) else (
+            sum(r["open"] for r in rows), sum(r["queued"] for r in rows))
+        return states, sum(r["started"] for r in rows), sum(r["ended"] for r in rows)
 
     def emit(self, row: list) -> None:
         self.series.append(row)
@@ -1983,6 +2064,39 @@ def agents_live(knobs: dict) -> int | None:
     return agents_per_campaign(knobs) * a["max_live"]
 
 
+def dragon_real_guard(a: argparse.Namespace, knobs: dict) -> None:
+    """--runtime dragon with --sim real (main, before anything starts). Without workers.gpu_per_worker no inner-loop
+    worker is placed on a GPU there: each sees every GPU of the launch, as when every campaign of such a run failed
+    on GPU errors (StellarAI, 2026-11-25). So with more than one GPU in CUDA_VISIBLE_DEVICES it is refused, unless
+    FUSION_DRAGON_REAL_UNPLACED=1, and with none a warning is printed. With the knob, one warning: the workers
+    are then placed from inside their tasks (sim.evaluate_placed), which has not run on GPUs; with sim.device cuda
+    and no GPU in CUDA_VISIBLE_DEVICES no worker would be placed, so that is refused too (the same override)."""
+    if a.runtime != "dragon" or a.sim != "real":
+        return
+    seen, unplaced = visible_gpus(), os.environ.get("FUSION_DRAGON_REAL_UNPLACED") == "1"
+    if knobs["workers"]["gpu_per_worker"]:
+        if knobs["sim"]["device"] == "cuda" and not seen and not unplaced:
+            raise knob_files.KnobError(
+                "--runtime dragon with --sim real, sim.device cuda and workers.gpu_per_worker: CUDA_VISIBLE_DEVICES "
+                "names no GPU, so no inner-loop worker would be placed. Set it to the GPUs the workers may use, use "
+                "--runtime local, or set FUSION_DRAGON_REAL_UNPLACED=1")
+        where = f"the {len(seen)} GPUs of CUDA_VISIBLE_DEVICES, one each in turn" if seen else \
+            "no GPU: CUDA_VISIBLE_DEVICES names none, so no worker is placed"
+        print(f"[fusion/autonmi] warning: --runtime dragon with --sim real places the inner-loop workers on {where}; "
+              "this placement under Dragon has not run on GPUs", file=sys.stderr, flush=True)
+        return
+    if unplaced:
+        return
+    if len(seen) > 1:
+        raise knob_files.KnobError(
+            f"--runtime dragon with --sim real: workers.gpu_per_worker is off, so the inner-loop workers are not "
+            f"placed on GPUs under Dragon, and CUDA_VISIBLE_DEVICES names {len(seen)}. Turn workers.gpu_per_worker "
+            "on, expose one GPU, use --runtime local, or set FUSION_DRAGON_REAL_UNPLACED=1")
+    if not seen:
+        print("[fusion/autonmi] warning: --runtime dragon with --sim real places no worker on a GPU "
+              "(workers.gpu_per_worker is off)", file=sys.stderr, flush=True)
+
+
 def own(out: Path) -> None:
     """--out as run.py takes it: not a folder that holds a run (the parent's logs append), and held by
     run.lock, also against a second run started at the same moment."""
@@ -2054,6 +2168,9 @@ async def miniapp_workflow(a, knobs: dict, flow, out: Path, app, work_root: str 
     definition.live = live.counts
     definition.context = min(context) if context else None   # the prompt-length check (Script._ask)
     definition.transport = transport_settings(model)   # record.extras: the request settings sent
+    gpus = importlib.import_module(MODULE)._GPUS   # workers.gpu_per_worker (inner_loop_gpus)
+    if a.runtime == "dragon" and gpus:   # RHAPSODY starts the workers: each places itself in its first task
+        definition.placement = {"gpu_counter": str(out / GPU_COUNTER_FILE), "gpus": list(gpus)}
     # locally, the populations' simulations run on run.py's pools; under Dragon, on RHAPSODY's native backend
     executor = f"{MODULE}:{'sim_pool' if a.sim == 'real' else 'fixture_pool'}" if a.runtime == "local" else None
     campaign = Campaign(
@@ -2157,7 +2274,8 @@ async def run_until_signalled(a, knobs: dict, out: Path, work_root: str | None,
 def probe(a: argparse.Namespace) -> dict | None:
     """record.device_probe where the simulations run, as run.Services.probe takes it: in a spawned process
     with --sim real, so that a broken torch or device stops the run before any campaign starts. None for
-    the fixture, and under Dragon, whose simulation workers this process cannot reach."""
+    the fixture, and under Dragon, whose inner-loop workers this process cannot reach (workers.gpu_per_worker
+    there takes this process's CUDA_VISIBLE_DEVICES instead: inner_loop_gpus)."""
     if a.sim != "real" or a.runtime != "local":
         return None
     with ProcessPoolExecutor(1, mp_context=mp.get_context("spawn")) as pool:
@@ -2188,13 +2306,15 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
     model calls not in the lines (CallSums) count in llm_service, and their times and tokens (`call_times`) in
     record.write's client-side counts and tokens per second; with record.extras its requests' settings
     (`requests`). A population that SIGTERM stopped before its rows: every call up to then, and its roles' model
-    counts (`by_role`, Script.cut_short)."""
+    counts (`by_role`, Script.cut_short). Under Dragon its event loop's lag and its process's peak memory are
+    those it handed over at its end (handed_file; none when it did not end)."""
     lines = [json.loads(x) for x in lines_file.read_text().splitlines() if x]
     sums = CallSums.read(sums_file(lines_file, index))   # the calls not in the lines
     done = [r for r in lines if "error" not in r]
     stats_file = Path(a.out) / "populations" / f"p{index:03d}" / "population.json"
     stats = json.loads(stats_file.read_text()) if stats_file.exists() else {}
     runner, local = stats.get("runner") or {}, a.runtime == "local"
+    proc = {} if local else handed(Path(a.out), index, "proc")
     survival = {"survival": {k: sum(r["survival"][k] for r in done) for k in ASYNC_COUNTS}} \
         if decide.asynchronous(knobs) else {}   # the reported campaigns' results scored and kept
     return {**survival,
@@ -2216,8 +2336,8 @@ def part(a: argparse.Namespace, knobs: dict, index: int, lines_file: Path, *, lo
         "threads": threads, "pool": None, "pruned_tasks": 0,
         "backend": "ConcurrentExecutionBackend" if local else "DragonNativeExecutionBackend",
         # locally every population runs on this process's event loop; under Dragon, in processes of their own
-        "loop_lag": loop_lag if local and index == 0 else None,
-        "peak_rss_mb": record.peak_rss_mb() if local and index == 0 else None,
+        "loop_lag": (loop_lag if index == 0 else None) if local else proc.get("loop_lag"),
+        "peak_rss_mb": (record.peak_rss_mb() if index == 0 else None) if local else proc.get("peak_rss_mb"),
         "device": device or record.device_probe(), "frameworks": record.frameworks(),
     }
 
@@ -2424,7 +2544,7 @@ def decoding_metric(knobs: dict, out: Path, rec: dict, summary: dict, refs: dict
             "autonmi_agent_seconds_per_wall_s": round(agent_s / wall, 4) if agent_s is not None and wall else None,
             "per": "per second of the agent phase (agent_phase_s), the calls' rate too; the last figure per "
                    "second of the whole run (wall_seconds: start-up and shut-down included)"}
-        lag = next((x for x in s["loop_lag"] if x and x.get("samples")), None)
+        lag = max((x for x in s["loop_lag"] if x and x.get("samples")), key=lambda x: x["p95_ms"], default=None)
         opened["loop_lag"] = None if lag is None or not mean_s else {
             **{k: lag[k] for k in ("p95_ms", "max_ms", "share_over_100ms")},
             "high": lag["p95_ms"] / 1e3 >= 0.1 * mean_s,
@@ -2487,6 +2607,31 @@ def decoding_metric(knobs: dict, out: Path, rec: dict, summary: dict, refs: dict
             "live": live.section() if live is not None else None}
 
 
+def populations_gc(out: Path, n: int) -> list | None:
+    """Under Dragon, the gc thresholds the populations handed over at their end (handed_file): one list when all
+    have the same (they run the same code), else one list per population that handed them over, in order; None
+    when none did (a run interrupted, or whose populations failed, before their rows)."""
+    got = [tuple(t) for t in (handed(out, i, "proc").get("gc_thresholds") for i in range(n)) if t]
+    if not got:
+        return None
+    return list(got[0]) if len(set(got)) == 1 else [list(t) for t in got]
+
+
+def workers_placed(a, out: Path) -> int:
+    """The inner-loop workers placed (workers.gpu_per_worker): sim_pool's counter in this process; under Dragon
+    the count in the run folder's counter file (GPU_COUNTER_FILE, pool.on_gpu_file), which is then removed."""
+    if a.runtime == "local":
+        counter = importlib.import_module(MODULE)._GPU_COUNTER
+        return counter.value if counter is not None else 0
+    f = Path(out) / GPU_COUNTER_FILE
+    try:
+        return int(f.read_text() or "0")
+    except (OSError, ValueError):   # no worker took a number
+        return 0
+    finally:
+        f.unlink(missing_ok=True)
+
+
 def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, interrupted: bool, crashed: bool,
                  rc: int, loop_lag, device, threads, pin: dict | None = None, live: LiveLine | None = None) -> dict:
     """run_record.json and agents.jsonl by record.write, one part per population; then AUTONMI's verdict
@@ -2498,7 +2643,9 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
     and a copy of their setup files without their secrets (`model_service/`: copy_model_service). With
     workers.gpu_per_worker, the GPUs the inner-loop workers were placed on (`autonmi.inner_loop_gpus`). A run
     whose AUTONMI checks fail fails. When SIGTERM stopped a population before its rows, its model figures are
-    of every call up to then (Script.cut_short), which `speed.coverage.model_calls` says."""
+    of every call up to then (Script.cut_short), which `speed.coverage.model_calls` says. Under Dragon each
+    population's event-loop lag, peak memory and gc thresholds are those it handed over (handed_file), and the
+    workers placed are the counter file's (workers_placed)."""
     from autonmi.assemble import assemble
 
     parts, failed = [], []
@@ -2517,8 +2664,11 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
         rec["speed"]["coverage"]["model_calls"] = (
             "every call up to the signal, the unfinished campaigns' included: llm_service, counts.by_role's model "
             "counts and speed's model figures (not model_call_share)")
+    gc_populations = None if a.runtime == "local" else populations_gc(out, a.populations)   # before their files go
     for i in range(a.populations):   # summed into the record (part): not kept beside it
         sums_file(out / f"agents-p{i:03d}.jsonl", i).unlink(missing_ok=True)
+        for kind in ("proc", "live"):   # what a population in a process of its own handed over (under Dragon)
+            handed_file(out, i, kind).unlink(missing_ok=True)
     try:
         summary = assemble(out)
     except Exception as exc:   # an interrupted or broken run may lack what AUTONMI assembles
@@ -2528,7 +2678,8 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
                       "summary": "summary.json", "runtime": a.runtime, "populations": a.populations,
                       "workers_per_population": a.workers, "crashed": crashed, "versions": framework_versions(),
                       "framework_commit": pin, "asyncflow_running_shim": RUNNING_SHIM,
-                      "gc": {"automatic_full_collections": full_gc_auto(), "thresholds": list(gc.get_threshold())},
+                      "gc": {"automatic_full_collections": full_gc_auto(), "thresholds":
+                             list(gc.get_threshold()) if a.runtime == "local" else gc_populations},
                       "telemetry": telemetry_verdict(summary)}
     rec["counts"]["suspensions"] = sum(p["layer"]["suspensions"] or 0 for p in parts)
     rows, n = _rows(out), knobs["agents"]["count"]
@@ -2560,10 +2711,10 @@ def write_record(a, knobs: dict, out: Path, *, wall_s: float, t_run: float, inte
             except Exception as exc:   # a run refused or cut short before its servers' folder was there, or a file
                 # that cannot be read: the record is still written, and names no path
                 rec["llm_service"]["model_service"] = {"folder": None, "error": type(exc).__name__}
-    if knobs["workers"]["gpu_per_worker"]:   # the GPUs the inner-loop workers were placed on (sim_pool)
-        mod = importlib.import_module(MODULE)
-        rec["autonmi"]["inner_loop_gpus"] = {"gpus": list(mod._GPUS), "workers_placed":
-                                             mod._GPU_COUNTER.value if mod._GPU_COUNTER is not None else 0}
+    if knobs["workers"]["gpu_per_worker"]:   # the GPUs the inner-loop workers were placed on (sim_pool; under
+        # Dragon, sim.evaluate_placed)
+        rec["autonmi"]["inner_loop_gpus"] = {"gpus": list(importlib.import_module(MODULE)._GPUS),
+                                             "workers_placed": workers_placed(a, out)}
     if rec["status"] == "pass" and not ok:
         rec["status"] = "fail"
     tmp = out / "run_record.json.tmp"
@@ -2578,6 +2729,7 @@ def main(argv=None) -> int:
     if knobs["llm"]["mode"] == "openai" and not a.endpoints_file:
         raise SystemExit("--llm openai needs --endpoints-file: the model job's servers")
     a.populations, a.workers = layout(knobs, a.sim, a.populations, a.workers)
+    dragon_real_guard(a, knobs)   # the real inner loop under Dragon, before anything starts
     agents_live(knobs)   # refuses a cap that could leave agents waiting for good, before anything starts
     pin = autonmi_pin()   # before the run, so that its warning comes first
     n = knobs["agents"]["count"]
@@ -2597,10 +2749,15 @@ def main(argv=None) -> int:
         if not knobs["sim"]["keep_artifacts"]:   # one folder for all evaluations' work, removed at the end
             work_root = tempfile.mkdtemp(prefix="fusion_miniapp_autonmi_", dir=sim_work_root(knobs["sim"]))
     rc, interrupted, crashed, loop_lag, device = 1, False, False, None, None
-    live = LiveLine(local=a.runtime == "local")
+    live = LiveLine(local=a.runtime == "local", out=out)
     try:   # the campaign configures the OpenTelemetry export (CampaignConfig.telemetry's defaults)
+        if a.runtime == "dragon":   # the launch script signals this process, not Dragon's launcher (FUSION_RUNTIME);
+            pid_file = out / "head.pid"   # inside the try, so that a SIGTERM sent at once is an interrupted run
+            pid_file.with_name("head.pid.tmp").write_text(f"{os.getpid()}\n")
+            os.replace(pid_file.with_name("head.pid.tmp"), pid_file)
         device = probe(a)   # first: a broken torch or device stops the run before any campaign starts
-        importlib.import_module(MODULE)._GPUS[:] = inner_loop_gpus(knobs, device)   # sim_pool's (gpu_per_worker)
+        importlib.import_module(MODULE)._GPUS[:] = inner_loop_gpus(   # sim_pool's (gpu_per_worker); under Dragon
+            knobs, device, dragon=a.runtime == "dragon" and a.sim == "real")   # the head's CUDA_VISIBLE_DEVICES
         rc, interrupted, loop_lag = asyncio.run(run_until_signalled(a, knobs, out, work_root, live))
     except KeyboardInterrupt:   # SIGTERM or Ctrl-C before the event loop took the signals over
         interrupted = True

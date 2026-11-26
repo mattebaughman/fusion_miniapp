@@ -242,7 +242,8 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
     None, as the LangGraph and Academy layers call it, records none. Calls in one process run one at a
     time (a lock); parallelism comes from processes. evaluate sets no device: the launcher exposes the GPU,
     or (the AUTONMI layer with workers.gpu_per_worker) the worker's initializer gives each worker one through
-    CUDA_VISIBLE_DEVICES (pool.on_gpu), and the device rule picks it up.
+    CUDA_VISIBLE_DEVICES (pool.on_gpu; under Dragon the task itself, evaluate_placed), and the device rule
+    picks it up.
     """
     sim, watch = sim_section(knobs), monitor_section(monitor)
     if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):
@@ -287,6 +288,16 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
         if not sim["keep_artifacts"]:
             record["summary_path"] = ""                         # the work directory is gone
         return fil._json_value(record)                          # NaN -> None, numpy -> Python
+
+
+def evaluate_placed(*, gpu_counter: str, gpus: list[str], **kwargs) -> dict:
+    """evaluate in a worker that is placed from inside its task (the AUTONMI layer's workers.gpu_per_worker under
+    Dragon, whose pool workers start without an initializer of this package): this worker's GPU first
+    (pool.on_gpu_file, once per process, before evaluate's first call imports torch), then evaluate(**kwargs)."""
+    from .pool import on_gpu_file
+
+    on_gpu_file(gpu_counter, gpus)
+    return evaluate(**kwargs)
 
 
 @functools.lru_cache(maxsize=1)

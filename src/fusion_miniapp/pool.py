@@ -7,10 +7,12 @@ Subclasses `ProcessPoolExecutor` so RHAPSODY takes its cloudpickle process path
 - Bounded `shutdown(wait=True)`: waits briefly for clean exit, sends SIGTERM to leftovers, then
   SIGKILLs any workers still alive before the deadline so `session.close()` can never hang.
 
-`on_gpu` is a worker initializer that gives each worker one GPU (the AUTONMI layer's workers.gpu_per_worker).
+`on_gpu` is a worker initializer that gives each worker one GPU (the AUTONMI layer's workers.gpu_per_worker);
+`on_gpu_file` does the same from inside a task, for workers this package does not start (under Dragon).
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import threading
 import time
@@ -33,6 +35,27 @@ def on_gpu(counter, gpus: list[str], init=None) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = PLACED[1]
     if init is not None:
         init()
+
+
+def on_gpu_file(counter_file: str, gpus: list[str]) -> tuple[int, str]:
+    """on_gpu from inside a task, for pool workers that no initializer of this package starts (RHAPSODY's Dragon
+    workers, through sim.evaluate_placed): once per worker process, before it starts CUDA, this worker takes the
+    next number i from `counter_file` (a count in a file, under a lock, which every population's workers share)
+    and sees GPU gpus[i % len(gpus)] alone (CUDA_VISIBLE_DEVICES). Later calls in the process return the same."""
+    global PLACED
+    if PLACED is None:
+        fd = os.open(counter_file, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            i = int(os.read(fd, 32) or b"0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(i + 1).encode())
+        finally:
+            os.close(fd)
+        PLACED = (i, gpus[i % len(gpus)])
+        os.environ["CUDA_VISIBLE_DEVICES"] = PLACED[1]
+    return PLACED
 
 
 def _safe_set_result(fut: Future, value) -> None:

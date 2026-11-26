@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import copy
 import csv
+import gc
 import hashlib
 import importlib.util
 import json
@@ -33,6 +34,7 @@ import sys
 import time
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fake_vllm import FakeVllm
@@ -224,6 +226,7 @@ def test_the_autonmi_layer_gives_the_langgraph_layers_results(tmp_path, case):
                 assert (tmp_path / "autonmi" / "campaigns" / c / f).read_bytes() == \
                     (tmp_path / "langgraph" / "campaigns" / c / f).read_bytes(), (c, f)
     assert not list(tmp_path.glob("autonmi/agents-p*.jsonl"))   # merged into agents.jsonl, then removed
+    assert not (tmp_path / "autonmi" / "head.pid").exists()   # written under Dragon only
 
 
 def app_rows(out: Path) -> list[dict]:
@@ -459,8 +462,9 @@ sys.exit(L.main(sys.argv[1:]))
 def test_the_gpu_knob_places_the_real_inner_loops_workers_from_the_device_probe(tmp_path):
     """workers.gpu_per_worker on, --sim real on this machine's CPU (sim.device cpu), with the device probe made to
     report 3 FAKE GPUs: main() hands the probe's GPUs to sim_pool, both inner-loop workers are placed
-    (autonmi.inner_loop_gpus), and the results are the real_cpu reference's. No GPU is used: real placement on
-    GPUs is unverified until a run on GPU nodes."""
+    (autonmi.inner_loop_gpus), and the results are the real_cpu reference's. No GPU is used here. Real placement
+    on the local runtime was seen on one StellarAI node on 2026-11-25 (README); under Dragon it has not run on
+    GPUs."""
     knobs = {**REAL_KNOBS, "workers": {**REAL_KNOBS["workers"], "gpu_per_worker": True}}
     env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
     proc = subprocess.run([sys.executable, "-c", FAKE_GPUS_MAIN, *REAL_ARGS, "--knobs", knob_file(tmp_path, knobs),
@@ -470,6 +474,207 @@ def test_the_gpu_knob_places_the_real_inner_loops_workers_from_the_device_probe(
     rec = json.loads((tmp_path / "autonmi" / "run_record.json").read_text())
     assert rec["autonmi"]["inner_loop_gpus"] == {"gpus": ["0", "1", "2"], "workers_placed": 2}
     assert against_reference(tmp_path / "autonmi", rec, reference("real_cpu")) == []
+
+
+# Under Dragon (--runtime dragon). Dragon is not installed on a laptop and must not be: no test here reaches it.
+# The tests below fake the pieces around it: a population "in a process of its own" (the definition's head_pid set
+# to another process's), AUTONMI's Campaign replaced, and Dragon's backend failing to start.
+
+def dragon_args(tmp_path, *extra) -> list[str]:
+    return ["--preset", "smoke", "--agents", "2", "--populations", "1", "--runtime", "dragon",
+            "--out", str(tmp_path / "run"), *extra]
+
+
+def test_the_real_inner_loop_under_dragon_is_refused_unplaced_on_several_gpus(tmp_path, monkeypatch, capsys):
+    """--runtime dragon with --sim real and workers.gpu_per_worker off (the smoke preset's), with
+    CUDA_VISIBLE_DEVICES naming 2 GPUs: every inner-loop worker would see both, as when every campaign of such a run
+    failed on GPU errors on StellarAI (2026-11-25). main() refuses it (KnobError naming dragon) before anything
+    starts: no --out folder, no Dragon import. One GPU, or FUSION_DRAGON_REAL_UNPLACED=1, passes the guard; none
+    passes with a warning. With the knob on, one warning that the placement has not run on GPUs; with sim.device
+    cuda and no GPU named, refused unless overridden. The fixture and the local runtime pass without a word."""
+    from fusion_miniapp import layer_autonmi as L
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    monkeypatch.delenv("FUSION_DRAGON_REAL_UNPLACED", raising=False)
+    with pytest.raises(knob_files.KnobError, match="dragon"):
+        L.main(dragon_args(tmp_path, "--sim", "real"))
+    assert not (tmp_path / "run").exists()
+    a = L.parse(dragon_args(tmp_path, "--sim", "real"))
+    off = L.load_knobs(a)
+    on = {**off, "workers": {**off["workers"], "gpu_per_worker": True}}
+    capsys.readouterr()
+
+    def warned(knobs, **env) -> str:
+        for k, v in env.items():
+            if v is None:
+                monkeypatch.delenv(k, raising=False)
+            else:
+                monkeypatch.setenv(k, v)
+        L.dragon_real_guard(a, knobs)
+        return capsys.readouterr().err
+    assert warned(off, FUSION_DRAGON_REAL_UNPLACED="1") == ""
+    assert warned(off, FUSION_DRAGON_REAL_UNPLACED=None, CUDA_VISIBLE_DEVICES="3") == ""
+    assert "places no worker on a GPU" in warned(off, CUDA_VISIBLE_DEVICES=None)
+    err = warned(on, CUDA_VISIBLE_DEVICES="0,1")
+    assert err.count("warning") == 1 and "the 2 GPUs of CUDA_VISIBLE_DEVICES" in err and "has not run on GPUs" in err
+    assert "CUDA_VISIBLE_DEVICES names none, so no worker is placed" in warned(on, CUDA_VISIBLE_DEVICES=None)
+    cuda = {**on, "sim": {**on["sim"], "device": "cuda"}}   # as the StellarAI knob file has it
+    for mask in (None, ""):   # no GPU named: no worker would be placed, so refused; the override lets it run
+        with pytest.raises(knob_files.KnobError, match="CUDA_VISIBLE_DEVICES names no GPU"):
+            warned(cuda, CUDA_VISIBLE_DEVICES=mask)
+        assert "no worker is placed" in warned(cuda, FUSION_DRAGON_REAL_UNPLACED="1")
+        monkeypatch.delenv("FUSION_DRAGON_REAL_UNPLACED")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    for argv in (dragon_args(tmp_path, "--sim", "fixture"),
+                 dragon_args(tmp_path, "--sim", "real", "--runtime", "local")):
+        L.dragon_real_guard(L.parse(argv), off)
+    assert capsys.readouterr().err == ""
+
+
+def test_the_head_writes_its_pid_under_dragon_only(tmp_path):
+    """The launch script with FUSION_RUNTIME=dragon signals the layer's head process through <out>/head.pid, which
+    the layer writes under --runtime dragon only, once it holds --out. On a laptop the run then fails, since Dragon's
+    backend cannot start (Dragon is not installed): exit 1, a failed record, and head.pid names that process. A
+    local run writes none (test_the_autonmi_layer_gives_the_langgraph_layers_results)."""
+    p = subprocess.Popen([sys.executable, "-m", "fusion_miniapp.layer_autonmi",
+                          *dragon_args(tmp_path, "--sim", "fixture")],
+                         cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _, err = p.communicate(timeout=300)
+    assert p.returncode == 1, err[-3000:]
+    assert (tmp_path / "run" / "head.pid").read_text() == f"{p.pid}\n"
+    rec = json.loads((tmp_path / "run" / "run_record.json").read_text())
+    assert rec["status"] == "fail" and rec["autonmi"]["crashed"] and rec["autonmi"]["runtime"] == "dragon"
+
+
+SIGTERM_AT_HEAD_PID = """import os, runpy, signal
+replace = os.replace
+def published(src, dst):   # head.pid in place: the launch script may signal this process from now on
+    replace(src, dst)
+    if os.path.basename(dst) == "head.pid":
+        assert int(open(dst).read()) == os.getpid()
+        os.kill(os.getpid(), signal.SIGTERM)
+os.replace = published
+runpy.run_module("fusion_miniapp.layer_autonmi", run_name="__main__")
+"""
+
+
+def test_a_sigterm_as_soon_as_head_pid_is_there_gives_an_interrupted_record(tmp_path):
+    """The launch script under Dragon sends a SIGTERM it holds as soon as head.pid appears. The layer (run as the
+    script, its handlers set) sends itself SIGTERM right after it has put head.pid in place: the run ends
+    interrupted, with its record, and exits 143. No laptop test reaches Dragon: the run would fail at Dragon's
+    backend later."""
+    p = subprocess.run([sys.executable, "-c", SIGTERM_AT_HEAD_PID, *dragon_args(tmp_path, "--sim", "fixture")],
+                       cwd=tmp_path, capture_output=True, text=True, timeout=300)
+    assert p.returncode == 143, p.stderr[-3000:]
+    rec = json.loads((tmp_path / "run" / "run_record.json").read_text())
+    assert rec["status"] == "interrupted" and rec["autonmi"]["runtime"] == "dragon"
+
+
+def test_under_dragon_the_gpu_list_reaches_every_inner_loop_task(tmp_path, monkeypatch):
+    """workers.gpu_per_worker with the real inner loop under Dragon: RHAPSODY starts the workers, so the definition
+    carries the head's GPU list and a counter file in the run folder (miniapp_workflow; AUTONMI's Campaign is a
+    stand-in here that stops there), each population's evaluate task tool runs sim.evaluate_placed, and every
+    task's arguments carry both. Without the list (locally, or the fixture) the tool runs evaluate, as before."""
+    from fusion_miniapp import layer_autonmi as L, sim
+
+    class Stop(Exception):
+        pass
+    seen = {}
+
+    def campaign(flow, definition, config, app=None):
+        seen.update(definition=definition, config=config)
+        raise Stop
+    monkeypatch.setattr(L, "Campaign", campaign)
+    monkeypatch.setattr(L, "_GPUS", ["4", "5"])
+    a = L.parse(dragon_args(tmp_path, "--sim", "real"))
+    knobs = L.load_knobs(a)
+    a.populations, a.workers = 1, 1
+    with pytest.raises(Stop):
+        asyncio.run(L.miniapp_workflow(a, knobs, None, tmp_path, None, None, L.LiveLine(local=False, out=tmp_path)))
+    definition = seen["definition"]
+    assert definition.placement == {"gpu_counter": str(tmp_path / L.GPU_COUNTER_FILE), "gpus": ["4", "5"]}
+    assert seen["config"].runtime == "dragon" and seen["config"].population.executor is None
+    ids = [f"a0/{n}" for n in L.agent_names(knobs)]
+    placed = L.Script(definition, SimpleNamespace(index=0, agent_ids=ids, state={}, store=None))
+    assert placed.evaluate.fn is sim.evaluate_placed
+    task = placed.evaluate.prepare("a0/monitor0", "c0", {"params": {}, "candidate_idx": 0, "generation": 0, "seed": 0})
+    counter = str(tmp_path / L.GPU_COUNTER_FILE)
+    assert (task["gpu_counter"], task["gpus"], task["agent_id"]) == (counter, ["4", "5"], "a0")
+    for which in ("real", "fixture"):
+        pop = SimpleNamespace(index=1, agent_ids=ids, state={}, store=None)
+        plain = L.Script(L.Fusion(knobs, which, tmp_path), pop)
+        assert plain.evaluate.fn is (sim.evaluate if which == "real" else sim.evaluate_fixture)
+        assert "gpus" not in plain.evaluate.prepare("a0/monitor0", "c0", {"params": {}, "candidate_idx": 0,
+                                                                           "generation": 0, "seed": 0})
+
+
+def test_a_population_in_a_process_of_its_own_hands_its_figures_to_the_head(tmp_path):
+    """Under Dragon each population runs in a process of its own (FAKED here: the definition's head_pid is another
+    process's, and the population is built and ended by hand, with no agent run). Its build starts its event loop's
+    lag probe and writes its live counts once a second; its rows write its lag, peak memory and gc thresholds, and
+    its last live counts (layer_autonmi.handed_file). The head reads them: part() gives that lag and memory,
+    write_record puts them in the record's speed.loop_lag and peak_rss_mb, and the populations' thresholds in
+    autonmi.gc, then removes the files with the call sums; the workers placed come from the counter file, which goes
+    too. LiveLine(local=False) sums the populations' live files (hand-written here for two). A definition in the
+    head's own process (locally) writes none of these files."""
+    from fusion_miniapp import layer_autonmi as L
+
+    out = tmp_path / "run"
+    out.mkdir()
+    a = L.parse(dragon_args(tmp_path, "--sim", "fixture"))
+    knobs = L.load_knobs(a)
+    a.populations, a.workers = 1, 1
+    ids = [f"a0/{n}" for n in L.agent_names(knobs)]
+    thresholds = gc.get_threshold()   # build sets this process's (bound_full_collections)
+
+    async def population(definition, pop):
+        definition.build(pop)
+        definition.live["started"] += 5   # as if its 5 agents had started
+        await asyncio.sleep(1.3)
+        running = L.handed(out, 0, "live")
+        definition.live["ended"] += 5
+        definition.rows(pop)
+        return running
+    try:
+        local = L.Fusion(knobs, "fixture", tmp_path / "local")
+        (tmp_path / "local").mkdir()
+        asyncio.run(population(local, SimpleNamespace(index=0, agent_ids=ids, state={}, store=None)))
+        assert sorted(p.name for p in (tmp_path / "local").iterdir()) == ["agents-p000.jsonl"]
+        own = L.Fusion(knobs, "fixture", out)
+        own.head_pid = -1
+        running = asyncio.run(population(own, SimpleNamespace(index=0, agent_ids=ids, state={}, store=None)))
+        populations_thresholds = list(gc.get_threshold())
+    finally:
+        gc.set_threshold(*thresholds)
+    assert (running["started"], running["ended"]) == (5, 0)
+    assert (L.handed(out, 0, "live")["started"], L.handed(out, 0, "live")["ended"]) == (5, 5)
+    proc = L.handed(out, 0, "proc")
+    assert proc["loop_lag"]["samples"] >= 5 and proc["peak_rss_mb"] > 0
+    assert proc["gc_thresholds"] == populations_thresholds and populations_thresholds[2] == L.FULL_GC_THRESHOLD
+    p = L.part(a, knobs, 0, out / "agents-p000.jsonl", loop_lag=None, device={}, threads=None)
+    assert (p["loop_lag"], p["peak_rss_mb"]) == (proc["loop_lag"], proc["peak_rss_mb"])
+    (out / L.GPU_COUNTER_FILE).write_text("7")
+    knobs = {**knobs, "workers": {**knobs["workers"], "gpu_per_worker": True}}
+    rec = L.write_record(a, knobs, out, wall_s=1.0, t_run=time.time(), interrupted=False, crashed=False, rc=1,
+                         loop_lag=None, device={}, threads=None)
+    assert rec["speed"]["loop_lag"] == [proc["loop_lag"]]
+    assert rec["autonmi"]["gc"]["thresholds"] == populations_thresholds
+    assert rec["peak_rss_mb"]["agent_process_max"] == rec["peak_rss_mb"]["agent_processes_sum"] == proc["peak_rss_mb"]
+    assert rec["autonmi"]["inner_loop_gpus"]["workers_placed"] == 7
+    assert sorted(p.name for p in out.iterdir()) == ["agents.jsonl", "run_record.json"]
+    assert L.populations_gc(out, 2) is None
+    L.handed_file(out, 0, "proc").write_text(json.dumps({"gc_thresholds": [700, 10, 10]}))
+    L.handed_file(out, 1, "proc").write_text(json.dumps({"gc_thresholds": [700, 10, 10]}))
+    assert L.populations_gc(out, 2) == [700, 10, 10]
+    L.handed_file(out, 1, "proc").write_text(json.dumps({"gc_thresholds": [2000, 10, 10]}))
+    assert L.populations_gc(out, 2) == [[700, 10, 10], [2000, 10, 10]]
+    line = L.LiveLine(local=False, out=out)
+    assert line.read()[1:] == [None] * 5   # no population has written yet
+    L.handed_file(out, 0, "live").write_text(json.dumps({"started": 5, "ended": 5, "open": 0, "queued": 0}))
+    L.handed_file(out, 1, "live").write_text(json.dumps({"started": 5, "ended": 1, "open": 3, "queued": 2}))
+    assert line.read()[1:] == [4, 3, 2, None, 6]   # live, open, queued, decoding (no sampler), done
+    L.handed_file(out, 1, "live").write_text(json.dumps({"started": 5, "ended": 1, "open": None, "queued": None}))
+    assert line.read()[1:] == [4, None, None, None, 6]
 
 
 def run_both_on_a_model_server(tmp_path, server: FakeVllm, code: int = 0):

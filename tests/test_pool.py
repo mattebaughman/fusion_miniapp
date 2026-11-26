@@ -199,7 +199,8 @@ def test_each_inner_loop_worker_sees_gpu_i_mod_the_gpu_count_across_populations(
     """workers.gpu_per_worker on the AUTONMI layer, with a faked count of 3 GPUs (FIXTURE: no GPU is used here):
     two populations' pools (layer_autonmi.sim_pool, 2 workers each) take their workers' numbers from one counter, so
     the 4 workers are 0 .. 3, the second pool's after the first's, and worker i sees GPU i mod 3 alone
-    (CUDA_VISIBLE_DEVICES). Real placement on GPUs is unverified until a run on GPU nodes."""
+    (CUDA_VISIBLE_DEVICES). Real placement on the local runtime was seen on one StellarAI node on 2026-11-25
+    (README); under Dragon it has not run on GPUs."""
     layer = pytest.importorskip("fusion_miniapp.layer_autonmi")
     monkeypatch.setattr(layer, "_GPUS", ["0", "1", "2"])
     monkeypatch.setattr(layer, "_GPU_COUNTER", None)
@@ -217,10 +218,57 @@ def test_each_inner_loop_worker_sees_gpu_i_mod_the_gpu_count_across_populations(
     assert layer._GPU_COUNTER.value == 4
 
 
+def _placed_by_file(barrier, counter_file: str, gpus: list) -> tuple:
+    """A task as a worker under Dragon starts sim.evaluate_placed: once as many workers run it as the barrier's
+    parties, this worker places itself from inside the task (pool.on_gpu_file), and a second call changes nothing;
+    its number and GPU (pool.PLACED) and the GPUs it sees."""
+    from fusion_miniapp import pool
+
+    barrier.wait(timeout=120)
+    first = pool.on_gpu_file(counter_file, gpus)
+    assert pool.on_gpu_file(counter_file, gpus) == first == pool.PLACED   # once per process
+    return first, os.environ.get("CUDA_VISIBLE_DEVICES")
+
+
+def test_each_worker_placed_from_its_task_sees_gpu_i_mod_the_gpu_count(tmp_path):
+    """workers.gpu_per_worker under Dragon, whose pool workers start without this package's initializer: two
+    populations' pools (plain spawned pools of 2 workers, one after the other; FIXTURE: a faked list of 3 GPUs, no
+    GPU used) place their workers from inside a task on one counter file (pool.on_gpu_file), so the 4 workers are
+    0 .. 3, the second pool's after the first's, worker i sees GPU i mod 3 alone, and the file holds the count. No
+    laptop test reaches Dragon or a GPU: this placement has not run under Dragon."""
+    counter, gpus, got = str(tmp_path / "inner_loop_gpus.count"), ["0", "1", "2"], []
+    spawn = mp.get_context("spawn")
+    with spawn.Manager() as manager:
+        for _ in range(2):   # each pool's 2 workers busy at once, so both start, before the next pool's
+            barrier = manager.Barrier(2)
+            with ProcessPoolExecutor(2, mp_context=spawn) as p:
+                got.append(sorted(f.result(timeout=180) for f in [p.submit(_placed_by_file, barrier, counter, gpus)
+                                                                  for _ in range(2)]))
+    assert got == [[((0, "0"), "0"), ((1, "1"), "1")], [((2, "2"), "2"), ((3, "0"), "0")]]
+    assert (tmp_path / "inner_loop_gpus.count").read_text() == "4"
+
+
+def test_evaluate_placed_places_its_worker_before_it_evaluates(tmp_path, monkeypatch):
+    """sim.evaluate_placed (the task under Dragon with workers.gpu_per_worker): the worker's number and GPU from the
+    counter file first (here the fifth worker, of a FIXTURE list of 3 GPUs), then evaluate with the other arguments,
+    which sees that GPU alone (evaluate is a stand-in here: no inner loop runs)."""
+    from fusion_miniapp import pool, sim
+
+    monkeypatch.setattr(pool, "PLACED", None)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")   # put back after the test
+    monkeypatch.setattr(sim, "evaluate", lambda **kw: {**kw, "seen": os.environ["CUDA_VISIBLE_DEVICES"]})
+    counter = tmp_path / "inner_loop_gpus.count"
+    counter.write_text("4")
+    got = sim.evaluate_placed(gpu_counter=str(counter), gpus=["0", "1", "2"], params={"a": 1.0}, seed=3)
+    assert got == {"params": {"a": 1.0}, "seed": 3, "seen": "1"}
+    assert pool.PLACED == (4, "1") and counter.read_text() == "5"
+
+
 def test_no_worker_is_placed_at_default_knobs_or_without_a_gpu(monkeypatch):
-    """workers.gpu_per_worker off (the default), or on where the device probe saw no GPU (this laptop, the fixture,
-    Dragon): no GPU list, so sim_pool's workers get run.py's initializer alone and set no device. On, with GPUs:
-    CUDA_VISIBLE_DEVICES's entries where it is set, else 0 .. n - 1."""
+    """workers.gpu_per_worker off (the default), or on where the device probe saw no GPU (this laptop, the fixture):
+    no GPU list, so sim_pool's workers get run.py's initializer alone and set no device. On, with GPUs:
+    CUDA_VISIBLE_DEVICES's entries where it is set, else 0 .. n - 1. Under Dragon (no probe there): the head's
+    CUDA_VISIBLE_DEVICES entries, none when it is unset."""
     layer = pytest.importorskip("fusion_miniapp.layer_autonmi")
     from fusion_miniapp import knobs as knob_files, run
 
@@ -231,8 +279,11 @@ def test_no_worker_is_placed_at_default_knobs_or_without_a_gpu(monkeypatch):
     assert layer.inner_loop_gpus(off, {"gpus": ["B200"] * 8}) == []
     assert layer.inner_loop_gpus(on, {"gpus": []}) == layer.inner_loop_gpus(on, None) == []
     assert layer.inner_loop_gpus(on, {"gpus": ["B200"] * 3}) == ["0", "1", "2"]
+    assert layer.inner_loop_gpus(on, None, dragon=True) == []
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
     assert layer.inner_loop_gpus(on, {"gpus": ["B200"] * 4}) == ["4", "5", "6", "7"]
+    assert layer.inner_loop_gpus(on, None, dragon=True) == ["4", "5", "6", "7"]
+    assert layer.inner_loop_gpus(off, None, dragon=True) == []
     monkeypatch.setattr(layer, "_GPUS", [])
     monkeypatch.setattr(layer, "_POOLS", [])
     p = layer.sim_pool(1)

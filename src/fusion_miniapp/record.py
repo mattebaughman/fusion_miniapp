@@ -251,6 +251,13 @@ class LoopLag:
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        return self.summary()
+
+    def summary(self) -> dict:
+        """stop()'s result without awaiting, for code that cannot await (a population's rows under Dragon): the
+        sampling ends, and the samples so far are summarised."""
+        if self._task is not None:
+            self._task.cancel()
         a = np.asarray(self.samples)
         if not a.size:
             return {"samples": 0}
