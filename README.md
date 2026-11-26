@@ -389,6 +389,25 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
 - **CPython's automatic full collections are off while agents run** (`layer_autonmi.bound_full_collections`;
   `FUSION_GC_FULL_AUTO=1` keeps them; the record's `autonmi.gc`). Each full collection scans every live object:
   at 10,000 campaigns four of them stalled the event loop for up to 6.7 s each (measured).
+- **Dragon inference is not fully implemented.** What exists is the campaigns under the Dragon runtime
+  (`--runtime dragon`), with the model either the mini-app's stub, inside the populations' processes, or vLLM
+  servers that run outside Dragon and are reached over HTTP. Serving the model through Dragon (RHAPSODY's Dragon
+  inference service) is not implemented in this package.
+  - **Tested on StellarAI and passed** (one node with 8 GPUs, Dragon's single-node mode, started by hand,
+    2026-11-25): the campaigns under Dragon with the fixture inner loop, against the stub and against real vLLM
+    servers on the same node, up to 2,000 campaigns (10,000 hosted agents) in one launch.
+  - **Tested on StellarAI and failed** (the same node and day): the campaigns under Dragon with the real inner
+    loop on the GPUs, beside the servers. Its inner-loop workers were not placed on GPUs, which explains some of
+    its errors and not all.
+  - **Tested on a laptop only** (with stand-ins for Dragon, the GPUs and Slurm; written after those runs): the
+    placement of the inner-loop workers on GPUs under Dragon, the populations' figures in the record, the launch
+    script's `FUSION_RUNTIME=dragon`, and stopping a Dragon run by a signal.
+  - **Not tested anywhere:** a real Dragon run through the launch script, by `bash` or by `sbatch`; the
+    generations mode against a real model under Dragon; the scale run (20,000 campaigns) under Dragon.
+  - **Not implemented:** Dragon on more than one node (a run uses one node: AUTONMI does not place populations on
+    nodes yet); the model served through Dragon. The mini-app's calls rely on the reply cap, the Generator's JSON
+    schema, the thinking switch, the servers' token counts and their `/metrics`; a model served through Dragon
+    would have to carry these, and that has not been built or tried here.
 - **Under Dragon** (`--runtime dragon`) each population is a Dragon process, its inner loops run on RHAPSODY's
   native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not place populations on nodes
   yet. Not run by this package's tests. On the machine (2026-11-25: one 8 x B200 StellarAI node, Dragon's
@@ -1287,8 +1306,7 @@ and laptop timings, not performance claims for a machine. Every number below is 
   launches of 800 campaigns (in "What a run writes").
 - **The StellarAI run path on one 8 x B200 node, 2026-11-25** (dev `8c1450f`, vLLM 0.27.1, AUTONMI at `e20861a`;
   launches with `bash` as `srun` steps, servers from a stand-in for `model.sh` and reused; the asynchronous mode,
-  32 evaluations per campaign; one run per configuration; the rows, probe, load-ladder and A/B files and every
-  caveat in `results/stellarai_2026-11-25/`):
+  32 evaluations per campaign; one run per configuration; the runs' records are not in this repository):
   - the wiring check (`--agents 100 --sim fixture`, on 4 servers): pass in 96 s; the real inner loop under MPS
     with the 8 servers on the same GPUs (`--agents 300`): pass in 176 s, 9,600 evaluations on `cuda`;
   - one local launch of 2,000 campaigns (10,000 agents) was bound by its one process and was stopped after 6
@@ -1342,6 +1360,8 @@ FlowGentic's MCP tool route. The 2026-11-19 ladder in
   while `workers.gpu_per_worker` was not applied there; the placement from inside the task and the launch script's
   `FUSION_RUNTIME=dragon` are in, not run on the machine: see "The next checks under Dragon"); populations on
   several nodes; servers on nodes of their own.
+- **Dragon inference.** Not fully implemented: the campaigns run under the Dragon runtime, and the model is not
+  served through Dragon. What has and has not been tested is in "The agent layers", AUTONMI.
 - **Dragon and RaDEX from `run.py`.** The AUTONMI layer runs under Dragon with RaDEX through its own entry point;
   the other two layers take them only when passed in by hand (`run.Services.open(backend=, store=, model=)`,
   `layer_langgraph.run_agents(store=, replicas=)`).
