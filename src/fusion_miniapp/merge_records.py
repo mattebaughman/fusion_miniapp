@@ -210,7 +210,7 @@ def merge(folders, out):
     samples = {}
     for r in records:
         if r["knobs"].get("record", {}).get("extras"):
-            for role, replies in r["llm_service"].get("unusable_samples", {}).items():
+            for role, replies in (r["llm_service"].get("unusable_samples") or {}).items():
                 remaining = 5 - len(samples.get(role, []))
                 if replies and remaining:
                     samples.setdefault(role, []).extend(text[:200] for text in replies[:remaining])

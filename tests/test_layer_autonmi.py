@@ -1117,7 +1117,8 @@ def test_a_slice_is_its_block_of_the_campaigns_with_its_share_of_the_workers(tmp
     a.populations, a.workers = L.layout(L.load_knobs(a), a.sim, a.populations, a.workers, launches=3)
     assert L.gpu_offset(a) == 8
     k12 = L.load_knobs(L.parse([*opts, "--slice", "5/12"]))   # 10 // 12 = 0 workers for this launch
-    with pytest.raises(knob_files.KnobError, match="share of workers.sim_workers / 12 is 0"):
+    with pytest.raises(knob_files.KnobError, match="populations each need an inner-loop worker, but this launch's "
+                       "share of workers.sim_workers / 12 is 0"):
         L.layout(k12, "real", 2, None, launches=12)
     assert L.layout(k12, "fixture", 2, None, launches=12) == (1, 1)   # the fixture's threads: at least one
     for bad in ("1", "x/2", "1/0", "2/2", "-1/2", "0/2/3", "/2"):
@@ -1140,6 +1141,49 @@ def test_a_slice_runs_its_campaigns_and_the_check_refuses_a_count_it_does_not_di
     p = subprocess.run([sys.executable, str(probe), *args, "--slice", "0/3"], cwd=tmp_path, capture_output=True,
                        text=True, timeout=60)
     assert p.returncode == 1 and "probe_model: --slice 0/3: 3 launches do not divide the 8 campaigns" in p.stderr
+
+
+@pytest.mark.parametrize("extra,threads", [(["--slice", "4/8", "--workers", "8"], "1"), (["--slice", "4/8"], "6"),
+                                           (["--workers", "8"], "6"), ([], "6")])
+def test_the_automatic_threads_divide_the_cpus_by_every_launchs_workers(tmp_path, monkeypatch, extra, threads):
+    """sim.threads_per_worker auto, 96 CPUs (faked), workers.sim_workers 16, one population of 80 campaigns, stopped
+    at the device probe (CPU only, nothing runs): --slice 4/8 with --workers 8 gives 8 launches of 8 workers, 64 on
+    the node, so 96 // 64 = 1 thread each in every thread variable (it was 96 // 16 = 6). Unchanged: --slice without
+    --workers (16 workers together), and one launch with or without --workers (workers.sim_workers): 6."""
+    from fusion_miniapp import layer_autonmi as L
+
+    names = (*L.run.THREAD_VARS, "FUSION_MINIAPP_THREADS")
+    for name in names:
+        monkeypatch.setenv(name, "3")   # main sets them for the process: put back after the test
+    monkeypatch.setattr(L.run, "cpus", lambda: 96)
+
+    def first_probe(args):
+        raise SystemExit(tuple(os.environ[name] for name in names))
+
+    monkeypatch.setattr(L, "probe", first_probe)
+    cfg = knob_file(tmp_path, {"workers": {"sim_workers": 16}})
+    with pytest.raises(SystemExit) as stopped:
+        L.main(["--preset", "smoke", "--knobs", cfg, "--sim", "real", "--agents", "80", "--populations", "1", *extra,
+                "--out", str(tmp_path / "run")])
+    assert stopped.value.code == (threads,) * len(names)
+
+
+def test_visible_gpus_reads_the_mask_as_cuda_does(monkeypatch):
+    """CUDA_VISIBLE_DEVICES as CUDA reads it: the entries up to the first it would not take (-1, Slurm's
+    NoDevFiles, an empty entry), each once in order; a GPU- or MIG- UUID is an entry. The ordinary masks are as
+    before. Under Dragon this list is the placement's and the guard's (inner_loop_gpus, dragon_real_guard)."""
+    from fusion_miniapp import layer_autonmi as L
+
+    knobs = {"workers": {"gpu_per_worker": True}}
+    for mask, gpus in [("0,1,2,3,4,5,6,7", [str(k) for k in range(8)]), (" 0, 1 ", ["0", "1"]), ("3", ["3"]),
+                       ("", []), ("-1", []), ("NoDevFiles", []), ("0,-1,1", ["0"]), ("2,NoDevFiles,3", ["2"]),
+                       ("1,1", ["1"]), ("0,1,0,2", ["0", "1", "2"]), ("0,,1", ["0"]), ("0,1,", ["0", "1"]),
+                       ("GPU-a1,GPU-b2", ["GPU-a1", "GPU-b2"]), ("MIG-c3", ["MIG-c3"])]:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
+        assert L.visible_gpus() == gpus, mask
+        assert L.inner_loop_gpus(knobs, None, dragon=True) == gpus, mask
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    assert L.visible_gpus() == []
 
 
 def test_a_slice_numbers_its_gpu_workers_after_the_launches_before_it(tmp_path, monkeypatch):

@@ -37,10 +37,11 @@
 # started and waited for (FUSION_MODEL_WAIT, 3600 s); fleet/endpoints written from the model jobs' own, in order,
 # and rewritten whenever one changes (a requeued job; also on a reused fleet); fleet/setup-files, the files a run
 # with record.extras copies into its record (and nothing else from these folders); launch/probe_model.py, whose
-# failure stops the launch; the run, started directly so its PID is the Python process's. Then it stops the run
-# only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit (--signal=B:TERM@900; the run
-# needs about a minute to write its interrupted record) or once the node's available memory is below
-# FUSION_MEM_FLOOR_GIB (100). At the end, whatever happened: when this launch started the servers, the stop file in
+# failure stops the launch, run in the background and waited for, so that a signal during the check ends the launch
+# at once (exit 143; configured and checked on a laptop only); the run, started directly so its PID is the Python
+# process's. Then it stops the run only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit
+# (--signal=B:TERM@900; the run needs about a minute to write its interrupted record) or once the node's available
+# memory is below FUSION_MEM_FLOOR_GIB (100). At the end, whatever happened: when this launch started the servers, the stop file in
 # each model job's folder, and a model job not yet serving (not running, without its endpoints, or with no state
 # from squeue: it would remove its stop file when it starts) cancelled; with FUSION_KEEP_SERVERS=1 (and FUSION_MODEL_NODES) servers that passed
 # the check are left running instead, for a later launch's FUSION_MODEL_FLEET, until FUSION_MODEL_TIME or
@@ -57,22 +58,31 @@
 # FUSION_RUNTIME=dragon (default local) runs the layer under Dragon: FUSION_ENV must then be a venv with Dragon and
 # RaDEX's client (README, "What --runtime dragon needs"). The run is `python -m dragon -s
 # <checkout>/src/fusion_miniapp/layer_autonmi.py <the same arguments> --runtime dragon`, which the check gets too;
-# DRAGON_DEFAULT_SEG_SZ is exported, 64 GiB unless set; the run folder must be new; the signals go to the PID the
-# layer writes to <run folder>/run/head.pid, not to Dragon's launcher (one that comes before that file is held until
-# it appears); the exit status is the run record's (pass 0, interrupted 143, else 1); and once Dragon has started,
-# dragon-cleanup runs at the end, before the MPS daemon quits. Configured and checked on a laptop only
-# (a dry run, and a fake Dragon launcher): no launch through this script has run under Dragon on the machine.
+# DRAGON_DEFAULT_SEG_SZ is exported, 64 GiB unless set; <run folder>/run is made with one mkdir before anything
+# starts, so a second launch on the same run folder, even one started at the same moment, is refused (exit 2), and
+# it is removed at the very end when it is empty and Dragon never started; the signals go to the PID the layer
+# writes to <run folder>/run/head.pid, not to Dragon's launcher (one that comes from just before the launcher starts
+# until that file appears is held, and sent once it has); the wait for that file is at most 300 s, and at most 10 s
+# more once a signal is held; with no PID by then and the launcher still running, the launcher gets SIGTERM, then
+# SIGKILL 3 s later, and the script exits 143 if a signal was held, else 1; the exit status is the run record's
+# (pass 0, interrupted 143, else 1); and once Dragon has started, dragon-cleanup runs at the end, before the MPS
+# daemon quits. Configured and checked on a laptop only (a dry run, and a fake Dragon launcher): no launch through
+# this script has run under Dragon on the machine.
 #
 # FUSION_LAUNCHES=k (default 1, which changes nothing) runs k local launches side by side, as the runs by hand did
-# on 2026-11-25: launch i gets --slice i/k (the i-th block of the campaigns, a k-th of workers.sim_workers), block i
-# of fleet/endpoints in <run folder>/launch-<i>/endpoints (k must divide the servers; rewritten when fleet/endpoints
-# changes) and --out <run folder>/run-<i>. The check runs once, on the whole fleet (with --slice 0/k, so a k that
-# does not divide the campaigns stops the launch there), and one MPS daemon serves every launch. A signal goes to
-# each launch still running. Once all have ended, python -m fusion_miniapp.merge_records writes one record of them
-# to <run folder>/run; a merge that fails prints a warning and does not change the exit status (0 when every launch
-# passed, else a failure's status before 143). Refused with FUSION_RUNTIME=dragon, and when <run folder>/run or
-# run-<i> exists. Configured and checked on a laptop only (a dry run, and launches against fake servers): not run on
-# the machine.
+# on 2026-11-25: launch i gets --slice i/k (the i-th block of the campaigns, a k-th of workers.sim_workers; with
+# --workers W among the arguments, the automatic threads per worker are the CPUs over k x populations x W), block i
+# of fleet/endpoints in <run folder>/launch-<i>/endpoints (k must divide the servers, and a server listed twice,
+# trailing slashes aside, stops the launch; rewritten when fleet/endpoints changes, except to such a list, which
+# leaves the blocks as they were) and --out <run folder>/run-<i>. The check runs once, on the whole fleet (with
+# --slice 0/k, so a k that does not divide the campaigns stops the launch there), and one MPS daemon serves every
+# launch. A signal goes to each launch still running. Once all have ended, python -m fusion_miniapp.merge_records
+# writes one record of them to <run folder>/run; a merge that fails prints a warning and does not change the exit
+# status (0 when every launch passed, else a failure's status before 143). Refused (exit 2) with
+# FUSION_RUNTIME=dragon, with --runtime dragon (or --runtime=dragon) or --slice among the arguments, and when <run
+# folder>/run, run-<i> or launch-<i> exists; <run folder>/run is made as under Dragon, and removed at the very end
+# when it is empty and the launches did not get to the merge. Configured and checked on a laptop only (a dry run,
+# and launches against fake servers): not run on the machine.
 #SBATCH --job-name=fusion-autonmi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -153,10 +163,15 @@ setup_list() {   # the files a run with record.extras copies (layer_autonmi.SETU
 }
 
 split_endpoints() {   # FUSION_LAUNCHES: block i of fleet/endpoints, in order, into launch-<i>/endpoints (replaced only when changed)
-	local i n tmp
+	local i n tmp twice
 	n=$(grep -c '[^[:space:]]' "$fleet/endpoints" 2> /dev/null) || n=0
 	if (( n == 0 || n % launches )); then
 		say "FUSION_LAUNCHES=$launches must divide the $n servers of $fleet/endpoints" >&2
+		return 1
+	fi
+	twice=$(grep '[^[:space:]]' "$fleet/endpoints" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s:/*$::' | sort | uniq -d)
+	if [[ -n $twice ]]; then   # one server in two launches; the blocks stay as they were
+		say "$fleet/endpoints names a server more than once (trailing slashes aside): $(echo $twice)" >&2
 		return 1
 	fi
 	for (( i = 0; i < launches; i++ )); do
@@ -189,6 +204,7 @@ print({"pass": 0, "interrupted": 143}.get(status, 1))' "$1" 2> /dev/null || echo
 }
 
 on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to the run's PID (or each launch's), once; before it starts, the launch ends
+	if [[ $checking == starting ]]; then held=1; return 0; fi   # the check is starting: held, then this launch ends
 	if [[ -n $starting ]]; then   # under Dragon, before the head has written its PID, or while the launches start: held, then sent
 		held=1
 		say "signal: held until $starting"
@@ -211,6 +227,9 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 	set +e
 	if [[ $rc == 0 && -z $finished ]]; then rc=1; fi   # ended early (bash 3.2 gives an unset variable's exit 0)
 	trap - TERM INT
+	if [[ $checking =~ ^[0-9]+$ ]]; then   # the check, when a signal ended the launch during it (it writes nothing)
+		kill -KILL "$checking" 2>/dev/null; wait "$checking" 2>/dev/null
+	fi
 	for id in $refresh_pid $guard_pid; do kill "$id" 2>/dev/null; wait "$id" 2>/dev/null; done   # no "Terminated" line
 	if (( started && ! keep )); then
 		k=0 cancel=
@@ -249,6 +268,9 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 		else say "warning: still on the GPUs: $mine" >&2; fi
 	fi
 	x rm -rf "$node_tmp"
+	if [[ -n $reserved && -z $launcher && -z $finished ]]; then   # this launch's run/, empty when no Dragon launcher
+		rmdir "$reserved" 2>/dev/null                             # started and no merge ran: released last
+	fi
 	say "ended with status $rc"
 	exit "$rc"
 }
@@ -298,7 +320,7 @@ main() {
 	: "${FUSION_SCRATCH:?set FUSION_SCRATCH to your GPFS scratch directory}"
 	dry=${FUSION_DRY_RUN:-0} nodes=${FUSION_MODEL_NODES:-0} reuse=${FUSION_MODEL_FLEET:-} runtime=${FUSION_RUNTIME:-local}
 	started=0 keep=0 mps=0 jobs_n=0 model_pid= model_jobs= pid= signalled= refresh_pid= guard_pid= finished= silent=()
-	launcher= starting= held= launches=${FUSION_LAUNCHES:-1}
+	launcher= starting= held= checking= reserved= launches=${FUSION_LAUNCHES:-1}
 	local root name run_dir k id rc probe args run
 	root=$(cd "$FUSION_MINIAPP_DIR" && pwd -P)
 	job=${SLURM_JOB_ID:-dry} name=${FUSION_RUN_NAME:-${SLURM_JOB_NAME:-fusion-autonmi}}
@@ -322,6 +344,20 @@ main() {
 		say "FUSION_LAUNCHES=$launches with FUSION_RUNTIME=dragon: one Dragon runtime per node and user; give one or the other" >&2
 		return 2
 	fi
+	if (( launches > 1 )); then   # the script's own arguments: its launches run locally, each with the --slice it gives
+		local arg before=
+		for arg in "$@"; do
+			if [[ $arg == --runtime=dragon || ( $before == --runtime && $arg == dragon ) ]]; then
+				say "FUSION_LAUNCHES=$launches with --runtime dragon: one Dragon runtime per node and user; give one or the other" >&2
+				return 2
+			fi
+			if [[ $arg == --slice || $arg == --slice=* ]]; then
+				say "FUSION_LAUNCHES=$launches gives each launch its --slice: give no --slice" >&2
+				return 2
+			fi
+			before=$arg
+		done
+	fi
 	if [[ ${FUSION_KEEP_SERVERS:-0} == 1 && -z $reuse && $nodes == 0 ]]; then
 		say "FUSION_KEEP_SERVERS=1 needs FUSION_MODEL_NODES: model.sh on this node ends with this job" >&2
 		return 2
@@ -340,14 +376,19 @@ main() {
 		say "the model servers on $nodes model nodes; the campaigns and their inner loop on this node"
 	fi
 	say "job $job on $(hostname -s); run folder $run_dir; fleet $fleet"
-	if [[ $runtime == dragon && $dry != 1 && -e $run_dir/run ]]; then   # its head.pid and record are this launch's
-		say "$run_dir/run exists: under Dragon the run folder must be new" >&2
-		return 2
-	fi
 	if (( launches > 1 )) && [[ $dry != 1 ]]; then   # the records merged are this launch's
-		for k in "$run_dir/run" "$run_dir"/run-*; do
+		for k in "$run_dir/run" "$run_dir"/run-* "$run_dir"/launch-*; do
 			if [[ -e $k ]]; then say "$k exists: with FUSION_LAUNCHES the run folders must be new" >&2; return 2; fi
 		done
+	fi
+	if [[ $dry != 1 && ( $runtime == dragon || $launches != 1 ) ]]; then   # run/ made here, in one step, before anything
+		mkdir -p "$run_dir"   # starts: a second launch on this run folder, even one at the same moment, stops here
+		if ! mkdir "$run_dir/run" 2> /dev/null; then
+			if [[ $runtime == dragon ]]; then say "$run_dir/run exists or cannot be made: under Dragon the run folder must be new" >&2
+			else say "$run_dir/run exists or cannot be made: with FUSION_LAUNCHES the run folders must be new" >&2; fi
+			return 2
+		fi
+		reserved=$run_dir/run
 	fi
 	trap teardown EXIT
 	trap on_signal TERM INT
@@ -431,7 +472,17 @@ main() {
 	probe=(python "$root/launch/probe_model.py" --logs "$fleet")
 	if [[ -n $reuse ]]; then probe+=(--idle); fi
 	if (( launches > 1 )); then probe+=(--slice "0/$launches"); fi   # the whole fleet; refuses k not dividing the campaigns
-	x "${probe[@]}" "${args[@]}" || { say "the model servers failed the check: no run" >&2; return 1; }
+	if [[ $dry == 1 ]]; then
+		x "${probe[@]}" "${args[@]}"
+	else   # in the background, waited for: a signal ends the launch at once, and the teardown ends the check
+		checking=starting
+		"${probe[@]}" "${args[@]}" &
+		checking=$!
+		if [[ -n $held ]]; then on_signal; fi   # one that came while it started
+		wait "$checking" && rc=0 || rc=$?
+		checking=
+		if (( rc != 0 )); then say "the model servers failed the check: no run" >&2; return 1; fi
+	fi
 	if [[ ${FUSION_KEEP_SERVERS:-0} == 1 && -z $reuse ]]; then keep=1; fi   # servers that passed outlive this launch
 
 	if [[ ${FUSION_MPS:-1} != 0 && ( -n $reuse || $nodes != 0 ) ]]; then   # the inner loop has this node's GPUs
@@ -447,24 +498,41 @@ main() {
 		finished=1
 		return 0
 	fi
-	"${run[@]}" "${args[@]}" &
-	launcher=$! pid=$!
 	if [[ $runtime == dragon ]]; then   # signal the layer's head process (its head.pid), not Dragon's launcher
+		starting="the run's head process has written its PID"   # from before the launcher starts: held, then sent
+		"${run[@]}" "${args[@]}" &
+		launcher=$!
 		say "Dragon's launcher: $launcher"
-		starting="the run's head process has written its PID"
-		for (( k = 0; k < 600; k++ )); do
+		local limit=600   # 300 s; once a signal is held, 10 s more at most
+		for (( k = 0; k < limit; k++ )); do
 			[[ -s $run_dir/run/head.pid ]] && break
 			kill -0 "$launcher" 2> /dev/null || break
+			if [[ -n $held ]] && (( limit > k + 20 )); then limit=$(( k + 20 )); fi
 			sleep 0.5
 		done
-		pid=$(cat "$run_dir/run/head.pid" 2> /dev/null) || pid=$launcher
-		[[ $pid =~ ^[1-9][0-9]*$ ]] || pid=$launcher
+		pid=$(cat "$run_dir/run/head.pid" 2> /dev/null) || pid=
+		[[ $pid =~ ^[1-9][0-9]*$ ]] || pid=
+		if [[ -z $pid ]] && kill -0 "$launcher" 2> /dev/null; then   # no head to signal: the launcher is ended
+			say "no head PID in $run_dir/run/head.pid: ending Dragon's launcher (SIGTERM, and SIGKILL after 3 s)" >&2
+			kill -TERM "$launcher" 2> /dev/null || :
+			for (( k = 0; k < 6; k++ )); do kill -0 "$launcher" 2> /dev/null || break; sleep 0.5; done
+			kill -KILL "$launcher" 2> /dev/null || :
+			wait "$launcher" 2> /dev/null || :
+			if [[ -n $held ]]; then say "a stop was pending"; return 143; fi
+			say "no stop was pending"
+			return 1
+		fi
 		starting=
+	else
+		"${run[@]}" "${args[@]}" &
+		launcher=$! pid=$!
 	fi
-	say "the run's PID: $pid"
-	if [[ -n $held ]]; then on_signal || :; fi   # a signal held while the head started (set -e: a head gone is no error)
-	mem_guard "$pid" &
-	guard_pid=$!
+	if [[ -n $pid ]]; then   # (none under Dragon when the launcher ended before its head wrote one)
+		say "the run's PID: $pid"
+		if [[ -n $held ]]; then on_signal || :; fi   # a signal held while the head started (set -e: a head gone is no error)
+		mem_guard "$pid" &
+		guard_pid=$!
+	fi
 	while :; do   # a trapped signal ends a wait early: wait again until the run has exited
 		wait "$launcher" && rc=0 || rc=$?
 		kill -0 "$launcher" 2> /dev/null || break

@@ -330,8 +330,10 @@ once, 8 workers each, ran 204,800. Under `--runtime dragon` the knob was not app
 `workers_placed: 0`), and the run with the real inner loop beside the servers failed in every campaign. Since then
 RHAPSODY's Dragon workers place themselves: each takes the next number from a counter file in the run folder in
 its first task (`sim.evaluate_placed`, `pool.on_gpu_file`) and sees one GPU of the head's `CUDA_VISIBLE_DEVICES`,
-i mod their count; the record's `workers_placed` is the file's count. That placement is configured and checked
-on a laptop only (faked GPUs, no Dragon), not run on the machine. Device rule: `cuda` if available, else `cpu`
+i mod their count; the record's `workers_placed` is the file's count. That list is read as CUDA reads the
+variable: its entries up to the first one CUDA would not take (`-1`, or Slurm's `NoDevFiles`, which then give no
+GPU), each GPU once. That placement is configured and checked on a laptop only (faked GPUs, no Dragon), not run on
+the machine. Device rule: `cuda` if available, else `cpu`
 (ROCm builds answer through `torch.cuda`).
 
 ## The agent layers
@@ -540,7 +542,7 @@ section.
 
 | Section | Knobs |
 |---|---|
-| `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`) |
+| `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`; with the AUTONMI layer's `--slice I/K` (K > 1) and `--workers`, ÷ every launch's workers: "The StellarAI run path") |
 | `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts `a<first>` to `a<first+count-1>`), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
 | `outer` | `population` (P), `generations` (G; evaluations per campaign = P x G; in the generations mode model calls = G; in the asynchronous mode there are no generations and P x G is the campaign's budget of evaluations), `generator` (llm or mutation; the asynchronous mode refuses mutation unless `llm.mode` is off), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
@@ -808,7 +810,9 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    Then `fleet/endpoints`, the model jobs' own endpoints in order, rewritten whenever one changes (a requeued job;
    looked at every 10 s), and `fleet/setup-files`, the files a run with `record.extras` copies (the endpoints,
    `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
-4. `launch/probe_model.py`; its failure stops the launch.
+4. `launch/probe_model.py`; its failure stops the launch. It runs in the background and the script waits for it,
+   so that a signal during the check ends the check and the launch at once, with no run (exit 143). Configured
+   and checked on a laptop only.
 5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none). (The script's
    condition is a reused fleet or `FUSION_MODEL_NODES` > 0. Its daemon serves this launch, and with
    `FUSION_LAUNCHES` each of its launches. Several runs of the script at once on one node were run with one daemon
@@ -854,11 +858,15 @@ unset for the first placement run (the layer warns when it is set), and submit a
   in step 6, and the check of step 4 gets `--runtime dragon` too;
 - exports `DRAGON_DEFAULT_SEG_SZ`, 64 GiB unless it is set: the value of the 2,000-campaign run that passed
   (Dragon's default pool is 4 GiB; whether the setting took effect or was needed was not checked);
-- refuses a run folder that exists (`<run folder>/run`), so that its `head.pid` and record are this launch's;
+- makes `<run folder>/run` with one `mkdir` before anything starts, so that its `head.pid` and record are this
+  launch's: one that exists is refused (exit 2), and so is a second launch on the same run folder, even one
+  started at the same moment. At the very end of a launch that ended before Dragon started, the empty folder is
+  removed;
 - in step 7 sends SIGTERM to the PID that the layer writes to `<run folder>/run/head.pid` (its head process), not
-  to Dragon's launcher. A signal that comes after the launcher has started and before that file is held, and sent
-  to the head once the file appears. If the file does not appear (the launcher ends, or 300 s pass), the signal
-  goes to the launcher, and what Dragon does then is not known;
+  to Dragon's launcher. A signal that comes from just before the launcher starts until that file appears is held,
+  and sent to the head once the file appears. The script waits for the file at most 300 s, and at most 10 s more
+  once a signal is held. If there is no PID by then and the launcher still runs, the script ends the launcher
+  (SIGTERM, then SIGKILL 3 s later), says whether a stop was pending, and exits 143 if one was, else 1;
 - in step 8, once Dragon has started, runs `dragon-cleanup` (within 120 s) before the MPS daemon quits and prints
   the first entries of `/dev/shm`; it exits with the status of the run's record (pass 0, interrupted 143, else
   1), not the launcher's.
@@ -875,18 +883,24 @@ laptop only (a dry run, and two launches against fake servers on two fake model 
 it has run on the machine. It does in one run of the script what was done by hand on 2026-11-25: the script
 started 8 times side by side, each start with a server, an `agents.first` block and a run name of its own, one MPS
 daemon shared (measured: 8 x 800 campaigns with the real inner loop, all pass). With k > 1 the script:
-- refuses, with exit 2 before anything starts, `FUSION_RUNTIME=dragon` (one Dragon runtime per node and user:
-  inferred, two at once were not tried), and a `<run folder>/run` or `run-<i>` that exists, so that the records
-  merged are this launch's;
+- refuses, with exit 2 before anything starts: `FUSION_RUNTIME=dragon`, and `--runtime dragon` (or
+  `--runtime=dragon`) among its arguments (one Dragon runtime per node and user: inferred, two at once were not
+  tried); `--slice` (or `--slice=I/K`) among its arguments, since it gives each launch its own; and a `<run
+  folder>/run`, `run-<i>` or `launch-<i>` that exists, so that the records merged are this launch's. It makes
+  `<run folder>/run` as under Dragon, and removes it at the very end if it is empty and the launches did not get
+  to the merge;
 - in step 3 writes `<run folder>/launch-<i>/endpoints`, block i of `fleet/endpoints` in order (k must divide the
   servers, else the launch stops), each with a `setup-files` that names it alone, and rewrites the blocks whenever
-  `fleet/endpoints` changes;
+  `fleet/endpoints` changes. A server listed twice (the lines compared without spaces and trailing slashes) stops
+  the launch there, and in a later change leaves the blocks as they were;
 - in step 4 runs the check once, on the whole fleet, with `--slice 0/k`, so a k that does not divide the campaigns
   stops the launch there; in step 5 starts one MPS daemon, whose pipe every launch inherits;
 - in step 6 starts k runs at once: launch i is the run above with `--slice i/k --endpoints-file <run
   folder>/launch-<i>/endpoints --out <run folder>/run-<i>` after its arguments (the last of a repeated option
   wins). It runs the i-th block of the campaigns against its own servers with a k-th of `workers.sim_workers`
-  (configured: 10 of 80 at k = 8; "The agent layers");
+  (configured: 10 of 80 at k = 8; "The agent layers"). With `--workers W` among the script's arguments each
+  population has W, and the automatic threads per worker (`sim.threads_per_worker: auto`) are the CPUs over k x
+  populations x W, every launch's workers on the node;
 - in step 7 sends each SIGTERM to every launch still running; one that comes while the launches start is held
   until all have started;
 - waits for every launch, then writes one record of them, `<run folder>/run/run_record.json`, with `python -m
@@ -1179,7 +1193,10 @@ and laptop timings, not performance claims for a machine. Every number below is 
   laptop only: `FUSION_RUN_NAME`, `launch.pid`, the check's skipping of a stopping server's lines, the GPU check's
   count of the servers left, the reworded line of an interrupted run, `llm_service.unusable_samples`, the
   warning about `DRAGON_PATCH_TORCH` with the placement, and `FUSION_LAUNCHES` with the layer's `--slice` (a dry run,
-  and two launches against fake servers). `merge_records` ran on the laptop and on the saved records of the 8
+  and two launches against fake servers); the launch script's one-step claim of its run folder, its check in the
+  background, its bounded start under Dragon and its further refusals with `FUSION_LAUNCHES` (fakes for the check,
+  Dragon's launcher and head, and the fleet); the threads per worker with `--slice` and `--workers`, and the GPU
+  list read as CUDA reads `CUDA_VISIBLE_DEVICES` (unit tests). `merge_records` ran on the laptop and on the saved records of the 8
   launches of 800 campaigns (in "What a run writes").
 - **The StellarAI run path on one 8 x B200 node, 2026-11-25** (dev `8c1450f`, vLLM 0.27.1, AUTONMI at `e20861a`;
   launches with `bash` as `srun` steps, servers from a stand-in for `model.sh` and reused; the asynchronous mode,

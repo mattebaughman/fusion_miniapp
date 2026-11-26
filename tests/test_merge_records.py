@@ -223,6 +223,10 @@ def test_refused_reply_samples_are_opt_in_and_capped_across_sources(pair, tmp_pa
         write(folder, row)
     expected = {"evaluator": ["0" * 200] * 4 + ["1" * 200]}
     assert merge(tmp_path / "both", b, a)["llm_service"]["unusable_samples"] == expected
+    row = load(b)
+    row["llm_service"]["unusable_samples"] = None   # null reads as none
+    write(b, row)
+    assert merge(tmp_path / "one null", a, b)["llm_service"]["unusable_samples"] == {"evaluator": ["0" * 200] * 4}
     for folder in pair:
         row = load(folder)
         row["knobs"]["record"]["extras"] = False

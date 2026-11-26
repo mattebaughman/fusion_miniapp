@@ -377,7 +377,9 @@ def test_a_dry_run_of_several_launches_prints_one_run_per_launch_then_the_merge(
     and after them --slice i/2, its own endpoints file launch-<i>/endpoints and --out run-<i>, then one merge of
     run-0 and run-1 into run. Nothing is made. FUSION_LAUNCHES=1 prints what no FUSION_LAUNCHES does. Refused (exit 2,
     before the teardown is set): a value that is not a number of 1 or more, FUSION_RUNTIME=dragon with 2 launches,
-    and (not in a dry run) a run folder run or run-<i> that exists."""
+    --runtime dragon (also --runtime=dragon) or --slice (also --slice=I/K) among the script's arguments, which one
+    launch passes on as before, and (not in a dry run, before anything is made) a run, run-<i> or launch-<i> folder
+    that exists."""
     for name in ("sbatch", "srun", "squeue", "scancel", "nvidia-smi", "nvidia-cuda-mps-control"):
         fixture_tool(tmp_path, name, "sys.exit(99)\n")
     fleet = "/scratch/earlier/fleet"
@@ -412,18 +414,107 @@ def test_a_dry_run_of_several_launches_prints_one_run_per_launch_then_the_merge(
                      for e in (without, {**env, "FUSION_LAUNCHES": "1"}))
     assert plain.returncode == single.returncode == 0 and stamped(single.stdout) == stamped(plain.stdout)
     assert "--slice" not in plain.stdout and "merge_records" not in plain.stdout
+    for flags, why in ((["--runtime", "dragon"], "with --runtime dragon: one Dragon runtime"),
+                       (["--runtime=dragon"], "with --runtime dragon: one Dragon runtime"),
+                       (["--slice", "1/2"], "gives each launch its --slice"), (["--slice=1/2"], "gives each launch its --slice")):
+        refused = subprocess.run([*args, *flags], cwd=tmp_path, env={**env, "FUSION_DRY_RUN": "0"},
+                                 capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 2 and why in refused.stderr and not (tmp_path / "scratch").exists()
+        single = subprocess.run([*args, *flags], cwd=tmp_path, env=without, capture_output=True, text=True, timeout=5)
+        assert single.returncode == 0 and " ".join(flags) in single.stdout
     for bad, why in ((dict(FUSION_LAUNCHES="0"), "a number of launches"),
                      (dict(FUSION_LAUNCHES="two"), "a number of launches"),
                      (dict(FUSION_RUNTIME="dragon"), "one Dragon runtime per node")):
         refused = subprocess.run(args, cwd=tmp_path, env={**env, **bad}, capture_output=True, text=True, timeout=60)
         assert refused.returncode == 2 and why in refused.stderr and "ended with status" not in refused.stdout
-    for used in ("run", "run-1"):   # not a dry run: the records merged must be this launch's
+    for used in ("run", "run-1", "launch-1"):   # not a dry run: the records merged must be this launch's
         Path(run_dir, used).mkdir(parents=True)
         refused = subprocess.run(args, cwd=tmp_path, env={**env, "FUSION_DRY_RUN": "0"}, capture_output=True,
                                  text=True, timeout=60)
         assert refused.returncode == 2 and f"{run_dir}/{used} exists" in refused.stderr
         assert "ended with status" not in refused.stdout and tool_calls(tmp_path) == []
         Path(run_dir, used).rmdir()
+
+
+@pytest.mark.parametrize("duplicate_at_start", [True, False])
+def test_several_launches_keep_the_last_distinct_endpoint_blocks(tmp_path, duplicate_at_start):
+    """FUSION_LAUNCHES=2 on a reused FIXTURE fleet of two model jobs, the check a FIXTURE that waits: a fleet whose
+    endpoints name one server twice (here with spaces and trailing slashes) stops the launch before the check (exit
+    1, no block written). Otherwise, while the check waits, a refresh to such a list leaves both blocks as they were,
+    and the next refresh to two servers again rewrites them."""
+    job = str(os.getpid())
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    (fleet / "api-key").write_text("fixture\n")
+    (fleet / "setup-files").write_text("endpoints\n")
+    first, second = "http://one.invalid", "http://two.invalid"
+    old = [first, second]
+    bad = [first, f"  {first}///  "]
+    good = [first, "http://three.invalid"]
+    initial = bad if duplicate_at_start else old
+    source = fleet / "endpoints"
+    source.write_text("\n".join(initial) + "\n")
+    for i, url in enumerate(initial):
+        folder = fleet / f"model-{i}"
+        folder.mkdir()
+        (folder / "endpoints").write_text(url + "\n")
+
+    env = stellar_env(tmp_path, job, FUSION_MODEL_FLEET=str(fleet), FUSION_LAUNCHES="2",
+                      FUSION_MPS="0", FIXTURE=str(tmp_path))
+    (tmp_path / "venv/bin/activate").write_text(":\n")
+    fixture_tool(tmp_path, "nvidia-smi", "")
+    fixture_tool(tmp_path, "python", """from pathlib import Path
+import time
+if sys.argv[1].endswith("probe_model.py"):
+    (Path(os.environ["FIXTURE"]) / "probing").touch()
+    time.sleep(30)
+    sys.exit(1)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+""")
+    delay = tmp_path / "bin/sleep"
+    delay.write_text('#!/bin/sh\nif [ "$1" = 10 ]; then echo poll >> "$FIXTURE/polls"; exec /bin/sleep 0.04; fi\n'
+                     'exec /bin/sleep "$@"\n')
+    delay.chmod(0o755)
+    run_dir = tmp_path / "scratch/fusion-miniapp" / f"test-{job}"
+    outputs = [run_dir / f"launch-{i}/endpoints" for i in range(2)]
+    log = tmp_path / "job.log"
+    with log.open("w") as stream:
+        proc = subprocess.Popen(["bash", str(STELLAR)], cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
+                                stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def until(condition):
+        deadline = time.monotonic() + 5
+        while not condition():
+            assert proc.poll() is None and time.monotonic() < deadline, log.read_text()
+            time.sleep(0.01)
+
+    try:
+        if duplicate_at_start:
+            assert proc.wait(timeout=5) == 1 and "names a server more than once" in log.read_text()
+            assert not (tmp_path / "probing").exists() and not any(path.exists() for path in outputs)
+            return
+        until((tmp_path / "probing").exists)
+        assert [p.read_text().strip() for p in outputs] == old
+        versions = [p.stat().st_mtime_ns for p in outputs]
+        changed = fleet / "model-1/endpoints"
+        staged = changed.with_suffix(".new")
+        polls = tmp_path / "polls"
+        staged.write_text(bad[1] + "\n")
+        staged.replace(changed)
+        until(lambda: source.read_text().splitlines() == bad)
+        previous = polls.stat().st_size
+        until(lambda: polls.stat().st_size > previous)   # the bad snapshot has completed a refresh
+        assert [p.stat().st_mtime_ns for p in outputs] == versions
+        assert [p.read_text().strip() for p in outputs] == old
+        staged.write_text(good[1] + "\n")
+        staged.replace(changed)
+        until(lambda: [p.read_text().strip() for p in outputs] == good)
+        proc.terminate()
+        assert proc.wait(timeout=5) == 143
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
 
 
 def fake_submit(tmp_path) -> None:
@@ -1081,3 +1172,149 @@ def test_probe_model_stops_the_launch_on_an_http_error_an_empty_reply_or_a_time_
         for role in ("generator", "monitor", "evaluator", "coordinator"):
             assert f"{bad.url}: {role}: {reason}" in done.stderr, (reason, done.stderr)
         assert [json.loads(x)["problems"] == [] for x in done.stdout.splitlines()] == [True, False], reason
+
+
+@pytest.mark.parametrize("mode,runtime", [
+    ("blocked-probe", "local"), ("blocked-probe", "dragon"), ("blocked-probe", "launches"),
+    ("launcher-message", "dragon"), ("no-head", "dragon"), ("stopped-before-head", "dragon"),
+])
+def test_a_stop_during_the_check_or_dragons_start_ends_the_launch_at_once(tmp_path, mode, runtime):
+    """The launch script on a reused fleet with FIXTURES for the check, Dragon's launcher and the layer's head (no
+    socket; `launches` is FUSION_LAUNCHES=2). SIGTERM goes to the script alone.
+    blocked-probe: a check that ignores SIGTERM and would take 20 s; the signal ends the launch at once (143), the
+    check is ended and no run starts. Under Dragon and with FUSION_LAUNCHES the launch has made <run folder>/run
+    before its check, so a second launch on the same run folder is refused (exit 2, launch.pid stays the first's),
+    also while the first one's teardown runs (held at its GPU check here); the empty run/ is removed at the end.
+    launcher-message: the signal comes while the script prints the launcher's PID; it is held until the head has
+    written head.pid and goes to the head, not to the launcher, and the record is interrupted (143).
+    no-head: the launcher never writes head.pid; after the 300 s wait (its 0.5 s ticks shortened here) the
+    launcher gets SIGTERM, which it ignores, then SIGKILL, and the script says no stop was pending and exits 1.
+    stopped-before-head: as no-head with a signal during the wait: the wait ends within 20 ticks (10 s), the
+    launcher is ended the same way, and the script says a stop was pending and exits 143."""
+    job = f"83{os.getpid()}"
+    fleet = tmp_path / "fleet"
+    fleet.mkdir()
+    servers = "http://one.invalid\nhttp://two.invalid\n"   # two, for 2 launches
+    for f, value in [("endpoints", servers), ("api-key", "fixture\n"), ("setup-files", "endpoints\n")]:
+        (fleet / f).write_text(value)
+    how = dict(FUSION_LAUNCHES="2") if runtime == "launches" else dict(FUSION_RUNTIME=runtime)
+    env = stellar_env(tmp_path, job, FUSION_MODEL_FLEET=str(fleet), FUSION_MPS="0", FAULT_MODE=mode,
+                      FAULT_DIR=str(tmp_path), **how)
+    (tmp_path / "venv/bin/activate").write_text(":\n")   # keep the FIXTURE python first on PATH
+    run = tmp_path / "scratch" / "fusion-miniapp" / f"test-{job}" / "run"
+    run.parent.mkdir(parents=True)
+    fixture_tool(tmp_path, "nvidia-smi", """import time
+from pathlib import Path
+hold = Path(os.environ["FAULT_DIR"]) / "hold"
+if hold.exists():   # the teardown, held while the test tries a second launch
+    (hold.parent / "in-teardown").touch()
+    while hold.exists():
+        time.sleep(0.02)
+""")
+    fixture_tool(tmp_path, "timeout", "")
+    head = tmp_path / "head.py"
+    head.write_text("""import os, signal, sys, time
+from pathlib import Path
+out = Path(sys.argv[1])
+def stopped(*_):
+    (out / 'run_record.json').write_text('{"status":"interrupted"}')
+    sys.exit(143)
+signal.signal(signal.SIGTERM, stopped)
+(out / 'head.pid').write_text(str(os.getpid()) + '\\n')
+time.sleep(20)
+""")
+    fixture_tool(tmp_path, "python", """import signal, subprocess, time
+from pathlib import Path
+root = Path(os.environ["FAULT_DIR"])
+mode = os.environ["FAULT_MODE"]
+if sys.argv[1].endswith("probe_model.py"):
+    (root / "after-probe").touch()
+    if mode == "blocked-probe":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        (root / "probe.pid").write_text(str(os.getpid()))
+        time.sleep(20)
+elif sys.argv[1:3] == ["-m", "dragon"]:
+    signal.signal(signal.SIGTERM, lambda *_: (root / "launcher-term").touch())
+    (root / "dragon-started").touch()
+    if mode == "launcher-message":
+        out = sys.argv[sys.argv.index("--out") + 1]
+        subprocess.run([sys.executable, str(root / "head.py"), out], check=False)
+    else:
+        time.sleep(60)
+else:
+    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+""")
+    if mode == "launcher-message":   # the first date after the check is the one of "Dragon's launcher: <PID>"
+        date = tmp_path / "bin/date"
+        date.write_text("""#!/bin/sh
+if [ -f "$FAULT_DIR/after-probe" ] && [ ! -f "$FAULT_DIR/in-date" ]; then
+    touch "$FAULT_DIR/in-date"
+    /bin/sleep 0.6
+fi
+exec /bin/date "$@"
+""")
+        date.chmod(0o755)
+    if mode in {"no-head", "stopped-before-head"}:   # the wait's 0.5 s ticks counted and shortened (with a signal
+        delay = tmp_path / "bin/sleep"                # to come, to 0.01 s, so that it comes before the 600th)
+        tick = "exec /bin/sleep 0.01" if mode == "stopped-before-head" else "exit 0"
+        delay.write_text(f'#!/bin/sh\nif [ "$1" = 0.5 ]; then echo tick >> "$FAULT_DIR/ticks"; {tick}; fi\n'
+                         'exec /bin/sleep "$@"\n')
+        delay.chmod(0o755)
+    cmd = ["bash", str(STELLAR)]
+    second = lambda: subprocess.run(cmd, env=env, cwd=tmp_path, stdin=subprocess.DEVNULL,   # noqa: E731
+                                    capture_output=True, text=True, timeout=5)
+    with (tmp_path / "job.out").open("w") as log:
+        p = subprocess.Popen(cmd, env=env, cwd=tmp_path, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+
+    def until(marker: Path) -> None:
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            assert p.poll() is None and time.monotonic() < deadline, (tmp_path / "job.out").read_text()
+            time.sleep(0.02)
+    try:
+        until({"blocked-probe": tmp_path / "probe.pid", "launcher-message": tmp_path / "in-date",
+               "no-head": tmp_path / "dragon-started", "stopped-before-head": tmp_path / "dragon-started"}[mode])
+        claimed = mode == "blocked-probe" and runtime != "local"
+        if claimed:
+            assert run.is_dir()
+            other = second()
+            assert other.returncode == 2 and f"{run} exists" in other.stderr, other.stderr
+            assert "ended with status" not in other.stdout
+            assert (run.parent / "launch.pid").read_text() == f"{p.pid}\n"
+            (tmp_path / "hold").touch()
+        ticks = tmp_path / "ticks"
+        before = len(ticks.read_text().splitlines()) if ticks.exists() else 0
+        if mode != "no-head":
+            p.terminate()
+        if claimed:
+            until(tmp_path / "in-teardown")
+            other = second()
+            assert other.returncode == 2 and f"{run} exists" in other.stderr, other.stderr
+            (tmp_path / "hold").unlink()
+        # at once: well before the blocked check's 20 s; no-head: its 600 ticks
+        assert p.wait(timeout=60 if mode == "no-head" else 10) == (1 if mode == "no-head" else 143), \
+            (tmp_path / "job.out").read_text()
+        text = (tmp_path / "job.out").read_text()
+        if mode == "blocked-probe":
+            assert not run.exists() and not (tmp_path / "dragon-started").exists()
+            assert "signal before the run started: stopping" in text and "failed the check" not in text
+            with pytest.raises(ProcessLookupError):
+                os.kill(int((tmp_path / "probe.pid").read_text()), 0)
+        elif mode == "launcher-message":
+            assert not (tmp_path / "launcher-term").exists()
+            assert "signal: held until the run's head process has written its PID" in text
+            assert json.loads((run / "run_record.json").read_text())["status"] == "interrupted"
+        else:
+            assert (tmp_path / "launcher-term").exists() and "ending Dragon's launcher" in text
+            if mode == "stopped-before-head":
+                assert len(ticks.read_text().splitlines()) - before <= 30   # 20, and the launcher's 3 s
+            assert ("a stop was pending" if mode == "stopped-before-head" else "no stop was pending") in text
+            assert "the run's PID" not in text
+    finally:
+        (tmp_path / "hold").unlink(missing_ok=True)
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.wait()

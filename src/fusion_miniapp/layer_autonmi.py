@@ -46,7 +46,7 @@ other layers end the campaign at the first failed call). What runs them is AUTON
 With `--slice I/K` (several launches side by side: the StellarAI launch script's FUSION_LAUNCHES) this launch is
 the I-th of K: of the n campaigns given it runs a<first + I x n/K> to a<first + (I + 1) x n/K - 1>, with a K-th
 of workers.sim_workers, which counts the K launches' workers together (layout; so does the inner loops' thread
-limit, run.thread_limit), and locally its inner-loop workers take GPU numbers after those of the I launches before
+limit, run.thread_limit, or with --workers K x populations x workers), and locally its inner-loop workers take GPU numbers after those of the I launches before
 it (gpu_offset). `python -m fusion_miniapp.merge_records` makes one record of the K launches' records.
 
 It writes what run.py writes, with `agent_layer: autonmi`: `run_record.json` (record.write, with an
@@ -631,15 +631,24 @@ def sim_pool(workers: int):
 
 
 def visible_gpus() -> list[str]:
-    """CUDA_VISIBLE_DEVICES's entries in this process (none when it is unset or empty)."""
-    return [x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
+    """The GPUs CUDA_VISIBLE_DEVICES gives this process, read as CUDA reads it: its entries in order up to the first
+    one CUDA would not take (a number, or a GPU- or MIG- UUID, is taken; -1 or Slurm's NoDevFiles is not, so neither
+    gives any), each once; none when it is unset or empty."""
+    gpus = []
+    for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(","):
+        x = x.strip()
+        if not (x.isdigit() or x.startswith(("GPU-", "MIG-"))):
+            break
+        if x not in gpus:
+            gpus.append(x)
+    return gpus
 
 
 def inner_loop_gpus(knobs: dict, device: dict | None, dragon: bool = False) -> list[str]:
     """workers.gpu_per_worker: the GPUs to place the inner-loop workers on, one each: the n GPUs the device probe
-    saw where the inner loops run (CUDA_VISIBLE_DEVICES's first n entries when it is set, else 0 .. n - 1); none
+    saw where the inner loops run (visible_gpus's first n when it gives any, else 0 .. n - 1); none
     without the knob or without a GPU (also the fixture, which has no probe here). `dragon`: the real inner loop
-    under Dragon, which has no probe here either: CUDA_VISIBLE_DEVICES's entries in this process, the head's (none
+    under Dragon, which has no probe here either: visible_gpus in this process, the head's (none
     when it is unset); the workers are then placed inside their tasks (sim.evaluate_placed)."""
     if not knobs["workers"]["gpu_per_worker"]:
         return []
@@ -2076,7 +2085,7 @@ def layout(knobs: dict, sim: str, populations: int | None = None, workers: int |
             share = "workers.sim_workers" if launches == 1 else \
                 f"this launch's share of workers.sim_workers / {launches}"
             raise knob_files.KnobError(
-                f"{populations} populations each need a simulation worker, but {share} is {w}; raise "
+                f"{populations} populations each need an inner-loop worker, but {share} is {w}; raise "
                 "workers.sim_workers or agents.per_process, or give --workers")
         workers = max(1, w // populations)
     return populations, workers
@@ -2790,6 +2799,7 @@ def main(argv=None) -> int:
     knobs = load_knobs(a)
     if knobs["llm"]["mode"] == "openai" and not a.endpoints_file:
         raise SystemExit("--llm openai needs --endpoints-file: the model job's servers")
+    explicit_workers = a.workers is not None
     a.populations, a.workers = layout(knobs, a.sim, a.populations, a.workers, launches=a.slice[1])
     dragon_real_guard(a, knobs)   # the real inner loop under Dragon, before anything starts
     agents_live(knobs)   # refuses a cap that could leave agents waiting for good, before anything starts
@@ -2805,7 +2815,11 @@ def main(argv=None) -> int:
         from fusion_miniapp.sim import work_root as sim_work_root
 
         # before any worker starts: spawned workers inherit these, as run.Services sets them
-        t = str(run.thread_limit(knobs))
+        thread_knobs = knobs
+        if a.slice[1] > 1 and explicit_workers:   # --slice and --workers: the K launches' workers on this node are
+            count = a.slice[1] * a.populations * a.workers   # K x populations x workers, not workers.sim_workers
+            thread_knobs = {**knobs, "workers": {**knobs["workers"], "sim_workers": count}}
+        t = str(run.thread_limit(thread_knobs))
         os.environ.update({v: t for v in run.THREAD_VARS}, FUSION_MINIAPP_THREADS=t)
         threads = {"per_worker": int(t), "cpus": run.cpus(), "knob": knobs["sim"]["threads_per_worker"]}
         if not knobs["sim"]["keep_artifacts"]:   # one folder for all evaluations' work, removed at the end
