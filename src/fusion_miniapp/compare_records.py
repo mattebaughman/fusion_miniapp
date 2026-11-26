@@ -7,7 +7,7 @@ sim.threads_per_worker, workers.sim_workers, workers.gpu_per_worker; agents.per_
 start_together, and campaign.slots: the layout) and the model service's (llm.stub_latency_s, llm.max_in_flight,
 llm.admission_tokens, llm.outage_s) and the Monitor's trace (monitor.capture, monitor.fixture_trace: no result reads it)
 and record.extras (what the record writes), and the campaigns. A record older than a knob ran with the value
-ADDED_KNOBS gives it. Identical results_sha256 settles the campaigns at
+ADDED_KNOBS gives it. Identical, present results_sha256 settles the campaigns at
 once. Otherwise each campaign in the two neighbouring agents.jsonl files is compared by agent_id: ids,
 booleans, strings (selection basis) and integers (generations, counts, candidate numbers) exactly, floats
 within --rtol/--atol (macOS and Linux, or CPU and GPU, differ in the last digits). Without the agents files,
@@ -146,12 +146,17 @@ def compare(a: dict, b: dict, tol: float = 0.25, agents_a=None, agents_b=None, r
             bad.append(f"the {name} run's status is {r.get('status')!r}, not 'pass'")
         if r.get("touch_check", {}).get("fail") or r.get("llm_check", {}).get("fail"):
             bad.append(f"the {name} run has failed touch or model checks")
+    # The merged count excludes gaps, so the same first and count can cover different campaign IDs.
+    if a.get("campaign_gaps", []) != b.get("campaign_gaps", []):
+        bad.append(f"campaign_gaps: {a.get('campaign_gaps', [])} != {b.get('campaign_gaps', [])}")
     both_async = asynchronous(a) and asynchronous(b)   # counts and invariants, not results (the docstring)
     if both_async:
         x, y = (_get(r["counts"], ("asynchronous", "results_scored")) for r in (a, b))
         if x != y:
             bad.append(f"counts.asynchronous.results_scored: {x} != {y}")
-    elif a.get("results_sha256") != b.get("results_sha256"):
+    elif not a.get("results_sha256") or not b.get("results_sha256"):
+        bad.append("missing results_sha256: campaign agreement is unverifiable")
+    elif a["results_sha256"] != b["results_sha256"]:
         agents_a, agents_b = (None if x is None else list(x) for x in
                               (x() if callable(x) else x for x in (agents_a, agents_b)))
         problems = [f"the {name} run's agents.jsonl: {p}" for name, rec, lines in

@@ -171,6 +171,33 @@ def test_compare_records_compares_asynchronous_records_on_counts_and_invariants(
     assert compare_records.compare({**stub, "knobs": openai}, {**model, "knobs": openai})["results"] == []
 
 
+def test_compare_records_needs_a_digest_for_generations():
+    base = {"status": "pass", "agent_layer": "autonmi", "counts": {}, "knobs": {}}
+    with_digest = {**base, "results_sha256": "abc"}
+    without_digest = {**base, "results_sha256": None}
+    reason = ["missing results_sha256: campaign agreement is unverifiable"]
+    assert compare_records.compare(base, without_digest)["results"] == reason
+    assert compare_records.compare(with_digest, without_digest)["results"] == reason
+    assert compare_records.compare(with_digest, with_digest)["results"] == []
+    asynchronous = {**without_digest, "knobs": {"campaign": {"mode": "async"}},
+                    "counts": {"asynchronous": {"results_scored": 8}}}
+    assert compare_records.compare(asynchronous, asynchronous)["results"] == []
+
+
+def test_compare_records_checks_which_campaigns_an_async_merge_covers():
+    # Two contiguous pairs with first=0 and total=4. The second pair starts at 2, 3 or 4.
+    base = {"status": "pass", "agent_layer": "autonmi",
+            "knobs": {"agents": {"first": 0, "count": 4}, "campaign": {"mode": "async"}},
+            "counts": {"agents_requested": 4, "asynchronous": {"results_scored": 32}}}
+    contiguous = {**base, "campaign_gaps": []}
+    one_gap = {**base, "campaign_gaps": [[2, 3]]}
+    two_missing = {**base, "campaign_gaps": [[2, 4]]}
+    assert compare_records.compare(base, contiguous)["results"] == []
+    assert compare_records.compare(one_gap, one_gap)["results"] == []
+    assert compare_records.compare(base, one_gap)["results"] == ["campaign_gaps: [] != [[2, 3]]"]
+    assert compare_records.compare(one_gap, two_missing)["results"] == ["campaign_gaps: [[2, 3]] != [[2, 4]]"]
+
+
 def test_compare_records_tolerates_last_digit_differences(tmp_path):
     assert run.main(["--agents", "5", "--sim", "fixture", "--out", str(tmp_path / "a")]) == 0
     rec = json.loads((tmp_path / "a" / "run_record.json").read_text())

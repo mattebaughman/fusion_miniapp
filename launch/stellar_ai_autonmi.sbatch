@@ -62,6 +62,17 @@
 # it appears); the exit status is the run record's (pass 0, interrupted 143, else 1); and once Dragon has started,
 # dragon-cleanup runs at the end, before the MPS daemon quits. Configured and checked on a laptop only
 # (a dry run, and a fake Dragon launcher): no launch through this script has run under Dragon on the machine.
+#
+# FUSION_LAUNCHES=k (default 1, which changes nothing) runs k local launches side by side, as the runs by hand did
+# on 2026-11-25: launch i gets --slice i/k (the i-th block of the campaigns, a k-th of workers.sim_workers), block i
+# of fleet/endpoints in <run folder>/launch-<i>/endpoints (k must divide the servers; rewritten when fleet/endpoints
+# changes) and --out <run folder>/run-<i>. The check runs once, on the whole fleet (with --slice 0/k, so a k that
+# does not divide the campaigns stops the launch there), and one MPS daemon serves every launch. A signal goes to
+# each launch still running. Once all have ended, python -m fusion_miniapp.merge_records writes one record of them
+# to <run folder>/run; a merge that fails prints a warning and does not change the exit status (0 when every launch
+# passed, else a failure's status before 143). Refused with FUSION_RUNTIME=dragon, and when <run folder>/run or
+# run-<i> exists. Configured and checked on a laptop only (a dry run, and launches against fake servers): not run on
+# the machine.
 #SBATCH --job-name=fusion-autonmi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -141,7 +152,21 @@ setup_list() {   # the files a run with record.extras copies (layer_autonmi.SETU
 	done
 }
 
-mem_guard() {   # SIGTERM to the run once the node's available memory falls below the floor
+split_endpoints() {   # FUSION_LAUNCHES: block i of fleet/endpoints, in order, into launch-<i>/endpoints (replaced only when changed)
+	local i n tmp
+	n=$(grep -c '[^[:space:]]' "$fleet/endpoints" 2> /dev/null) || n=0
+	if (( n == 0 || n % launches )); then
+		say "FUSION_LAUNCHES=$launches must divide the $n servers of $fleet/endpoints" >&2
+		return 1
+	fi
+	for (( i = 0; i < launches; i++ )); do
+		tmp="$run_dir/launch-$i/endpoints.tmp"
+		grep '[^[:space:]]' "$fleet/endpoints" | sed -n "$(( i * n / launches + 1 )),$(( (i + 1) * n / launches ))p" > "$tmp"
+		if cmp -s "$tmp" "$run_dir/launch-$i/endpoints"; then rm -f "$tmp"; else mv "$tmp" "$run_dir/launch-$i/endpoints"; fi
+	done
+}
+
+mem_guard() {   # SIGTERM to the run (with FUSION_LAUNCHES, to this script, for every launch) once the node's available memory falls below the floor
 	local floor=$(( ${FUSION_MEM_FLOOR_GIB:-100} * 1024 * 1024 )) avail
 	[[ -r /proc/meminfo ]] || return 0
 	while sleep 5; do
@@ -163,17 +188,17 @@ except (OSError, ValueError):
 print({"pass": 0, "interrupted": 143}.get(status, 1))' "$1" 2> /dev/null || echo 1
 }
 
-on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to the run's PID, once; before it starts, the launch ends
-	if [[ -n $starting ]]; then   # under Dragon, before the head has written its PID: held, then sent to the head
+on_signal() {   # Slurm's warning (or scancel --batch --signal=TERM): SIGTERM to the run's PID (or each launch's), once; before it starts, the launch ends
+	if [[ -n $starting ]]; then   # under Dragon, before the head has written its PID, or while the launches start: held, then sent
 		held=1
-		say "signal: held until the run's head process has written its PID"
+		say "signal: held until $starting"
 		return 0
 	fi
 	if [[ -n $pid ]]; then
 		if [[ -z $signalled ]]; then
 			signalled=1
 			say "signal: SIGTERM to the run ($pid)"
-			kill -TERM "$pid" 2>/dev/null
+			kill -TERM $pid 2>/dev/null || :   # a launch that has already ended is no error
 		fi
 	else
 		say "signal before the run started: stopping" >&2
@@ -228,6 +253,44 @@ teardown() {   # always: the servers released if this launch started them, MPS q
 	exit "$rc"
 }
 
+several() {   # FUSION_LAUNCHES=k > 1, steps 6 and 7: launch i with --slice i/k, block i of the servers and its own folder
+              # run-<i>, all at once; each waited for; then their records merged into run (a failed merge only warns)
+	local i id s rc=0 dirs=() pids=
+	for (( i = 0; i < launches; i++ )); do dirs[i]="$run_dir/run-$i"; done
+	if [[ $dry == 1 ]]; then
+		for (( i = 0; i < launches; i++ )); do
+			x "${run[@]}" "$@" --slice "$i/$launches" --endpoints-file "$run_dir/launch-$i/endpoints" --out "${dirs[i]}"
+		done
+	else
+		starting="every launch has started"   # a signal while they start: held, then sent to each
+		for (( i = 0; i < launches; i++ )); do   # argparse keeps the last of a repeated option: these replace the fleet's
+			"${run[@]}" "$@" --slice "$i/$launches" --endpoints-file "$run_dir/launch-$i/endpoints" --out "${dirs[i]}" &
+			pids+="${pids:+ }$!"
+		done
+		pid=$pids starting=   # the launches still running, which a signal reaches
+		say "the runs' PIDs: $pid"
+		if [[ -n $held ]]; then on_signal; fi
+		mem_guard "$$" &   # to this script, whose trap signals the launches still running
+		guard_pid=$!
+		i=0
+		for id in $pids; do   # a trapped signal ends a wait early: wait again until the launch has exited
+			while :; do
+				wait "$id" && s=0 || s=$?
+				kill -0 "$id" 2> /dev/null || break
+			done
+			if [[ $pid == *" "* ]]; then pid=" $pid "; pid=${pid/ $id / }; pid=$(echo $pid); fi   # an ended
+			# launch's PID is signalled no more (the last one's stays, as a single run's does)
+			say "launch $i/$launches exited with status $s"
+			if (( s != 0 )) && [[ $rc == 0 || $rc == 143 ]]; then rc=$s; fi   # a failure before an interruption
+			i=$(( i + 1 ))
+		done
+	fi
+	x python -m fusion_miniapp.merge_records "${dirs[@]}" --out "$run_dir/run" ||
+		say "warning: the launches' records were not merged into $run_dir/run" >&2
+	finished=1
+	return "$rc"
+}
+
 main() {
 	set -euo pipefail
 	: "${FUSION_MINIAPP_DIR:?set FUSION_MINIAPP_DIR to this checkout (absolute)}"
@@ -235,7 +298,7 @@ main() {
 	: "${FUSION_SCRATCH:?set FUSION_SCRATCH to your GPFS scratch directory}"
 	dry=${FUSION_DRY_RUN:-0} nodes=${FUSION_MODEL_NODES:-0} reuse=${FUSION_MODEL_FLEET:-} runtime=${FUSION_RUNTIME:-local}
 	started=0 keep=0 mps=0 jobs_n=0 model_pid= model_jobs= pid= signalled= refresh_pid= guard_pid= finished= silent=()
-	launcher= starting= held=
+	launcher= starting= held= launches=${FUSION_LAUNCHES:-1}
 	local root name run_dir k id rc probe args run
 	root=$(cd "$FUSION_MINIAPP_DIR" && pwd -P)
 	job=${SLURM_JOB_ID:-dry} name=${FUSION_RUN_NAME:-${SLURM_JOB_NAME:-fusion-autonmi}}
@@ -249,6 +312,14 @@ main() {
 	fi
 	if [[ $runtime != local && $runtime != dragon ]]; then
 		say "FUSION_RUNTIME is local or dragon, not $runtime" >&2
+		return 2
+	fi
+	if [[ ! $launches =~ ^[1-9][0-9]*$ ]]; then
+		say "FUSION_LAUNCHES is a number of launches (1 or more), not $launches" >&2
+		return 2
+	fi
+	if (( launches > 1 )) && [[ $runtime == dragon ]]; then
+		say "FUSION_LAUNCHES=$launches with FUSION_RUNTIME=dragon: one Dragon runtime per node and user; give one or the other" >&2
 		return 2
 	fi
 	if [[ ${FUSION_KEEP_SERVERS:-0} == 1 && -z $reuse && $nodes == 0 ]]; then
@@ -272,6 +343,11 @@ main() {
 	if [[ $runtime == dragon && $dry != 1 && -e $run_dir/run ]]; then   # its head.pid and record are this launch's
 		say "$run_dir/run exists: under Dragon the run folder must be new" >&2
 		return 2
+	fi
+	if (( launches > 1 )) && [[ $dry != 1 ]]; then   # the records merged are this launch's
+		for k in "$run_dir/run" "$run_dir"/run-*; do
+			if [[ -e $k ]]; then say "$k exists: with FUSION_LAUNCHES the run folders must be new" >&2; return 2; fi
+		done
 	fi
 	trap teardown EXIT
 	trap on_signal TERM INT
@@ -326,8 +402,19 @@ main() {
 			setup_list > "$fleet/setup-files"
 		fi
 	fi
+	if (( launches > 1 )); then   # FUSION_LAUNCHES: each launch its block of the servers, in launch-<i>/ of its own
+		if [[ $dry == 1 ]]; then
+			say "[dry run] split $fleet/endpoints into $launches blocks in order, $run_dir/launch-<i>/endpoints, each with a setup-files naming it alone"
+		else
+			for (( k = 0; k < launches; k++ )); do
+				mkdir -p "$run_dir/launch-$k"
+				echo endpoints > "$run_dir/launch-$k/setup-files"   # what a launch's record.extras copies
+			done
+			split_endpoints || return 1
+		fi
+	fi
 	if [[ $dry != 1 ]] && (( jobs_n > 0 )); then   # fleet/endpoints follows a requeued job's new ports
-		( while sleep 10; do combine || true; done ) > /dev/null 2>&1 &
+		( while sleep 10; do combine || true; if (( launches > 1 )); then split_endpoints || true; fi; done ) > /dev/null 2>&1 &
 		refresh_pid=$!
 	fi
 
@@ -343,6 +430,7 @@ main() {
 	fi
 	probe=(python "$root/launch/probe_model.py" --logs "$fleet")
 	if [[ -n $reuse ]]; then probe+=(--idle); fi
+	if (( launches > 1 )); then probe+=(--slice "0/$launches"); fi   # the whole fleet; refuses k not dividing the campaigns
 	x "${probe[@]}" "${args[@]}" || { say "the model servers failed the check: no run" >&2; return 1; }
 	if [[ ${FUSION_KEEP_SERVERS:-0} == 1 && -z $reuse ]]; then keep=1; fi   # servers that passed outlive this launch
 
@@ -353,6 +441,7 @@ main() {
 		mps=1
 	fi
 
+	if (( launches > 1 )); then several "${args[@]}"; return; fi   # every launch inherits the MPS daemon's pipe
 	if [[ $dry == 1 ]]; then
 		x "${run[@]}" "${args[@]}"
 		finished=1
@@ -362,7 +451,7 @@ main() {
 	launcher=$! pid=$!
 	if [[ $runtime == dragon ]]; then   # signal the layer's head process (its head.pid), not Dragon's launcher
 		say "Dragon's launcher: $launcher"
-		starting=1
+		starting="the run's head process has written its PID"
 		for (( k = 0; k < 600; k++ )); do
 			[[ -s $run_dir/run/head.pid ]] && break
 			kill -0 "$launcher" 2> /dev/null || break

@@ -490,12 +490,14 @@ def test_the_real_inner_loop_under_dragon_is_refused_unplaced_on_several_gpus(tm
     CUDA_VISIBLE_DEVICES naming 2 GPUs: every inner-loop worker would see both, as when every campaign of such a run
     failed on GPU errors on StellarAI (2026-11-25). main() refuses it (KnobError naming dragon) before anything
     starts: no --out folder, no Dragon import. One GPU, or FUSION_DRAGON_REAL_UNPLACED=1, passes the guard; none
-    passes with a warning. With the knob on, one warning that the placement has not run on GPUs; with sim.device
-    cuda and no GPU named, refused unless overridden. The fixture and the local runtime pass without a word."""
+    passes with a warning. With the knob on, one warning that the placement has not run on GPUs, and one more with
+    DRAGON_PATCH_TORCH set (Dragon's torch import in every process); with sim.device cuda and no GPU named, refused
+    unless overridden. The fixture and the local runtime pass without a word."""
     from fusion_miniapp import layer_autonmi as L
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     monkeypatch.delenv("FUSION_DRAGON_REAL_UNPLACED", raising=False)
+    monkeypatch.delenv("DRAGON_PATCH_TORCH", raising=False)
     with pytest.raises(knob_files.KnobError, match="dragon"):
         L.main(dragon_args(tmp_path, "--sim", "real"))
     assert not (tmp_path / "run").exists()
@@ -517,6 +519,12 @@ def test_the_real_inner_loop_under_dragon_is_refused_unplaced_on_several_gpus(tm
     assert "places no worker on a GPU" in warned(off, CUDA_VISIBLE_DEVICES=None)
     err = warned(on, CUDA_VISIBLE_DEVICES="0,1")
     assert err.count("warning") == 1 and "the 2 GPUs of CUDA_VISIBLE_DEVICES" in err and "has not run on GPUs" in err
+    for value in ("1", "0"):   # any value but empty turns Dragon's torch import on, before the workers place themselves
+        err = warned(on, DRAGON_PATCH_TORCH=value)
+        assert err.count("warning") == 2 and "DRAGON_PATCH_TORCH is set" in err and "has not run on GPUs" in err
+    assert "DRAGON_PATCH_TORCH" not in warned(on, DRAGON_PATCH_TORCH="")
+    assert warned(off, DRAGON_PATCH_TORCH="1", CUDA_VISIBLE_DEVICES="3") == ""   # no placement asked: no warning
+    monkeypatch.delenv("DRAGON_PATCH_TORCH")
     assert "CUDA_VISIBLE_DEVICES names none, so no worker is placed" in warned(on, CUDA_VISIBLE_DEVICES=None)
     cuda = {**on, "sim": {**on["sim"], "device": "cuda"}}   # as the StellarAI knob file has it
     for mask in (None, ""):   # no GPU named: no worker would be placed, so refused; the override lets it run
@@ -1081,6 +1089,85 @@ def test_the_out_folder_holds_one_run(tmp_path):
     proc = subprocess.run([sys.executable, "-m", ENTRY["autonmi"], "--sim", "fixture", "--agents", "2", "--out",
                            str(out)], cwd=tmp_path, check=False, timeout=300, capture_output=True, text=True)
     assert proc.returncode != 0 and "already holds a run" in proc.stderr
+
+
+def test_a_slice_is_its_block_of_the_campaigns_with_its_share_of_the_workers(tmp_path):
+    """--slice I/K (the launch script's FUSION_LAUNCHES): the I-th of K equal blocks of the campaigns, from
+    agents.first on, and a K-th of workers.sim_workers, which stays the K launches' together in the knobs (so the
+    inner loops' thread limit is a single launch's); with the real inner loop a share too small for the
+    populations is refused. 0/1, the default, changes nothing; K must divide the campaigns, and I/K needs
+    0 <= I < K. Locally the inner-loop workers number from I x populations x workers (gpu_offset), under Dragon
+    from 0."""
+    from fusion_miniapp import layer_autonmi as L, run as run_py
+
+    cfg = knob_file(tmp_path, {"agents": {"first": 20}, "workers": {"sim_workers": 10}})
+    opts = ["--agents", "12", "--knobs", cfg, "--sim", "real", "--populations", "2"]
+    plain = L.load_knobs(L.parse(opts))
+    assert L.parse(opts).slice == (0, 1) and L.load_knobs(L.parse([*opts, "--slice", "0/1"])) == plain
+    for i in range(3):
+        a = L.parse([*opts, "--slice", f"{i}/3"])
+        k = L.load_knobs(a)
+        assert (k["agents"]["first"], k["agents"]["count"]) == (20 + 4 * i, 4)
+        assert k["workers"] == plain["workers"] and run_py.thread_limit(k) == run_py.thread_limit(plain)
+        a.populations, a.workers = L.layout(k, a.sim, a.populations, a.workers, launches=3)
+        assert (a.populations, a.workers, L.gpu_offset(a)) == (2, 1, 2 * i)   # 10 // 3 = 3 workers: 1 each
+        a.runtime = "dragon"
+        assert L.gpu_offset(a) == 0
+    a = L.parse([*opts, "--slice", "1/3", "--workers", "4"])
+    a.populations, a.workers = L.layout(L.load_knobs(a), a.sim, a.populations, a.workers, launches=3)
+    assert L.gpu_offset(a) == 8
+    k12 = L.load_knobs(L.parse([*opts, "--slice", "5/12"]))   # 10 // 12 = 0 workers for this launch
+    with pytest.raises(knob_files.KnobError, match="share of workers.sim_workers / 12 is 0"):
+        L.layout(k12, "real", 2, None, launches=12)
+    assert L.layout(k12, "fixture", 2, None, launches=12) == (1, 1)   # the fixture's threads: at least one
+    for bad in ("1", "x/2", "1/0", "2/2", "-1/2", "0/2/3", "/2"):
+        with pytest.raises(SystemExit):
+            L.parse([*opts, "--slice", bad])
+    with pytest.raises(knob_files.KnobError, match="5 launches do not divide the 12 campaigns"):
+        L.load_knobs(L.parse([*opts, "--slice", "0/5"]))
+
+
+def test_a_slice_runs_its_campaigns_and_the_check_refuses_a_count_it_does_not_divide(tmp_path):
+    """Launch 1 of 2 of 8 campaigns from agents.first 20 runs a24 .. a27 with 2 of the 4 workers; the check
+    (launch/probe_model.py), which loads the knobs as the run does, refuses --slice 0/3 before it asks a server."""
+    cfg = knob_file(tmp_path, {"agents": {"first": 20}, "workers": {"sim_workers": 4}})
+    args = ["--preset", "smoke", "--sim", "fixture", "--llm", "stub", "--agents", "8", "--knobs", cfg]
+    rec = run("autonmi", tmp_path, *args, "--slice", "1/2")
+    assert rec["status"] == "pass" and rec["knobs"]["agents"]["first"] == 24 and rec["counts"]["agents"] == 4
+    assert rec["knobs"]["workers"]["sim_workers"] == 4 and rec["autonmi"]["workers_per_population"] == 2
+    assert sorted(r["agent_id"] for r in lines(tmp_path, "autonmi")) == ["a24", "a25", "a26", "a27"]
+    probe = Path(__file__).resolve().parents[1] / "launch" / "probe_model.py"
+    p = subprocess.run([sys.executable, str(probe), *args, "--slice", "0/3"], cwd=tmp_path, capture_output=True,
+                       text=True, timeout=60)
+    assert p.returncode == 1 and "probe_model: --slice 0/3: 3 launches do not divide the 8 campaigns" in p.stderr
+
+
+def test_a_slice_numbers_its_gpu_workers_after_the_launches_before_it(tmp_path, monkeypatch):
+    """Locally, with faked GPUs (CPU only: no campaign, no model server): launch 1 of 2 with 3 workers (6 / 2, one
+    population) starts sim_pool's counter at 3, so its first worker takes GPU 3 of 4, and its record counts only
+    its own workers placed."""
+    from fusion_miniapp import layer_autonmi as L, pool
+
+    monkeypatch.setattr(L, "_GPUS", [])
+    monkeypatch.setattr(L, "_GPU_COUNTER", None)
+    monkeypatch.setattr(pool, "PLACED", None)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    for name in (*L.run.THREAD_VARS, "FUSION_MINIAPP_THREADS"):   # main sets them for --sim real; put back after
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+    monkeypatch.setattr(L, "probe", lambda a: {"gpus": ["fake"] * 4, "cuda_available": True})
+
+    async def one_worker(a, knobs, out, work_root, live):   # in place of the campaigns: one worker takes a number
+        assert L.workers_placed(a, out) == 0
+        pool.on_gpu(L._GPU_COUNTER, L._GPUS)
+        assert pool.PLACED == (3, "3")
+        return 1, True, None
+
+    monkeypatch.setattr(L, "run_until_signalled", one_worker)
+    cfg = knob_file(tmp_path, {"workers": {"gpu_per_worker": True, "sim_workers": 6}, "sim": {"device": "cpu"}})
+    out = tmp_path / "run"
+    assert L.main(["--agents", "4", "--sim", "real", "--slice", "1/2", "--knobs", cfg, "--out", str(out)]) == 143
+    rec = json.loads((out / "run_record.json").read_text())
+    assert rec["autonmi"]["inner_loop_gpus"] == {"gpus": ["0", "1", "2", "3"], "workers_placed": 1}
 
 
 def test_populations_and_workers_follow_run_py():

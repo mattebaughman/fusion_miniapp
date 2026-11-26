@@ -43,6 +43,12 @@ other layers end the campaign at the first failed call). What runs them is AUTON
   the hosted agents (`speed`; write_record), and the model calls' prompt and generated tokens per second over
   the steady window (record.write).
 
+With `--slice I/K` (several launches side by side: the StellarAI launch script's FUSION_LAUNCHES) this launch is
+the I-th of K: of the n campaigns given it runs a<first + I x n/K> to a<first + (I + 1) x n/K - 1>, with a K-th
+of workers.sim_workers, which counts the K launches' workers together (layout; so does the inner loops' thread
+limit, run.thread_limit), and locally its inner-loop workers take GPU numbers after those of the I launches before
+it (gpu_offset). `python -m fusion_miniapp.merge_records` makes one record of the K launches' records.
+
 It writes what run.py writes, with `agent_layer: autonmi`: `run_record.json` (record.write, with an
 `autonmi` section), `agents.jsonl` and `campaigns/<id>/`; and AUTONMI's own folders (`launcher/`,
 `populations/`, `app/`, `otel/`) and `summary.json`, its checks of the run's telemetry. Each population
@@ -1972,10 +1978,21 @@ def copy_model_service(endpoints_file: Path, api_key_file: str | None, out: Path
 
 # --- the mini-app ----------------------------------------------------------------------------------------
 
+def launch_slice(text: str) -> tuple[int, int]:
+    """--slice I/K: launch I of K, 0 <= I < K."""
+    i, _, k = text.partition("/")
+    if not (i.isdecimal() and k.isdecimal() and int(i) < int(k)):
+        raise argparse.ArgumentTypeError(f"{text!r} is not I/K with 0 <= I < K")
+    return int(i), int(k)
+
+
 def parse(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--agents", type=int, help="campaigns (default: the knob file's agents.count)")
+    p.add_argument("--slice", type=launch_slice, default=(0, 1), metavar="I/K",
+                   help="launch I of K side by side (from 0; the StellarAI launch script's FUSION_LAUNCHES): the "
+                        "I-th of K equal blocks of the campaigns, with a K-th of workers.sim_workers")
     p.add_argument("--preset", choices=knob_files.PRESETS, help="merged over the smoke preset")
     p.add_argument("--knobs", action="append", default=[], metavar="FILE",
                    help="a knob file (YAML) merged over the preset; repeatable, applied in order")
@@ -2009,6 +2026,13 @@ def load_knobs(a: argparse.Namespace) -> dict:
     over = {"agents": {"count": a.agents} if a.agents is not None else {}, "llm": {"mode": a.llm} if a.llm else {}}
     knobs = knob_files.validate({**knobs, **{s: {**knobs[s], **v} for s, v in over.items()}},
                                 modes=("generations", "async"))   # the asynchronous mode runs on this layer only
+    i, k = getattr(a, "slice", (0, 1))
+    if k > 1:   # launch i of k: the i-th block of the campaigns, agents.first on (its workers: layout)
+        n = knobs["agents"]["count"]
+        if n % k:
+            raise knob_files.KnobError(f"--slice {i}/{k}: {k} launches do not divide the {n} campaigns; give a "
+                                       f"count that {k} divides")
+        knobs["agents"].update(first=knobs["agents"]["first"] + i * (n // k), count=n // k)
     if knobs["llm"]["mode"] == "openai" and knobs["llm"]["model"] == "stub":
         raise knob_files.KnobError('llm.mode is openai but llm.model is still "stub"; set llm.model in a knob file')
     if knobs["llm"]["mode"] == "openai" and decide.asynchronous(knobs) and knobs["llm"]["thinking"] is None:
@@ -2022,14 +2046,16 @@ def _divides(n: int, lo: int, hi: int) -> int | None:
     return next((p for p in range(lo, min(hi, n) + 1) if n % p == 0), None)
 
 
-def layout(knobs: dict, sim: str, populations: int | None = None, workers: int | None = None) -> tuple[int, int]:
+def layout(knobs: dict, sim: str, populations: int | None = None, workers: int | None = None,
+           launches: int = 1) -> tuple[int, int]:
     """Populations, and simulation workers in each. AUTONMI cuts the agent list into contiguous equal blocks
     (divmod), so a campaign's agents stay in one population only when the populations divide the
     campaigns: by default (None or 0) the smallest count that does from run.py's agent processes
     (agents.per_process campaigns each) up to twice that, else refused with nearby campaign counts that have
     one; a --populations that does not divide is refused. Workers: by default the population's share of
-    workers.sim_workers, which with --sim real must give each one, as run.py requires."""
-    n, w = knobs["agents"]["count"], knobs["workers"]["sim_workers"]
+    workers.sim_workers, which with --sim real must give each one, as run.py requires. `launches` (--slice I/K:
+    K launches side by side): workers.sim_workers is the K launches' together, so this launch shares its K-th."""
+    n, w = knobs["agents"]["count"], knobs["workers"]["sim_workers"] // launches
     whole = "a campaign's agents must stay in one population, and AUTONMI splits the agents into equal blocks"
     if populations:
         populations = min(populations, n)
@@ -2047,8 +2073,10 @@ def layout(knobs: dict, sim: str, populations: int | None = None, workers: int |
                 f"run {below} or {above} campaigns, or give --populations")
     if workers is None:
         if sim == "real" and populations > w:
+            share = "workers.sim_workers" if launches == 1 else \
+                f"this launch's share of workers.sim_workers / {launches}"
             raise knob_files.KnobError(
-                f"{populations} populations each need a simulation worker, but workers.sim_workers is {w}; raise "
+                f"{populations} populations each need a simulation worker, but {share} is {w}; raise "
                 "workers.sim_workers or agents.per_process, or give --workers")
         workers = max(1, w // populations)
     return populations, workers
@@ -2079,7 +2107,10 @@ def dragon_real_guard(a: argparse.Namespace, knobs: dict) -> None:
     on GPU errors (StellarAI, 2026-11-25). So with more than one GPU in CUDA_VISIBLE_DEVICES it is refused, unless
     FUSION_DRAGON_REAL_UNPLACED=1, and with none a warning is printed. With the knob, one warning: the workers
     are then placed from inside their tasks (sim.evaluate_placed), which has not run on GPUs; with sim.device cuda
-    and no GPU in CUDA_VISIBLE_DEVICES no worker would be placed, so that is refused too (the same override)."""
+    and no GPU in CUDA_VISIBLE_DEVICES no worker would be placed, so that is refused too (the same override). With
+    the knob and DRAGON_PATCH_TORCH set (any value but empty), one more warning: Dragon then imports torch in every
+    process it starts (read in Dragon 0.15.0's source, not run), before a worker places itself; whether that
+    already starts CUDA is not shown."""
     if a.runtime != "dragon" or a.sim != "real":
         return
     seen, unplaced = visible_gpus(), os.environ.get("FUSION_DRAGON_REAL_UNPLACED") == "1"
@@ -2089,6 +2120,10 @@ def dragon_real_guard(a: argparse.Namespace, knobs: dict) -> None:
                 "--runtime dragon with --sim real, sim.device cuda and workers.gpu_per_worker: CUDA_VISIBLE_DEVICES "
                 "names no GPU, so no inner-loop worker would be placed. Set it to the GPUs the workers may use, use "
                 "--runtime local, or set FUSION_DRAGON_REAL_UNPLACED=1")
+        if os.environ.get("DRAGON_PATCH_TORCH"):
+            print("[fusion/autonmi] warning: DRAGON_PATCH_TORCH is set, so Dragon imports torch in every process it "
+                  "starts, before an inner-loop worker places itself on its GPU; keep it unset for the placement",
+                  file=sys.stderr, flush=True)
         where = f"the {len(seen)} GPUs of CUDA_VISIBLE_DEVICES, one each in turn" if seen else \
             "no GPU: CUDA_VISIBLE_DEVICES names none, so no worker is placed"
         print(f"[fusion/autonmi] warning: --runtime dragon with --sim real places the inner-loop workers on {where}; "
@@ -2628,12 +2663,21 @@ def populations_gc(out: Path, n: int) -> list | None:
     return list(got[0]) if len(set(got)) == 1 else [list(t) for t in got]
 
 
+def gpu_offset(a) -> int:
+    """--slice i/k on the local runtime: where this launch's inner-loop workers start numbering (sim_pool's
+    counter), after the workers of the i launches before it (each populations x workers), so that k launches on
+    one node spread their workers over its GPUs as one launch would. 0 without --slice and under Dragon."""
+    i = getattr(a, "slice", (0, 1))[0]
+    return i * a.populations * a.workers if i and a.runtime == "local" else 0
+
+
 def workers_placed(a, out: Path) -> int:
-    """The inner-loop workers placed (workers.gpu_per_worker): sim_pool's counter in this process; under Dragon
-    the count in the run folder's counter file (GPU_COUNTER_FILE, pool.on_gpu_file), which is then removed."""
+    """The inner-loop workers placed (workers.gpu_per_worker): sim_pool's counter in this process, less this
+    launch's start (gpu_offset); under Dragon the count in the run folder's counter file (GPU_COUNTER_FILE,
+    pool.on_gpu_file), which is then removed."""
     if a.runtime == "local":
         counter = importlib.import_module(MODULE)._GPU_COUNTER
-        return counter.value if counter is not None else 0
+        return counter.value - gpu_offset(a) if counter is not None else 0
     f = Path(out) / GPU_COUNTER_FILE
     try:
         return int(f.read_text() or "0")
@@ -2746,7 +2790,7 @@ def main(argv=None) -> int:
     knobs = load_knobs(a)
     if knobs["llm"]["mode"] == "openai" and not a.endpoints_file:
         raise SystemExit("--llm openai needs --endpoints-file: the model job's servers")
-    a.populations, a.workers = layout(knobs, a.sim, a.populations, a.workers)
+    a.populations, a.workers = layout(knobs, a.sim, a.populations, a.workers, launches=a.slice[1])
     dragon_real_guard(a, knobs)   # the real inner loop under Dragon, before anything starts
     agents_live(knobs)   # refuses a cap that could leave agents waiting for good, before anything starts
     pin = autonmi_pin()   # before the run, so that its warning comes first
@@ -2776,6 +2820,9 @@ def main(argv=None) -> int:
         device = probe(a)   # first: a broken torch or device stops the run before any campaign starts
         importlib.import_module(MODULE)._GPUS[:] = inner_loop_gpus(   # sim_pool's (gpu_per_worker); under Dragon
             knobs, device, dragon=a.runtime == "dragon" and a.sim == "real")   # the head's CUDA_VISIBLE_DEVICES
+        if gpu_offset(a) and importlib.import_module(MODULE)._GPUS:
+            # --slice: sim_pool numbers this launch's workers after those of the launches before it
+            importlib.import_module(MODULE)._GPU_COUNTER = mp.get_context("spawn").Value("i", gpu_offset(a))
         rc, interrupted, loop_lag = asyncio.run(run_until_signalled(a, knobs, out, work_root, live))
     except KeyboardInterrupt:   # SIGTERM or Ctrl-C before the event loop took the signals over
         interrupted = True

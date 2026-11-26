@@ -371,6 +371,61 @@ def test_a_dry_run_under_dragon_prints_dragons_launcher(tmp_path):
     assert tool_calls(tmp_path) == [] and "ended with status" not in used.stdout   # before the teardown is set
 
 
+def test_a_dry_run_of_several_launches_prints_one_run_per_launch_then_the_merge(tmp_path):
+    """FUSION_LAUNCHES=2 in a dry run (on a reused fleet): the fleet's endpoints split into one block per launch, the
+    check once on the whole fleet with --slice 0/2, one MPS daemon, then two runs, launch i with the run's arguments
+    and after them --slice i/2, its own endpoints file launch-<i>/endpoints and --out run-<i>, then one merge of
+    run-0 and run-1 into run. Nothing is made. FUSION_LAUNCHES=1 prints what no FUSION_LAUNCHES does. Refused (exit 2,
+    before the teardown is set): a value that is not a number of 1 or more, FUSION_RUNTIME=dragon with 2 launches,
+    and (not in a dry run) a run folder run or run-<i> that exists."""
+    for name in ("sbatch", "srun", "squeue", "scancel", "nvidia-smi", "nvidia-cuda-mps-control"):
+        fixture_tool(tmp_path, name, "sys.exit(99)\n")
+    fleet = "/scratch/earlier/fleet"
+    env = stellar_env(tmp_path, "43", FUSION_DRY_RUN="1", FUSION_MODEL_FLEET=fleet, FUSION_LAUNCHES="2")
+    args = ["bash", str(STELLAR), "--agents", "12", "--sim", "fixture"]
+    done = subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert tool_calls(tmp_path) == [] and not (tmp_path / "scratch").exists()
+    run_dir = f"{tmp_path}/scratch/fusion-miniapp/test-43"
+    dry = [x.removeprefix("[dry run] ").rstrip() for x in done.stdout.splitlines() if x.startswith("[dry run] ")]
+    assert f"split {fleet}/endpoints into 2 blocks in order" in done.stdout
+    probes = [x.split() for x in dry if "probe_model.py" in x]
+    runs = [x.split() for x in dry if "-m fusion_miniapp.layer_autonmi" in x]
+    merges = [x.split() for x in dry if "-m fusion_miniapp.merge_records" in x]
+    assert len(probes) == 1 and len(runs) == 2 and len(merges) == 1
+    assert probes[0][:7] == ["python", f"{ROOT}/launch/probe_model.py", "--logs", fleet, "--idle", "--slice", "0/2"]
+    one = ["--preset", "hundredk", "--knobs", str(MACHINE_KNOBS[0]), "--knobs", str(MACHINE_KNOBS[1]), "--agents", "12",
+           "--sim", "fixture", "--llm", "openai", "--endpoints-file", f"{fleet}/endpoints", "--api-key-file",
+           f"{fleet}/api-key", "--model-wait", "3600", "--out", f"{run_dir}/run"]
+    assert probes[0][7:] == one
+    for i, run in enumerate(runs):
+        assert run == ["python", "-m", "fusion_miniapp.layer_autonmi", *one, "--slice", f"{i}/2", "--endpoints-file",
+                       f"{run_dir}/launch-{i}/endpoints", "--out", f"{run_dir}/run-{i}"]
+    assert merges[0][3:] == [f"{run_dir}/run-0", f"{run_dir}/run-1", "--out", f"{run_dir}/run"]
+    assert sum("nvidia-cuda-mps-control -d" in x for x in dry) == 1
+    assert done.stdout.count("echo quit | nvidia-cuda-mps-control") == 1
+
+    def stamped(out: str) -> str:   # each line without its time
+        return re.sub(r"^\[fusion-autonmi [^]]*\]", "", out, flags=re.M)
+    without = {k: v for k, v in env.items() if k != "FUSION_LAUNCHES"}
+    plain, single = (subprocess.run(args, cwd=tmp_path, env=e, capture_output=True, text=True, timeout=60)
+                     for e in (without, {**env, "FUSION_LAUNCHES": "1"}))
+    assert plain.returncode == single.returncode == 0 and stamped(single.stdout) == stamped(plain.stdout)
+    assert "--slice" not in plain.stdout and "merge_records" not in plain.stdout
+    for bad, why in ((dict(FUSION_LAUNCHES="0"), "a number of launches"),
+                     (dict(FUSION_LAUNCHES="two"), "a number of launches"),
+                     (dict(FUSION_RUNTIME="dragon"), "one Dragon runtime per node")):
+        refused = subprocess.run(args, cwd=tmp_path, env={**env, **bad}, capture_output=True, text=True, timeout=60)
+        assert refused.returncode == 2 and why in refused.stderr and "ended with status" not in refused.stdout
+    for used in ("run", "run-1"):   # not a dry run: the records merged must be this launch's
+        Path(run_dir, used).mkdir(parents=True)
+        refused = subprocess.run(args, cwd=tmp_path, env={**env, "FUSION_DRY_RUN": "0"}, capture_output=True,
+                                 text=True, timeout=60)
+        assert refused.returncode == 2 and f"{run_dir}/{used} exists" in refused.stderr
+        assert "ended with status" not in refused.stdout and tool_calls(tmp_path) == []
+        Path(run_dir, used).rmdir()
+
+
 def fake_submit(tmp_path) -> None:
     """AUTONMI's jobs/submit as a FIXTURE: `submit model FOLDER ...` is a model job that has started at once: it
     writes the folder's endpoints (one fake vLLM server's URL each, from FAKE_URLS in order), gpu.csv, a server log
@@ -502,6 +557,55 @@ def test_sigterm_to_the_launch_reaches_the_run_and_releases_the_servers(tmp_path
     assert (run.parent / "launch.pid").read_text() == f"{p.pid}\n"   # the PID signalled, as kill -TERM would
     assert json.loads((run / "run_record.json").read_text())["status"] == "interrupted"
     assert (run.parent / "fleet" / "model-0" / "stop").exists()
+    assert [c[1:] for c in tool_calls(tmp_path) if c[0] == "nvidia-cuda-mps-control"] == [["-d", ""], ["quit\n"]]
+
+
+@AUTONMI
+@pytest.mark.parametrize("interrupt", [False, True], ids=["complete", "sigterm"])
+def test_several_launches_against_fake_servers_on_two_model_nodes(tmp_path, interrupt):
+    """FUSION_LAUNCHES=2 on two fake model nodes (FIXTURES, as above), --agents 2: launch i runs campaign a<i> alone
+    (--slice i/2) against server i alone (launch-<i>/endpoints, one block of the fleet's, in order), each into its
+    own run folder run-<i>, under the one MPS daemon of the script (one start, one quit); then one record of the
+    two in run, by merge_records. Complete: both pass, so does the merged record, and the script exits 0.
+    `sigterm`: Slurm's warning to the script while both run reaches each launch, both records are interrupted, so
+    is the merged one, and the script exits 143. Either way each model job's stop file is written."""
+    job = f"80{os.getpid()}{int(interrupt)}"
+    p, fakes, env = stellar_run(tmp_path, 2, job, latency_s=1.0 if interrupt else 0.0, FUSION_LAUNCHES="2")
+    base = tmp_path / "scratch" / "fusion-miniapp" / f"test-{job}"
+    dirs = [base / f"run-{i}" for i in range(2)]
+    try:
+        if interrupt:
+            deadline = time.time() + 300
+            while not all(list(d.glob("agents-p*.jsonl")) for d in dirs):   # both launches' handlers are set
+                assert p.poll() is None and time.time() < deadline, (tmp_path / "job.out").read_text()[-4000:]
+                time.sleep(0.2)
+            time.sleep(1.0)
+            p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=600) == (143 if interrupt else 0), (tmp_path / "job.out").read_text()[-4000:]
+    finally:
+        if p.poll() is None:
+            p.terminate()
+            p.wait(timeout=60)
+        for f in fakes:
+            f.__exit__(None, None, None)
+    log = (tmp_path / "job.out").read_text()
+    status = "interrupted" if interrupt else "pass"
+    for i, d in enumerate(dirs):
+        rec = json.loads((d / "run_record.json").read_text())
+        assert rec["status"] == status, (i, rec["status"], log[-4000:])
+        assert (rec["knobs"]["agents"]["first"], rec["knobs"]["agents"]["count"]) == (i, 1)
+        assert (base / f"launch-{i}" / "endpoints").read_text() == fakes[i].url + "\n"
+        assert (base / f"launch-{i}" / "setup-files").read_text() == "endpoints\n"
+        if not interrupt:
+            assert [json.loads(x)["agent_id"] for x in (d / "agents.jsonl").read_text().splitlines()] == [f"a{i}"]
+            assert rec["llm_service"]["model_service"]["files"] == ["endpoints", "environment.txt"]
+        assert (base / "fleet" / f"model-{i}" / "stop").exists()
+        assert f"launch {i}/2 exited with status {143 if interrupt else 0}" in log
+    assert ("signal: SIGTERM to the run (" in log) == interrupt
+    merged = json.loads((base / "run" / "run_record.json").read_text())
+    assert merged["status"] == status and merged["knobs"]["agents"]["count"] == 2
+    assert [(m["agents"]["first"], m["status"]) for m in merged["merged_from"]] == [(0, status), (1, status)]
+    assert "were not merged" not in log and f"ended with status {143 if interrupt else 0}" in log
     assert [c[1:] for c in tool_calls(tmp_path) if c[0] == "nvidia-cuda-mps-control"] == [["-d", ""], ["quit\n"]]
 
 

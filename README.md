@@ -365,9 +365,19 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   picture (lag p95 1.9 s when stopped after 110 s); the same node served 618 calls/s to 8 launches of 400
   campaigns side by side (lag p95 5.5-6.3 ms). So on StellarAI that one process was the bound at 10,000 agents
   (see "Open items"). For more campaigns than one process can feed, several launches were run side by side by
-  hand (see "The StellarAI run path"); the launch script has no option for that. Fixture inner loops run on
-  threads that each keep one event loop (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would
-  walk every task of the process each time, and a run's time grew about with the square of its campaigns.
+  hand (see "The StellarAI run path"); the launch script now runs them with `FUSION_LAUNCHES` (configured and
+  checked on a laptop only). Fixture inner loops run on threads that each keep one event loop
+  (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the process each
+  time, and a run's time grew about with the square of its campaigns.
+- **Several launches side by side** (`--slice I/K`, which the launch script's `FUSION_LAUNCHES` gives each launch):
+  of the n campaigns given, launch I runs the I-th block of n/K, `a<first + I x n/K>` on; K must divide the
+  campaigns. `workers.sim_workers` counts the K launches' workers together: each launch's populations share a K-th
+  of it (rounded down; with `--sim real` a share too small for the populations is refused), and the inner loops'
+  thread limit (`sim.threads_per_worker: auto`) divides the CPUs by all of them, as for one launch. Locally a
+  launch's inner-loop workers take GPU numbers after those of the I launches before it (I x populations x
+  workers per population), so K launches on one node spread over its GPUs as one launch would; under Dragon they
+  number from 0. Each launch writes its own record, and `python -m fusion_miniapp.merge_records` makes one of them
+  ("What a run writes"). Checked on a laptop only.
 - **AsyncFlow's engine** finds finished tasks by checking every running one on every pass
   (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
   The layer gives each engine a set of running tasks that records completions as they happen
@@ -396,9 +406,12 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   - With `workers.gpu_per_worker` (on in the StellarAI knob file) the real inner loop's workers place themselves
     from inside their first task (see "The inner loop"), and the run prints one warning that this placement has
     not run on GPUs. With the knob, `sim.device: cuda` (as in the StellarAI knob file) and no GPU in
-    `CUDA_VISIBLE_DEVICES`, no worker could be placed, so the run is refused. Without the knob, `--runtime dragon
-    --sim real` is refused before anything starts when `CUDA_VISIBLE_DEVICES` names more than one GPU. Both
-    refusals give way to `FUSION_DRAGON_REAL_UNPLACED=1`. Without the knob and with no GPU named, a warning.
+    `CUDA_VISIBLE_DEVICES`, no worker could be placed, so the run is refused. With the knob and
+    `DRAGON_PATCH_TORCH` set (any value but empty), one more warning: Dragon then imports torch in every process it
+    starts, before a worker places itself (read in Dragon 0.15.0's source; whether that starts CUDA is not shown;
+    not run). Keep it unset for the first placement run. Without the knob, `--runtime dragon --sim real` is
+    refused before anything starts when `CUDA_VISIBLE_DEVICES` names more than one GPU. Both refusals give way to
+    `FUSION_DRAGON_REAL_UNPLACED=1`. Without the knob and with no GPU named, a warning.
   - Each population hands the head what the head cannot see from its own process, by files in the run folder
     that are removed once the record is written: at its end its event loop's lag (`speed.loop_lag`), its peak
     memory (`peak_rss_mb.agent_process_max`, `agent_processes_sum`) and its gc thresholds
@@ -477,7 +490,7 @@ uv pip install --python .venv/bin/python -e ".[stack,academy,dev]"
 
 ```sh
 python -m fusion_miniapp.layer_autonmi [options] [--populations N] [--workers N] [--runtime local|dragon] \
-    [--endpoints-file F] [--api-key-file F] [--model-wait S] [--no-vllm-metrics]
+    [--slice I/K] [--endpoints-file F] [--api-key-file F] [--model-wait S] [--no-vllm-metrics]
 python -m fusion_miniapp.run [options] [--use-academy]
 ```
 
@@ -490,7 +503,8 @@ python -m fusion_miniapp.run [options] [--use-academy]
 - `--out DIR`: a new or empty folder (the parent's logs append, so a folder that already holds a run is refused).
 
 The AUTONMI layer's `--llm openai` reads the servers from `--endpoints-file` and their key from
-`--api-key-file` (The model service, below); `--model-wait` (1,800 s) bounds the wait for them.
+`--api-key-file` (The model service, below); `--model-wait` (1,800 s) bounds the wait for them. Its `--slice I/K`
+makes the run launch I of K side by side ("The agent layers").
 
 **Exit codes:** 0 (`status: pass`: every campaign finished, every real evaluation passed its touch check, the model
 check passed, and on the AUTONMI layer AUTONMI's checks passed); 1 (`fail`); 143 (`interrupted`).
@@ -634,7 +648,36 @@ its model figures cover every call made up to the signal (`speed.coverage.model_
 `python -m fusion_miniapp.compare_records A/run_record.json B/run_record.json` checks two runs (two machines, or
 two layers): statuses, counts and non-machine knobs must agree; the campaigns too, exactly by digest or campaign by
 campaign within `--rtol`/`--atol`; speed numbers are reported, never failed on. Two asynchronous records are
-compared on their counts and invariants, not their digests.
+compared on their counts and invariants, not their digests. Two records whose `campaign_gaps` differ (merged
+records, below) disagree, and so does a generations-mode record without `results_sha256`.
+
+`python -m fusion_miniapp.merge_records RUN_DIR... --out DIR` writes one `run_record.json` for launches run side by
+side (`--slice`; the launch script runs it at its end with `FUSION_LAUNCHES` > 1). It refuses launches that differ
+in layer, inner loop, mode, this package's commit, AUTONMI's commit, or a knob other than `agents.first`,
+`agents.count` and the machine's own; launches whose campaign ranges overlap; a launch folder without a record; and
+an `--out` that holds a run. The merged record has:
+- `merged_from` (each launch's folder, `agents.first` and `count`, status, time and commit), `campaign_gaps` (the
+  campaign ranges between the launches that none of them ran), and `knobs.agents` with the first `first` and the
+  summed `count`;
+- the worst status (fail, then interrupted, then pass), `autonmi.ok` only when every launch's was, and the
+  AUTONMI checks failed in any launch;
+- sums: the counts (except those every launch has the same; of the message waits `n`, `sum`, `mean` and `max`;
+  `counts.agent_processes` is then the launches' populations), `llm_service`'s counts (and with `record.extras`
+  at most 5 refused replies per role), the touches, devices and lookups, `autonmi.inner_loop_gpus.workers_placed`,
+  `sim_workers_total`, and `peak_rss_mb.main_process` (a sum of peaks that may come at different times);
+- the rates, tokens per second and the means of calls open and running summed only when the launches' live
+  samples overlap in time (`speed.overlap` says which did); the agent phase, `wall_seconds`, the latency
+  percentiles, `sim_bound_ratio`, `all_live_s` and the event-loop lag (also per population) as `min` and `max`;
+  `speed.live`, the launches' series on one time grid with agents live and calls open summed;
+- `results_sha256`, the digest of every launch's campaigns when each launch's `agents.jsonl` is there and matches
+  its record, else null.
+
+It merges no percentile, which would need each call's or campaign's own times; it has none of one run's own fields
+(`run.host`, `threads`, the device probe); and it cannot be merged again.
+Checked on a laptop: 8 campaigns in one run against 4 + 4 (generations mode, stub, fixture) give the same digest and
+counts. Run here on the records of the 8 launches of 800 campaigns of 2026-11-25 (measured on StellarAI): 6,400
+campaigns, 204,800 evaluations, 682,388 model calls, 453 calls/s and 136 evaluations/s summed, 64 workers placed,
+agent phase 1,494-1,511 s, the same as the sums and ranges of the launches' own records.
 
 ## The model service
 
@@ -767,14 +810,16 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
 4. `launch/probe_model.py`; its failure stops the launch.
 5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none). (The script's
-   condition is a reused fleet or `FUSION_MODEL_NODES` > 0. Its daemon serves one launch: several launches at once
-   on one node were run with one daemon started outside the script, `FUSION_MPS=0`, and `CUDA_MPS_PIPE_DIRECTORY`
-   inherited.)
+   condition is a reused fleet or `FUSION_MODEL_NODES` > 0. Its daemon serves this launch, and with
+   `FUSION_LAUNCHES` each of its launches. Several runs of the script at once on one node were run with one daemon
+   started outside the script, `FUSION_MPS=0`, and `CUDA_MPS_PIPE_DIRECTORY` inherited; two daemons at once were
+   not tried.)
 6. The run, `python -m fusion_miniapp.layer_autonmi --preset hundredk --knobs knobs/machines/stellar_ai.yaml
    --knobs knobs/machines/stellar_ai_nemotron.yaml <the script's arguments> --llm openai --endpoints-file
    fleet/endpoints --api-key-file fleet/api-key --model-wait 3600 --out <run folder>/run`, started directly, so
    that its PID is the Python process's. The script's arguments come after the knob files, so a `--knobs` file
-   given there wins; `--agents` sets a smaller run. (Under Dragon: the paragraph after this list.)
+   given there wins; `--agents` sets a smaller run. (Under Dragon, and with `FUSION_LAUNCHES`: the paragraphs
+   after this list.)
 7. It stops the run only by SIGTERM to that PID: on Slurm's signal 15 minutes before the time limit
    (`--signal=B:TERM@900`; the run needs about a minute to write its interrupted record), or once the node's
    available memory falls below `FUSION_MEM_FLOOR_GIB` (100). It never signals an `srun` client. To stop a run
@@ -803,8 +848,8 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
 
 **Under Dragon (`FUSION_RUNTIME=dragon`; the default is `local`).** Configured and checked on a laptop only, with a
 fake Dragon launcher: no launch through this script has run under Dragon. Set `FUSION_ENV` to a venv that also
-holds Dragon and RaDEX's client ("What `--runtime dragon` needs", in "The agent layers"), and submit as below. The
-script then:
+holds Dragon and RaDEX's client ("What `--runtime dragon` needs", in "The agent layers"), keep `DRAGON_PATCH_TORCH`
+unset for the first placement run (the layer warns when it is set), and submit as below. The script then:
 - runs `python -m dragon -s <checkout>/src/fusion_miniapp/layer_autonmi.py <the same arguments> --runtime dragon`
   in step 6, and the check of step 4 gets `--runtime dragon` too;
 - exports `DRAGON_DEFAULT_SEG_SZ`, 64 GiB unless it is set: the value of the 2,000-campaign run that passed
@@ -824,6 +869,37 @@ As the runs by hand did on 2026-11-25: the venv activated, `ulimit -n` at the ha
 own runs on the machine reached the same servers without it), starting from the checkout (the script gives the
 knob files by absolute path), and `taskset` on the launcher (it did not reach the head in the one record that
 shows it: 96 CPUs recorded under a list of 80; measured).
+
+**Several launches in one job (`FUSION_LAUNCHES=k`; the default, 1, changes nothing).** Configured and checked on a
+laptop only (a dry run, and two launches against fake servers on two fake model nodes): no run of the script with
+it has run on the machine. It does in one run of the script what was done by hand on 2026-11-25: the script
+started 8 times side by side, each start with a server, an `agents.first` block and a run name of its own, one MPS
+daemon shared (measured: 8 x 800 campaigns with the real inner loop, all pass). With k > 1 the script:
+- refuses, with exit 2 before anything starts, `FUSION_RUNTIME=dragon` (one Dragon runtime per node and user:
+  inferred, two at once were not tried), and a `<run folder>/run` or `run-<i>` that exists, so that the records
+  merged are this launch's;
+- in step 3 writes `<run folder>/launch-<i>/endpoints`, block i of `fleet/endpoints` in order (k must divide the
+  servers, else the launch stops), each with a `setup-files` that names it alone, and rewrites the blocks whenever
+  `fleet/endpoints` changes;
+- in step 4 runs the check once, on the whole fleet, with `--slice 0/k`, so a k that does not divide the campaigns
+  stops the launch there; in step 5 starts one MPS daemon, whose pipe every launch inherits;
+- in step 6 starts k runs at once: launch i is the run above with `--slice i/k --endpoints-file <run
+  folder>/launch-<i>/endpoints --out <run folder>/run-<i>` after its arguments (the last of a repeated option
+  wins). It runs the i-th block of the campaigns against its own servers with a k-th of `workers.sim_workers`
+  (configured: 10 of 80 at k = 8; "The agent layers");
+- in step 7 sends each SIGTERM to every launch still running; one that comes while the launches start is held
+  until all have started;
+- waits for every launch, then writes one record of them, `<run folder>/run/run_record.json`, with `python -m
+  fusion_miniapp.merge_records` ("What a run writes"). A merge that fails prints a warning and leaves the exit
+  status as the launches give it: 0 when every launch exited 0, else the status of the first launch that failed
+  other than by SIGTERM, else 143. With `record.extras` a launch's record copies only its own
+  `launch-<i>/endpoints` of the servers' setup files.
+
+What the runs by hand did and the script does not: `--workers 8` per launch, and `taskset -c 16-95` on each launch,
+off the 16 cores the stand-in pinned its servers to (with the servers on nodes of their own there is nothing to keep
+apart; the effect of pinning was not isolated). Not run: `FUSION_LAUNCHES` or `--slice` on the machine, more than 8
+launches on a node, 10 workers per GPU, and launches that share a server (AUTONMI's counter checks would fail
+them: "The model service"; the script gives each launch servers of its own).
 
 **Once, on StellarAI (in place for the runs of 2026-11-25, except the `local.env` lines, which are not run):**
 
@@ -856,13 +932,25 @@ sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR
 # two nodes: one model node, and the campaigns with the real inner loop under MPS
 FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=01:30:00 sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
     "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 300
-# as written, this run and the next are bound by one process: see "The agent layers" (Locally)
-FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=03:30:00 sbatch --time=03:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
-    "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 5000
-# the scale run: four model nodes, 20,000 campaigns (100,000 agents)
-FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
-    "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch"
+# 5,000 campaigns on one model node, in 8 launches of 625, one per server (one launch is bound by its process:
+# see "The agent layers", Locally)
+FUSION_LAUNCHES=8 FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=03:30:00 sbatch --time=03:00:00 \
+    --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 5000
+# the scale run: four model nodes, 20,000 campaigns (100,000 agents), in k launches of 20,000 / k; k must divide
+# the 32 servers and the campaigns (for example 8, 16 or 32); which k is not measured
+FUSION_LAUNCHES=<k> FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 \
+    --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch"
+# or either of the last two as one launch under Dragon, 40 populations a starting point for the scale run
+# (see "The next checks under Dragon on the machine")
+FUSION_RUNTIME=dragon FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 \
+    --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --populations 40
 ```
+
+Both ways for the larger runs are configured, and neither has run as written. The several launches are what ran by
+hand to the end with the real inner loop (8 x 800 campaigns, measured), now one run of the script with
+`FUSION_LAUNCHES` (checked on a laptop only). Under Dragon one launch of 2,000 campaigns passed with the fixture
+inner loop and 400 failed with the real one, by hand and before the placement of 2026-11-26 (measured); the script
+with `FUSION_RUNTIME=dragon` and that placement are checked on a laptop only.
 
 - **Sizing** (measured on 2026-11-25 on one 8 x B200 node, the servers and the inner loop sharing its GPUs,
   asynchronous mode, with the Evaluator's key line, 8 launches side by side, one run each). A campaign makes
@@ -881,8 +969,9 @@ FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output=
   96 s, on 4 servers reused from a stand-in launcher, not with `FUSION_MODEL_NODES=0`. Two nodes: not run;
   `--agents 300` with the real inner loop under MPS passed in 176 s with the 8 servers on the campaign node's own
   GPUs. `--agents 5000` and the scale run: not run as one launch; one local launch was already bound by its
-  process at 2,000 campaigns (see "Open items"). With the Evaluator's key line, 8 launches at once (each its own
-  server and `agents.first` offset, one MPS daemon shared) finished 1,600 campaigns in 442-457 s and 6,400 in
+  process at 2,000 campaigns (see "Open items"). With the Evaluator's key line, 8 launches at once, started by hand
+  (each its own server and `agents.first` offset, one MPS daemon shared; what `FUSION_LAUNCHES=8` now does in one
+  run of the script, not run there) finished 1,600 campaigns in 442-457 s and 6,400 in
   1,494-1,511 s: about 100 s + 0.22 s per campaign through those two points (inferred), a guess past 6,400.
 - The wiring check's time is set by `model.sh`, which starts its 8 servers one at a time (about 2 minutes each in
   an earlier deployment on StellarAI, so about 16 minutes; inferred for 8, and still not measured: `model.sh` has
@@ -912,7 +1001,8 @@ FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output=
   and thinking on with a real model; steady state above 16,000 open calls; the real inner loop under Dragon and
   its placement there; this script with `FUSION_RUNTIME=dragon`; the changes of 2026-11-26 to this script and
   its check (`FUSION_RUN_NAME`, `launch.pid`, the scan's skipping of a stopping server's lines, the GPU check's
-  count of the servers left) and the record's `llm_service.unusable_samples`. Keeping and reusing servers, the
+  count of the servers left, `FUSION_LAUNCHES` with the layer's `--slice` and the merge of the launches' records)
+  and the record's `llm_service.unusable_samples`. Keeping and reusing servers, the
   refresh and the cancelling are tested on a laptop with fake Slurm tools and fake model jobs.
 - **The next checks under Dragon on the machine, in order** (the first three by hand, as "What `--runtime dragon`
   needs" gives the command):
@@ -923,7 +1013,7 @@ FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output=
   3. SIGTERM to a Dragon run's head process (`head.pid`): its interrupted record and exit status, what Dragon's
      launcher does, and what `dragon-cleanup` leaves in `/dev/shm`.
   4. This script with `FUSION_RUNTIME=dragon`, on a reused fleet as the runs of 2026-11-25 were.
-  5. The scale run (20,000 campaigns): the last line of the runs above with `FUSION_RUNTIME=dragon` and
+  5. The scale run (20,000 campaigns): the last line of the runs above, `FUSION_RUNTIME=dragon` with
      `--populations 40` as a starting point (inferred, not measured). 8 populations of 250 campaigns each ran at
      about 110% of a core (seen live, not saved); 40 give 500 campaigns each and 2 inner-loop workers each from
      `workers.sim_workers: 80`. For comparison, the local launches ran 800 campaigns per process to the end with
@@ -1014,8 +1104,11 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
   counts, one Monitor report per inner loop, the store at the end); the same results at 1, 2 or 16 Monitor slots,
   in 1, 2 or 5 populations, with caps and workers; the Monitors' numbers and the planted split; the mailbox,
   candidate queue and inboxes; an injected failure of each role ending its campaign alone; SIGTERM, and the model
-  figures it keeps (with the stub and the fake server); the record toggle, also the refused replies it keeps.
-  Under Dragon, with fakes only (no laptop test reaches Dragon): the refusal of the unplaced real inner loop,
+  figures it keeps (with the stub and the fake server); the record toggle, also the refused replies it keeps;
+  `--slice` (its block of the campaigns and share of the workers, its GPU numbers after the launches before it,
+  with faked GPUs, and the check's refusal of a count it does not divide).
+  Under Dragon, with fakes only (no laptop test reaches Dragon): the refusal of the unplaced real inner loop
+  (and the warning about `DRAGON_PATCH_TORCH`),
   `head.pid`, the GPU list reaching every inner-loop task, the workers placing themselves (`tests/test_pool.py`),
   and what a population hands the head by file. In the asynchronous mode: the invariants, a replay of recorded
   orders through the pure functions, each role's call counted and its reply reaching where it goes, the request
@@ -1029,7 +1122,9 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
 - **The launchers** (`tests/test_launch.py`): the three batch files against a stub `srun`; the StellarAI knob file
   and env file (also sourced last in a `local.env` made from AUTONMI's example); the StellarAI launch script's
   `bash -n`, its dry run in each of its three ways (and the run name), a whole launch against two fake model nodes
-  (fake Slurm and GPU tools, fake vLLM servers on localhost), SIGTERM reaching the run (its PID in `launch.pid`;
+  (fake Slurm and GPU tools, fake vLLM servers on localhost), and with `FUSION_LAUNCHES=2` its dry run (and its
+  refusals) and two launches against them, to the end or stopped by SIGTERM, merged into one record; SIGTERM
+  reaching the run (its PID in `launch.pid`;
   also with `FUSION_RUNTIME=dragon`, through `head.pid`, past a fake Dragon launcher, also a signal held until
   `head.pid` is there, with its own dry run), the wiring check with a fake `model.sh` (late endpoints, the
   endpoints' refresh, the stop file), launches that stop before the run (a `model.sh` that ends, also under Dragon
@@ -1037,6 +1132,11 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
   state from squeue: one failed call, an end state, none at the end), and servers kept by one launch and reused by
   the next (with the GPU check's count of the servers left); `launch/probe_model.py` against two fake servers,
   each reason it stops a launch, and a stopping server's trace it skips.
+- **The merge of launches' records** (`tests/test_merge_records.py`): 8 campaigns in one run against 4 + 4 (the
+  same digest and counts, and `compare_records` finds them in agreement); the refusals (overlapping ranges, another
+  knob, layer, inner loop or commit, damaged campaign rows, an `--out` that holds a run or `run.lock`); worst
+  status, gaps, unknown counts after SIGTERM, rates summed only when the launches overlap in time, the refused
+  replies kept with `record.extras`. `compare_records` on gaps and a missing digest (`tests/test_run_record.py`).
 - `tests/test_decode_metric.py` checks the decoding metric's arithmetic against brute-force recounts.
 
 ## What has run, and what has not
@@ -1077,7 +1177,10 @@ and laptop timings, not performance claims for a machine. Every number below is 
   launcher is a FIXTURE that runs the layer locally. The layer's other Dragon pieces of 2026-11-26 (the guard,
   the placement, the populations' files) ran in unit tests with fakes only. Also of 2026-11-26 and run on the
   laptop only: `FUSION_RUN_NAME`, `launch.pid`, the check's skipping of a stopping server's lines, the GPU check's
-  count of the servers left, the reworded line of an interrupted run, and `llm_service.unusable_samples`.
+  count of the servers left, the reworded line of an interrupted run, `llm_service.unusable_samples`, the
+  warning about `DRAGON_PATCH_TORCH` with the placement, and `FUSION_LAUNCHES` with the layer's `--slice` (a dry run,
+  and two launches against fake servers). `merge_records` ran on the laptop and on the saved records of the 8
+  launches of 800 campaigns (in "What a run writes").
 - **The StellarAI run path on one 8 x B200 node, 2026-11-25** (dev `8c1450f`, vLLM 0.27.1, AUTONMI at `e20861a`;
   launches with `bash` as `srun` steps, servers from a stand-in for `model.sh` and reused; the asynchronous mode,
   32 evaluations per campaign; one run per configuration; the rows, probe, load-ladder and A/B files and every
@@ -1086,8 +1189,8 @@ and laptop timings, not performance claims for a machine. Every number below is 
     with the 8 servers on the same GPUs (`--agents 300`): pass in 176 s, 9,600 evaluations on `cuda`;
   - one local launch of 2,000 campaigns (10,000 agents) was bound by its one process and was stopped after 6
     minutes with no campaign finished; 8 launches of 400 fixture campaigns at once, one per server: all pass, 618
-    model calls/s together; on this commit the Evaluator's reply was usable in 40-41% of tries, and 23-24% of its
-    asks fell back;
+    model calls/s together; on `8c1450f` (before the Evaluator's key line) the Evaluator's reply was usable in
+    40-41% of tries, and 23-24% of its asks fell back;
   - with the Evaluator's key line (then an uncommitted change; now in `decide.scores_messages`), the real inner
     loop and one shared MPS daemon: 8 x 800 campaigns (32,000 agents) all pass in 1,494-1,511 s (204,800
     evaluations on `cuda`, 453 model calls/s, no Evaluator fallback), and 8 x 200 in 442-457 s; 8 x 2,500
@@ -1127,20 +1230,21 @@ FlowGentic's MCP tool route. The 2026-11-19 ladder in
   run each): one local-runtime process does not drive 10,000 agents against 8 servers (event-loop lag p95
   1,545 ms, 352 model calls/s on average where the node does 618 when fed, no campaign finished in 6 minutes;
   `--populations 40` is still one process). What worked: 8 launches at once, started by hand, each with its own
-  `agents.first` offset and its own model server (8 separate records; nothing merges them; 8 x 800 campaigns to
-  completion with the real inner loop), and one launch of 2,000 campaigns under `--runtime dragon` with 8
-  populations, with the fixture inner loop only (and with the Evaluator's key line). Open: the scale run as one
-  launch; several launches from the launch script; one record for split launches; the real inner loop under
-  Dragon (it failed beside the servers while `workers.gpu_per_worker` was not applied there; the placement from
-  inside the task and the launch script's `FUSION_RUNTIME=dragon` are in, not run on the machine: see "The next
-  checks under Dragon"); populations on several nodes; servers on nodes of their own.
+  `agents.first` offset and its own model server (8 separate records, which `merge_records` now makes one; 8 x 800
+  campaigns to completion with the real inner loop), and one launch of 2,000 campaigns under `--runtime dragon`
+  with 8 populations, with the fixture inner loop only (and with the Evaluator's key line). Open: the scale run as
+  one launch; several launches from the launch script and one record for them (`FUSION_LAUNCHES`, `--slice` and
+  `merge_records` are in, not run on the machine); the real inner loop under Dragon (it failed beside the servers
+  while `workers.gpu_per_worker` was not applied there; the placement from inside the task and the launch script's
+  `FUSION_RUNTIME=dragon` are in, not run on the machine: see "The next checks under Dragon"); populations on
+  several nodes; servers on nodes of their own.
 - **Dragon and RaDEX from `run.py`.** The AUTONMI layer runs under Dragon with RaDEX through its own entry point;
   the other two layers take them only when passed in by hand (`run.Services.open(backend=, store=, model=)`,
   `layer_langgraph.run_agents(store=, replicas=)`).
 - **Memory per live campaign** at P 16 was about 629 KiB (LangGraph) and 364 KiB (Academy) of host memory per
   agent process with fixture campaigns (measured); on the AUTONMI layer the 8,872 MiB peak at 10,000 campaigns
   is about 0.9 MiB per campaign (inferred: the peak divided by the campaigns, the interpreter included).
-  Not measured: a full 100,000-agent run, real GPU inner loops at scale, the model servers' memory.
+  Not measured: a full 100,000-agent run to completion, and the real inner loop past 6,400 campaigns.
 - **The five parent files** contain site paths with a project directory name and two other people's
   user-directory names. They must stay byte-identical here; decide before publishing whether they ship as they
   are.
