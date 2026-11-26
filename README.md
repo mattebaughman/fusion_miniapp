@@ -13,7 +13,8 @@ It is built to run 100,000 hosted agents at once: on the AUTONMI layer a campaig
   `fusion_miniapp.run`) and Academy (`--use-academy`), run the same campaigns with three agents each, in the
   generations mode only. They are kept unchanged as the comparison the AUTONMI layer is checked against.
 - **The run path on StellarAI** (`launch/stellar_ai_autonmi.sbatch`) brings up NVIDIA Nemotron 3.5 Lightning on
-  vLLM, checks every server, and runs the campaigns against it. It is configured and checked on a laptop only.
+  vLLM, checks every server, and runs the campaigns against it. It ran in part on one StellarAI node on
+  2026-11-25 (see "The StellarAI run path").
 
 **All physics output is synthetic.** The inner loop runs the real IGNOS inner-loop code over small stand-in
 models with random weights. It makes the same kinds of data flow, library loads and resource touches as the
@@ -148,7 +149,8 @@ arrives. The decisions are pure functions of each agent's state and what arrived
   scores and the Coordinator's guidance. A value in the reply replaces the profile's value for that parameter,
   clipped to range; a parameter the reply leaves out keeps the evolutionary loop's value. The request's last line
   names its candidates ("Candidates 5 and 6 of 32: reply with a JSON list of 2 objects ..."), and its JSON schema
-  goes as `response_format`.
+  goes as `response_format`. With Nemotron on StellarAI (2026-11-25) 87-89% of candidates had all 7 values from
+  the reply and none had 0 (`counts.asynchronous.parameters_filled`; measured).
 - **The score is a keep-probability between 0 and 1.**
   - `q`, from numbers: the keep-probability the parent's `select_survivors` would give this result if it and the
     campaign's last P scored results were one generation (best always kept, worst never, the rest by rank;
@@ -156,7 +158,9 @@ arrives. The decisions are pure functions of each agent's state and what arrived
   - `m`, the Monitor's number: from -1 (the trace looked like low-ranked candidates') to +1 (like high-ranked
     ones'), 0 when it cannot tell.
   - With the model, the Evaluator's call reads each result's numbers, q, the Monitor's numbers and its note, and
-    its reply is the score. The prompt shows neither the score from numbers nor its formula.
+    its reply is the score. The prompt shows neither the score from numbers nor its formula. Its second-to-last
+    line names the reply's keys (`Use exactly these JSON keys, the candidate numbers alone as strings: "5", "6".`);
+    without it Nemotron often wrote them as `"candidate 5"`, which `parse_scores` cannot use.
   - Without the model (`llm.mode: off`, or after 3 failed tries): score = q + `monitor.weight` x m, clipped to
     0..1. `monitor.weight` defaults to 0.25; at 0 this is IGNOS's rule over the last P results.
 - **Survival.** The Coordinator keeps a result when its draw from its own random stream is below the score, and
@@ -191,8 +195,32 @@ the model servers (The model service, below).
 |---|---|---|---|---|---|
 | Generator | per take of 2 | `async_generator_messages` | a JSON list of 2 objects (`parse_reconcile`) | 320 tokens (`reply_tokens(2)`) | the profiles unchanged |
 | Monitor | per candidate | `note_messages` | any text: the note (`parse_text`) | 128 | no note |
-| Evaluator | per cycle | `scores_messages` | a JSON object of each candidate's keep-probability (`parse_scores`) | 32 + 16 per result | the score from numbers |
+| Evaluator | per cycle | `scores_messages` | a JSON object keyed by the candidate numbers as strings (`{"5": 0.7, "6": 0.2}`), each value the keep-probability (`parse_scores`) | 32 + 16 per result | the score from numbers |
 | Coordinator | per cycle, after it sends the survivors | `guidance_messages` | any text: the guidance (`parse_text`) | 256 | no guidance |
+
+Measured on StellarAI on 2026-11-25 (thinking off; one fixed prompt per role with no trace and no note; 64 calls
+per role per server, ranges over 8 servers; real prompts were about 5% longer on average; before the Evaluator's
+key line, so its prompt here is the 528-token one without it):
+
+| Role | Prompt tokens | Reply tokens p50 / p90 / max | Parsed |
+|---|---|---|---|
+| Generator (2 candidates, JSON schema) | 546 | 208-223 / 231 / 333 | 512 of 512 |
+| Monitor | 271 | 34-39 / 47-54 / 79 | 512 of 512 |
+| Evaluator | 528 | 27 / 37-55 / 62 | 231 of 512 |
+| Coordinator | 672 | 71-80 / 98-134 / 234 | 512 of 512 |
+
+- **Calls per campaign** (measured, the asynchronous mode, 32 evaluations per campaign): 133-136 in the passing
+  runs before the Evaluator's key line, about 107 first asks (the record's expectation is 112) plus about 28
+  Evaluator retries; 106.6-108.2 with it. The launch probe's 2-candidate Evaluator request grew from 528 to 547
+  prompt tokens with the line.
+- **The reply cap** (`llm.reply_cap: 4096` in the StellarAI knob file) is far above the replies (measured):
+  3 of 646,086 calls ended on `length` in the afternoon's runs, 10 of 682,388 in the 8 x 800 real run, and 1 of
+  56,985 Coordinator calls in the load tests. The largest replies, in tokens, in the probe and in the load tests:
+  Generator 333 and 352-379, Monitor 79 and 100-124, Evaluator (2 results) 62 and 63-67, Coordinator 234 and
+  1,031-2,949, besides the one cut at 4,096. Not measured: which roles hit the cap in the campaign runs (finish
+  reasons are not per role in the record), and reply sizes when the Evaluator scores more than 2 results. Some
+  replies exceed their allowance above (Generator 320, Evaluator 64 for 2 results), so the allowances cannot
+  serve as the cap as they are: a cut JSON reply cannot be parsed and costs a try.
 
 - **Tries.** A call that fails is tried up to 3 times (`layer_autonmi.TRIES`), then the role's fallback is used
   and counted. A failure is an error, or a reply the role's parse function cannot use. A try is one request; it
@@ -216,7 +244,8 @@ the model servers (The model service, below).
   fail (an error); then the refill keeps the parent's mutants and the summary is left out (`""`), counted, and
   the campaign goes on. The LangGraph and Academy layers end the campaign at the first failed call, so the
   layers differ on this failure path only. An assessment shows a generation's P results; at P 16 its longest
-  prompt (about 28,400 characters) is above the bound, and it changes no result.
+  prompt (about 28,600 characters with the line that names the reply's keys; computed, not measured) is above
+  the bound, and it changes no result.
 - **Request settings** (each null by default, so that every request is as before; `run.py`'s layers refuse them
   set): `llm.thinking` (off: `chat_template_kwargs {enable_thinking: false}` on every call through AUTONMI's
   transports, and no thinking budget; on: the budget as `llm.send_thinking_budget` says), `llm.reply_cap`
@@ -294,9 +323,12 @@ instant, torch-free stand-in for large agent counts. It makes no touches.
 Real inner loops run in spawned worker processes (`pool.ResilientProcessPool`), never on the agents' event loop.
 With `workers.gpu_per_worker` (the AUTONMI layer, `--sim real`) each worker takes the next number i from one
 counter that every population's pool shares, and sees only GPU i mod the number of GPUs the device probe saw
-(`pool.on_gpu`, through `CUDA_VISIBLE_DEVICES`; the record's `autonmi.inner_loop_gpus`). It is tested with a
-faked GPU count only; real placement is unverified until a run on GPU nodes. Device rule: `cuda` if available,
-else `cpu` (ROCm builds answer through `torch.cuda`).
+(`pool.on_gpu`, through `CUDA_VISIBLE_DEVICES`; the record's `autonmi.inner_loop_gpus`). The tests fake the GPU
+count. On one StellarAI node on 2026-11-25 (local runtime, an MPS daemon, the model servers on the same 8 GPUs;
+measured) 80 workers were placed on GPUs 0-7 and 9,600 of 9,600 evaluations ran on `cuda`; later 8 launches at
+once, 8 workers each, ran 204,800. Under `--runtime dragon` the knob is not applied (the record has
+`workers_placed: 0`), and a run with the real inner loop beside the servers failed in every campaign. Device
+rule: `cuda` if available, else `cpu` (ROCm builds answer through `torch.cuda`).
 
 ## The agent layers
 
@@ -321,9 +353,17 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   campaigns (3 + `campaign.slots` agents each); a cap below one campaign is refused.
 - **When one agent fails**, the others of its campaign end with an error instead of waiting, and the campaign is
   one line with that error, the failing `role` and every role's model calls. The other campaigns go on.
-- **Locally** the populations run in one process. Fixture inner loops run on threads that each keep one event
-  loop (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would walk every task of the process each
-  time, and a run's time grew about with the square of its campaigns.
+- **Locally** (`--runtime local`, which `launch/stellar_ai_autonmi.sbatch` runs) one launch is one Python process
+  whatever `--populations` is: the populations are blocks of that process's event loop, not processes. Measured
+  on StellarAI on 2026-11-25 (one 8 x B200 node, 8 servers, fixture inner loop, before the Evaluator's key line):
+  one launch of 2,000 campaigns averaged 352 model calls/s with an event-loop lag p95 of 1.5 s and finished no
+  campaign in 6 minutes; `--populations 40` gave 40 population folders in the same one process and the same
+  picture (lag p95 1.9 s when stopped after 110 s); the same node served 618 calls/s to 8 launches of 400
+  campaigns side by side (lag p95 5.5-6.3 ms). So on StellarAI that one process was the bound at 10,000 agents
+  (see "Open items"). For more campaigns than one process can feed, several launches were run side by side by
+  hand (see "The StellarAI run path"); the launch script has no option for that. Fixture inner loops run on
+  threads that each keep one event loop (`layer_autonmi.FixturePool`): RHAPSODY's `asyncio.run` per task would
+  walk every task of the process each time, and a run's time grew about with the square of its campaigns.
 - **AsyncFlow's engine** finds finished tasks by checking every running one on every pass
   (`workflow_manager.py:1679-1684` at radical.asyncflow `3f18cc8`), which also grows with the square of a run.
   The layer gives each engine a set of running tasks that records completions as they happen
@@ -335,7 +375,30 @@ python -m dragon -s src/fusion_miniapp/layer_autonmi.py --runtime dragon --popul
   at 10,000 campaigns four of them stalled the event loop for up to 6.7 s each (measured).
 - **Under Dragon** (`--runtime dragon`) each population is a Dragon process, its inner loops run on RHAPSODY's
   native Dragon backend, and the store is RaDEX. A run uses one node: AUTONMI does not place populations on nodes
-  yet. Untested in this package's tests.
+  yet. Not run by this package's tests. On the machine (2026-11-25: one 8 x B200 StellarAI node, Dragon's
+  single-node mode `-s`, dragonhpc 0.15.0, RHAPSODY `857e093`, RaDEX `50449a0`; run by hand with `python -m
+  dragon`, not through the launch script) it ran once at each of two sizes, fixture inner loop: 100 campaigns in
+  2 populations on the stub, and 2,000 campaigns (10,000 hosted agents) in 8 populations in the asynchronous mode
+  against 8 model servers on the same node. Both passed; the second's agent phase took 406 s (532 model calls/s,
+  all 10,000 agents live together for 304 s; measured), where one local launch of that size finished no campaign
+  in 6 minutes (the local launch without the Evaluator's key line, the Dragon run with it; one run each).
+  **`--sim real` does not work under Dragon yet:** 400 campaigns all failed on GPU errors. The inner-loop workers
+  are not placed on GPUs there (`workers.gpu_per_worker` is not applied), which fits the memory errors among them;
+  the others are unexplained. Not run under Dragon: several nodes; SIGTERM and the interrupted record; the launch
+  script; the generations mode against a real model; more than 8 populations; any repeat.
+- **What `--runtime dragon` needs** beyond `requirements-autonmi.txt` (as run on StellarAI, 2026-11-25):
+  - RHAPSODY at the pinned commit `857e093` with its `dragon` extra: `dragonhpc[requests]==0.15.0`, `flask`,
+    `gunicorn` (whether flask and gunicorn are needed was not checked). A venv made over another environment can
+    keep RHAPSODY's release instead: check `pip freeze`.
+  - RaDEX's Python client, built from source against that Dragon (github.com/radical-cybertools/radex; commit
+    `50449a0` ran; nothing pins one). Without it the run stops at `open_store`: "RadexStore needs RaDEX's Python
+    client". The client links to RaDEX's install folder, which must stay.
+  - The launcher takes the layer as a script path, Dragon's options before it and the layer's after:
+    `python -m dragon -s <checkout>/src/fusion_miniapp/layer_autonmi.py <options> --runtime dragon --out DIR`,
+    in the activated venv with `ulimit -n` at the hard limit; `dragon-cleanup` afterwards (both were always used;
+    whether they are needed was not checked).
+  - A run's verdict is `run_record.json`'s `status`. `summary.json` alone said `ok` for a run that failed
+    before its populations started.
 - **What it writes** is what `run.py` writes, with `agent_layer: autonmi` and an `autonmi` section (AUTONMI's own
   verdict), plus AUTONMI's folders (`launcher/`, `populations/`, `app/`, `otel/`) and `summary.json`, checked by
   workflow-mini-apps' `MiniApp`. So `compare_records` compares it with the other layers' runs.
@@ -422,7 +485,9 @@ model that never answers would leave every campaign on the parent's mutants, and
   (measured). The AUTONMI layer's interrupted record keeps the model figures of every call made up to the signal,
   the unfinished campaigns' included, and says so (`speed.coverage.model_calls`): each population that has not
   ended writes its call sums and its roles' model counts then (`Script.cut_short`). `counts.by_role`'s other counts
-  come from AUTONMI's rows, which a population writes only when it ends.
+  come from AUTONMI's rows, which a population writes only when it ends. The top-level `counts.llm_calls` sums the
+  finished campaigns only (0 when none had finished): the figures of every call are under `llm_service` and
+  `counts.by_role`.
 - An inner-loop worker that dies: its pool rebuilds once and resubmits the lost evaluations. A cold-start child
   exits when its worker dies.
 
@@ -437,7 +502,7 @@ section.
 |---|---|
 | `sim` | `nodes_per_plane`, `planes`, `rollout_steps`, `puffs`, `fixed_point_cap` (every fixed point runs to it), `model_width`, `checkpoint_mb`, `device` (auto = cuda if available, else cpu), `cold_start_fraction` (share of evaluations run in a fresh single-use process, chosen from the campaign, generation and candidate number, so it repeats), `keep_artifacts`, `work_root` (`$VARS` expanded; an unset one is an error), `threads_per_worker` (auto = the CPUs this process may use ÷ `workers.sim_workers`) |
 | `agents` | `count` (campaigns), `first` (the first campaign's index and seed: a run hosts `a<first>` to `a<first+count-1>`), `per_process`, `max_live` (null = all of a process's campaigns), `start_together` (the AUTONMI layer; needs `max_live: null`), `cost_scale` (a number, or a short list: campaign i uses entry i % length; it multiplies `nodes_per_plane` and `fixed_point_cap`), `thinking_budget`, `budget_scales_with_cost` |
-| `outer` | `population` (P), `generations` (G), `generator` (llm or mutation; the asynchronous mode refuses mutation unless `llm.mode` is off), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
+| `outer` | `population` (P), `generations` (G; evaluations per campaign = P x G; in the generations mode model calls = G; in the asynchronous mode there are no generations and P x G is the campaign's budget of evaluations), `generator` (llm or mutation; the asynchronous mode refuses mutation unless `llm.mode` is off), `rng` (shared or per_agent; the asynchronous mode always has per_agent's two streams), `logs` (per_agent or none), `wall_weight` (the parent's 0.7), `noise` (the parent's 0.1), `parent_stdout` (keep or drop the parent's prints) |
 | `tools` | `constraints_lookup`, `abstract_lookup`, `latency_ms` |
 | `llm` | `mode` (stub, openai, or off: no model calls, the asynchronous mode only), `base_url_env`, `api_key_env`, `model`, `send_thinking_budget`, `timeout_s`, `max_retries`, `min_model_share`, `max_empty_share`, `stub_latency_s` (emulated), `max_in_flight` and `admission_tokens` (the AUTONMI layer's admission caps per model server; 0 tokens: no token cap); the AUTONMI layer's request settings, null by default: `thinking` (off or on; YAML's bare `off` and `on` are read as these), `reply_cap`, `temperature`, `top_p` (above 0, at most 1); and `outage_s` (how long a call waits out a server that went away; 1,800, AUTONMI's) |
 | `workers` | `sim_workers` (inner-loop processes in all; each agent process or population gets its share, at least one); `gpu_per_worker` (the AUTONMI layer with `--sim real`; default false) |
@@ -449,7 +514,7 @@ section.
 |---|---|---|---|---|---|---|
 | `smoke` | 100 | 4 | 2 | 8 | 800 | seconds with `--sim fixture`, a few minutes with real inner loops on a laptop CPU |
 | `ignos_shape` | 4 | 16 | 20 | 320 | 1,280 | the parent campaign's shape; larger inner loops |
-| `hundredk` | 100,000 | 16 | 2 | 32 | 3.2 million | 10 agent processes of 10,000; `logs: none`, `parent_stdout: drop` |
+| `hundredk` | 100,000 | 16 | 2 | 32 | 3.2 million | 10 agent processes of 10,000 (`run.py`'s layers; on the AUTONMI layer with `--runtime local` these are populations of one process); `logs: none`, `parent_stdout: drop` |
 
 None is calibrated. With real inner loops, `hundredk` is set by inner-loop throughput (about 0.16 s each on a
 laptop CPU). `knobs/machines/` holds the machine files: `sim.device: cuda` for each of the three batch files, and
@@ -477,6 +542,12 @@ asynchronous mode `campaign_mode: async` and `counts.asynchronous`: results scor
 warm-up), each role's cycles, the Generator's waits for survivors and its proposals by the parameters their
 replies filled (0 to 7). The roles' own calls are counted, not listed: each population sums them
 (`layer_autonmi.CallSums`) for the record's model figures.
+- On this layer `counts.agent_processes` is the number of populations (`autonmi.populations`); with `--runtime
+  local` they share one process, and `peak_rss_mb.agent_processes_sum` is that one process's peak.
+- In the asynchronous mode `counts.expected_per_agent.llm_calls` and `expected_by_role.<role>.llm_calls` are the
+  most a campaign can ask (112 at the StellarAI shape): a cycle of the Evaluator or the Coordinator takes every
+  result that has arrived. On StellarAI on 2026-11-25 campaigns asked 105.5-108.4 first asks each (measured, the
+  passing runs of 100 campaigns or more), plus retries.
 
 **The record toggle, `record.extras`** (off by default). Off, its additions are left out: the roles' own calls
 are counted, not listed (the record has the tokens per second, `speed.model_tokens_per_s`, and each line its
@@ -497,7 +568,8 @@ also hold:
 **The `speed` section**, for the goal of 100,000 agents working at once:
 - campaigns live at once (maximum, time-weighted mean, seconds with at least 95% of the requested campaigns
   live, ramp-up); the agent phase (first campaign start to last finish), with start-up and shutdown apart;
-- evaluations, model calls, generations and campaigns per second; inner loops in flight and executing;
+- evaluations, model calls, generations (0 in the asynchronous mode) and campaigns per second; inner loops in
+  flight and executing;
 - the mean, 50th and 95th percentiles and the maximum of inner-loop time, queue wait (on the AUTONMI layer from
   when the candidate was put on the queue, so with its wait for a free Monitor slot), generation time and
   model-call latency; event-loop lag;
@@ -522,7 +594,8 @@ against the client's admission caps:
 - `headline`: the servers' running count where there are servers, else the client-side count (labelled emulated
   with the stub);
 - `rates_per_s.model_calls_all_agents` counts every agent's calls (every try); `counts.llm_calls` the outer
-  loop's (the refills and summaries; in the asynchronous mode every call answered).
+  loop's (the refills and summaries; in the asynchronous mode every call answered by the campaigns that reported;
+  in an interrupted record every call up to the signal is in `llm_service.calls`).
 
 An interrupted run's speed numbers cover only the campaigns that finished (`speed.coverage`); on the AUTONMI layer
 its model figures cover every call made up to the signal (`speed.coverage.model_calls`).
@@ -534,8 +607,12 @@ compared on their counts and invariants, not their digests.
 
 ## The model service
 
-What the AUTONMI layer's `--llm openai` needs of the model servers. Tested against `tests/fake_vllm.py` only (a
-FIXTURE standing in for a vLLM server); real vLLM is unverified until a run on the machine.
+What the AUTONMI layer's `--llm openai` needs of the model servers. Tested against `tests/fake_vllm.py` (a
+FIXTURE standing in for a vLLM server) and, on 2026-11-25, used against real vLLM 0.27.1 servers on one StellarAI
+node: the endpoints and key files, the `/v1/models` check, chat completions with thinking off, `/metrics`
+sampling with AUTONMI's counter checks passing, and the servers' `--max-num-seqs` as the only cap. Not exercised
+on real servers: an outage or a requeue, the thinking budget, the copy of the setup files (`record.extras`),
+servers on another node, two runs sharing one server.
 - **Endpoints file** (`--endpoints-file`): one base URL per line, without `/v1` (for example
   `http://nid001234:8000`). Each server must answer `/health` without a key; the run waits up to `--model-wait`
   seconds for all of them, re-reading the file. The key, if the servers have one, is in the file
@@ -585,13 +662,19 @@ FIXTURE standing in for a vLLM server); real vLLM is unverified until a run on t
 ## The StellarAI run path
 
 The campaigns against NVIDIA Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`) on
-vLLM 0.27.1, on StellarAI's 8 x B200 nodes. **Configured and checked on a laptop only; nothing here has run on the
-machine.**
+vLLM 0.27.1, on StellarAI's 8 x B200 nodes. **Run in part on one StellarAI node on 2026-11-25 (dev `8c1450f`).**
+The launch script ran unmodified, but with `bash` as `srun` steps of a held job, not through `sbatch`: its
+`#SBATCH` lines (`--signal=B:TERM@900` among them) were not exercised. The servers were started by a stand-in for
+AUTONMI's `jobs/model.sh` (the flags of `launch/stellar_ai_model.env`, all servers in parallel), and every launch
+reused them through `FUSION_MODEL_FLEET`, on fleet folders assembled by hand. Not run: `FUSION_MODEL_NODES` 0 or
+N, `jobs/model.sh`, `jobs/local.env`, model jobs, a second node. The results are under "What has run, and what has
+not".
 
 **The files:**
 - `knobs/machines/stellar_ai_nemotron.yaml`, applied over the `hundredk` preset and `stellar_ai.yaml`
   (`sim.device: cuda`):
   - `agents.count: 20000` for the scale run (100,000 hosted agents); `campaign.mode: async`, `campaign.slots: 2`;
+    no generations: `outer.population` x `outer.generations` = 32 evaluations is each campaign's budget;
   - `llm.mode: openai`, `llm.model` the full name above;
   - `llm.thinking: off`, `llm.send_thinking_budget: false`, `llm.reply_cap: 4096`, `agents.thinking_budget: 4096`
     (sent only with thinking on);
@@ -599,7 +682,11 @@ machine.**
   - `llm.timeout_s: 86400` (no per-call limit in practice: the longest job is 24 h), `llm.outage_s: 300`;
   - `llm.max_in_flight: 1000000`, `llm.admission_tokens: 0` (the client's caps out of reach);
   - `workers.sim_workers: 80`, `workers.gpu_per_worker: true` (the real inner loop, 10 workers per GPU),
-    `sim.work_root: $TMPDIR` (node-local).
+    `sim.work_root: $TMPDIR` (node-local). Measured on one node shared with the servers (2026-11-25, real inner
+    loop): with 8 workers for 800 campaigns the workers were busy 47% of the time, yet `queue_wait_s` was 61 s at
+    p95 and up to 2 minutes; with 80 workers for 300 campaigns its p95 was still 48 s, about the longest single
+    evaluation. The median wait was 0.03 s or less in both. More workers shorten the queue but not a worker's
+    first evaluation (inferred from the longest evaluation; when the waits fell is not recorded).
 - `launch/stellar_ai_model.env`: the model servers' settings for AUTONMI's `jobs/model.sh` (the weights path,
   `RASCAL_MODEL_NAME` = `llm.model`, the tool parser, `RASCAL_VLLM_RESTARTS=3`), the serving flags
   (`RASCAL_VLLM_ARGS`: TRITON attention, an FP8 KV cache, no prefix caching, 92% of GPU memory, a 16-bit Mamba
@@ -611,7 +698,10 @@ machine.**
   a server that does not list `llm.model`, a prompt that does not fit `max_model_len` with the reply cap, an HTTP
   error, a time-out (300 s, its own) or an empty reply, a Traceback or EngineDeadError in a server log, and with
   `--idle` a server that is not idle. It reports each reply's finish reason, whether the role could use it,
-  usage and latency. It never prints the key.
+  usage and latency. It never prints the key. On the machine (2026-11-25) the scan passed once on 8 real, clean
+  logs. A vLLM 0.27.1 server stopped by SIGTERM often leaves one `Traceback` and one `EngineDeadError` line as it
+  shuts down (5 of 16 stops, later 6 of 8; measured); by the rule above, a later launch whose fleet folder still
+  holds such a log would stop (inferred; not run).
 
 **How the launch script gets the servers:**
 
@@ -639,7 +729,10 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    looked at every 10 s), and `fleet/setup-files`, the files a run with `record.extras` copies (the endpoints,
    `gpu.csv`, each `vllm-<i>.log` and each job's output) and nothing else.
 4. `launch/probe_model.py`; its failure stops the launch.
-5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none).
+5. With the servers on other nodes, an MPS daemon for this node's GPUs (`FUSION_MPS=0`: none). (The script's
+   condition is a reused fleet or `FUSION_MODEL_NODES` > 0. Its daemon serves one launch: several launches at once
+   on one node were run with one daemon started outside the script, `FUSION_MPS=0`, and `CUDA_MPS_PIPE_DIRECTORY`
+   inherited.)
 6. The run, `python -m fusion_miniapp.layer_autonmi --preset hundredk --knobs knobs/machines/stellar_ai.yaml
    --knobs knobs/machines/stellar_ai_nemotron.yaml <the script's arguments> --llm openai --endpoints-file
    fleet/endpoints --api-key-file fleet/api-key --model-wait 3600 --out <run folder>/run`, started directly, so
@@ -651,14 +744,18 @@ What it does, in order (all of it printed by `FUSION_DRY_RUN=1`):
    early, use `scancel --batch --signal=TERM <job id>`: it signals the script alone, as Slurm's warning does. A
    plain `scancel` sends SIGTERM to every process of the job at once and SIGKILL after Slurm's KillWait, which can
    come before the run has written its record and before step 8, so the model jobs serve on until
-   `FUSION_MODEL_TIME` (inferred from Slurm's documentation; not yet run on the machine).
+   `FUSION_MODEL_TIME` (inferred from Slurm's documentation; not yet run on the machine). On the machine
+   (2026-11-25) SIGTERM to the launch script's PID gave an interrupted record and exit 143 after 19 s and 12 s at
+   10,000 agents (measured); the run also printed `run failed: AUTONMI's check every_population_ran`, which is
+   that check failing for the cancelled populations. Slurm's own delivery (`sbatch`, `--signal`, `scancel
+   --batch`, a plain `scancel`) is still not run.
 8. At the end, whatever happened: when this launch started the servers (and `FUSION_KEEP_SERVERS=1` did not keep
    them), a stop file in each model job's folder (`model.sh` then stops its servers and the job ends), and a model
    job not yet serving cancelled (not running, without its endpoints, or with no state from `squeue`: it would
    remove its stop file when it starts); the MPS daemon quit; the GPUs checked for processes left; the node-local
    folder removed. It exits with the run's status.
 
-**Once, on StellarAI (on the machine; not run):**
+**Once, on StellarAI (in place for the runs of 2026-11-25, except the `local.env` lines, which are not run):**
 
 ```sh
 # the campaign venv: this package, the AUTONMI framework and requirements-autonmi.txt, and torch's CUDA build
@@ -674,7 +771,12 @@ cp "$RASCAL_REPO/jobs/local.env.example" "$RASCAL_REPO/jobs/local.env"
 # (that file sets RASCAL_VENV to $FUSION_ENV and RASCAL_MODEL to the weights, over the example's placeholders)
 ```
 
-**The runs, in order (on the machine; not run):**
+Check out AUTONMI at `layer_autonmi.AUTONMI_COMMIT` (`e20861a`), not `main`. Installing over an environment that
+already has RHAPSODY keeps its release: check that `pip freeze` shows the pinned commit. `--runtime dragon` also
+needs `dragonhpc` (0.15.0 was used) and RaDEX's Python client built from source (`50449a0` was used); see "Under
+Dragon".
+
+**The runs, in order (not run as written; what one node did on 2026-11-25 is below the commands):**
 
 ```sh
 cd "$FUSION_SCRATCH"
@@ -684,6 +786,7 @@ sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" "$FUSION_MINIAPP_DIR
 # two nodes: one model node, and the campaigns with the real inner loop under MPS
 FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=01:30:00 sbatch --time=01:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
     "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 300
+# as written, this run and the next are bound by one process: see "The agent layers" (Locally)
 FUSION_MODEL_NODES=1 FUSION_MODEL_TIME=03:30:00 sbatch --time=03:00:00 --output="$FUSION_SCRATCH/%x-%j.out" \
     "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch" --agents 5000
 # the scale run: four model nodes, 20,000 campaigns (100,000 agents)
@@ -691,20 +794,54 @@ FUSION_MODEL_NODES=4 FUSION_MODEL_TIME=05:30:00 sbatch --time=05:00:00 --output=
     "$FUSION_MINIAPP_DIR/launch/stellar_ai_autonmi.sbatch"
 ```
 
+- **Sizing** (measured on 2026-11-25 on one 8 x B200 node, the servers and the inner loop sharing its GPUs,
+  asynchronous mode, with the Evaluator's key line, 8 launches side by side, one run each). A campaign makes
+  106.6-108.2 model calls for its 32 evaluations (133-136 without the line). The node served 381-453 calls/s with
+  the real inner loop on the same GPUs; without it, 620-670 (about 77-84 per GPU; before the line, partly a
+  synthetic load). Every campaign had finished after about 100 s + 0.22 s per campaign: measured at 1,600
+  campaigns (7.5 min) and 6,400 (25 min), the line through those two points inferred. Past 6,400 the line is a
+  guess: 8 servers run at most 8 x 4,096 = 32,768 calls at once and a campaign holds 2.2-2.3 open (about 4 early
+  on), so the slots fill somewhere between about 8,000 and 15,000 campaigns per 8 servers (estimated, not
+  measured); past that, calls wait in the servers' queues: slower, not a failure. Nothing was measured with the
+  servers on nodes of their own, and the inner loop is the mini-app's turned-down one.
 - The times are placeholders, to be set from each step's measured campaign length (StellarAI's QOS follows the
   walltime: 30 minutes or less gpu-test, 4 h gpu-short, 24 h gpu-medium). A model job's time is the campaign
   job's plus a margin, so the servers outlive the run.
-- The wiring check needs more than 30 minutes: `model.sh` starts its 8 servers one at a time (about 2 minutes each
-  in an earlier deployment on StellarAI, so about 16 minutes; inferred for 8), and Slurm's warning comes 15
-  minutes before the limit. A signal before the run starts ends the launch with no run (exit 143).
-- **Unverified until these runs:** vLLM 0.27.1 starting with these flags (repeated flags taking their last
-  value); the JSON schema together with thinking off; real prompt and reply sizes; the model's replies and how
-  often each role can use them; GPU placement of the inner-loop workers and the MPS daemon; submitting model jobs
-  from inside a job; calls between nodes; `/tmp` being private to each job; memory and file limits at 100,000
-  open calls. Also never run: the memory guard (it reads `/proc/meminfo`, which a laptop does not have); the
-  check's scan of real vLLM logs (any line with `Traceback` stops the launch, a harmless one too); keeping and
-  reusing servers, the endpoints' refresh after a real requeue, and the cancelling of model jobs, under Slurm
-  (each is tested on a laptop with fake Slurm tools and fake model jobs).
+- **What one node did (2026-11-25; measured, one run each).** One node: the 100-campaign fixture check passed in
+  96 s, on 4 servers reused from a stand-in launcher, not with `FUSION_MODEL_NODES=0`. Two nodes: not run;
+  `--agents 300` with the real inner loop under MPS passed in 176 s with the 8 servers on the campaign node's own
+  GPUs. `--agents 5000` and the scale run: not run as one launch; one local launch was already bound by its
+  process at 2,000 campaigns (see "Open items"). With the Evaluator's key line, 8 launches at once (each its own
+  server and `agents.first` offset, one MPS daemon shared) finished 1,600 campaigns in 442-457 s and 6,400 in
+  1,494-1,511 s: about 100 s + 0.22 s per campaign through those two points (inferred), a guess past 6,400.
+- The wiring check's time is set by `model.sh`, which starts its 8 servers one at a time (about 2 minutes each in
+  an earlier deployment on StellarAI, so about 16 minutes; inferred for 8, and still not measured: `model.sh` has
+  not run with this model). Measured on 2026-11-25 with a stand-in that starts all 8 at once: all healthy after
+  136 s and 146 s; the 100-campaign fixture run then took 96 s (on 4 servers). Slurm's warning comes 15 minutes
+  before the limit, so keep `--time=01:00:00` until `model.sh` is timed. A signal before the run starts ends the
+  launch with no run (exit 143).
+- **Checked on one node on 2026-11-25** (servers from a stand-in for `model.sh`; launches with `bash` as `srun`
+  steps): vLLM 0.27.1 starts with these flags, and a repeated flag takes its last value; the JSON schema together
+  with thinking off (512 of 512 Generator replies parsed, no think tags); the Generator's, Monitor's and
+  Coordinator's replies all parsed, and no call of theirs fell back in the runs; the Evaluator's replies were
+  usable in 231 of 512 probe calls and 40-41% of tries in the passing runs before its key line, where 23-24% of
+  its asks fell back, and none fell back with the line (0 of 9,595 asks in its first run, 0 of 371,331 in the
+  runs after; measured); real prompt and reply sizes (see "Model calls"); the inner-loop workers' GPU placement
+  with one MPS daemon, the servers on the same GPUs; `/tmp` is a per-job mount shared by the job's steps; reusing
+  servers through `FUSION_MODEL_FLEET` with `--idle`, in the passing direction only, on fleet folders assembled
+  by hand; the check's scan of real vLLM logs, once, on logs that were clean (see the check above for what a
+  stopped server leaves); SIGTERM to the launch script's PID writing an interrupted record (exit 143).
+- **Seen in part:** 83,000 model calls open at once and still rising, over 8 launches against 8 servers (each
+  process about 10,300 open files of a hard limit of 131,072, and 1.1 GB), stopped after 5 minutes with no
+  campaign finished: not 100,000, not in one process, not to the end. The memory guard was started by the script
+  and never fired (930 GiB available at the start).
+- **Still unverified:** `FUSION_MODEL_NODES` 0 and N; AUTONMI's `jobs/model.sh` and `jobs/local.env`; submitting
+  model jobs from inside a job; calls between nodes; `FUSION_KEEP_SERVERS`; a launch refused because a server is
+  busy or a log has a `Traceback`; the endpoints' refresh after a real requeue; the cancelling of model jobs;
+  Slurm's own signals (`--signal=B:TERM@900`, `scancel --batch`); the memory guard firing; the generations mode
+  and thinking on with a real model; steady state above 16,000 open calls; the real inner loop under Dragon.
+  Keeping and reusing servers, the refresh and the cancelling are tested on a laptop with fake Slurm tools and
+  fake model jobs.
 
 ## Other machines
 
@@ -809,8 +946,8 @@ Mode, less on AC power; without the AUTONMI framework its tests are skipped). Th
 
 ## What has run, and what has not
 
-Measured on one laptop (Apple silicon, 12 cores, 24 GB). These are functional checks and laptop timings, not
-performance claims for a machine. Every number below is measured unless marked otherwise.
+Measured on one laptop (Apple silicon, 12 cores, 24 GB), except the StellarAI bullet. These are functional checks
+and laptop timings, not performance claims for a machine. Every number below is measured unless marked otherwise.
 
 - **The AUTONMI layer, 2026-11-24** (hundredk shape, fixture, stub at 1 ms, one population, agents starting
   together, AC power):
@@ -840,8 +977,25 @@ performance claims for a machine. Every number below is measured unless marked o
   - the StellarAI knob file against two fake servers: every request carried its settings, and both servers
     answered every role; and 12,000 model calls open at once from one process against two fake servers, none
     failed.
-- **The StellarAI run path:** its launch script and check ran only on the laptop, against fake Slurm tools, fake
-  model jobs and fake vLLM servers (FIXTURES). No real model server, GPU or MPS daemon has run.
+- **The StellarAI run path:** on the laptop its launch script and check ran against fake Slurm tools, fake
+  model jobs and fake vLLM servers (FIXTURES).
+- **The StellarAI run path on one 8 x B200 node, 2026-11-25** (dev `8c1450f`, vLLM 0.27.1, AUTONMI at `e20861a`;
+  launches with `bash` as `srun` steps, servers from a stand-in for `model.sh` and reused; the asynchronous mode,
+  32 evaluations per campaign; one run per configuration; the rows, probe, load-ladder and A/B files and every
+  caveat in `results/stellarai_2026-11-25/`):
+  - the wiring check (`--agents 100 --sim fixture`, on 4 servers): pass in 96 s; the real inner loop under MPS
+    with the 8 servers on the same GPUs (`--agents 300`): pass in 176 s, 9,600 evaluations on `cuda`;
+  - one local launch of 2,000 campaigns (10,000 agents) was bound by its one process and was stopped after 6
+    minutes with no campaign finished; 8 launches of 400 fixture campaigns at once, one per server: all pass, 618
+    model calls/s together; on this commit the Evaluator's reply was usable in 40-41% of tries, and 23-24% of its
+    asks fell back;
+  - with the Evaluator's key line (then an uncommitted change; now in `decide.scores_messages`), the real inner
+    loop and one shared MPS daemon: 8 x 800 campaigns (32,000 agents) all pass in 1,494-1,511 s (204,800
+    evaluations on `cuda`, 453 model calls/s, no Evaluator fallback), and 8 x 200 in 442-457 s; 8 x 2,500
+    fixture campaigns (100,000 agents) were live together for 5 minutes and stopped by SIGTERM, none finished;
+  - `--runtime dragon` (`python -m dragon`, not the launch script), 8 populations, with the line: 2,000 fixture
+    campaigns pass (agent phase 406 s, 532 model calls/s); 400 campaigns with the real inner loop fail, every
+    campaign on a GPU error.
 - **10,000 campaigns on the LangGraph and Academy layers** (by 2026-11-21, hundredk shape, fixture on 10 threads,
   one agent process): 320,000 evaluations in each layer, all 10,000 campaigns live at once, the same
   `results_sha256`. LangGraph 462 s (694 evaluations per second, 6,142 MiB, about 629 KiB per campaign; the run
@@ -863,15 +1017,23 @@ performance claims for a machine. Every number below is measured unless marked o
   under the scratch path, and a job with a 3-minute limit got Slurm's early TERM and wrote an interrupted record
   (exit 143).
 
-**Not run:** CUDA and ROCm (no such GPU here); Perlmutter, StellarAI and Lux; Dragon and RaDEX from this
-package's tests; vLLM or any real model server; FlowGentic's MCP tool route. The 2026-11-19 ladder in
+**Not run:** ROCm; CUDA on the LangGraph and Academy layers; Perlmutter and Lux; StellarAI through `sbatch`, with
+`jobs/model.sh`, or on two nodes; Dragon and RaDEX from this package's tests (run by hand on StellarAI, above);
+FlowGentic's MCP tool route. The 2026-11-19 ladder in
 `results/laptop_2026-11-19_final/` predates the outer loop.
 
 ## Open items
 
-- **Several nodes for the campaigns' own process.** The scale run puts 20,000 campaigns (100,000 agents) in one
-  process on one node. Whether one process can drive them, or the populations must be placed on several nodes
-  (Dragon), is decided by a load check on the machine.
+- **Several processes for the campaigns.** The load check ran on one StellarAI node on 2026-11-25 (measured, one
+  run each): one local-runtime process does not drive 10,000 agents against 8 servers (event-loop lag p95
+  1,545 ms, 352 model calls/s on average where the node does 618 when fed, no campaign finished in 6 minutes;
+  `--populations 40` is still one process). What worked: 8 launches at once, started by hand, each with its own
+  `agents.first` offset and its own model server (8 separate records; nothing merges them; 8 x 800 campaigns to
+  completion with the real inner loop), and one launch of 2,000 campaigns under `--runtime dragon` with 8
+  populations, with the fixture inner loop only (and with the Evaluator's key line). Open: the scale run as one
+  launch; several launches from the launch script; one record for split launches; the real inner loop under
+  Dragon (`workers.gpu_per_worker` is not applied there, and it failed beside the servers); populations on
+  several nodes; servers on nodes of their own.
 - **Dragon and RaDEX from `run.py`.** The AUTONMI layer runs under Dragon with RaDEX through its own entry point;
   the other two layers take them only when passed in by hand (`run.Services.open(backend=, store=, model=)`,
   `layer_langgraph.run_agents(store=, replicas=)`).

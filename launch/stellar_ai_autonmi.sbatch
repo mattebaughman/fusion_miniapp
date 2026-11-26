@@ -1,7 +1,8 @@
 #!/bin/bash
 # StellarAI (Princeton): the AUTONMI layer's campaigns against NVIDIA Nemotron 3.5 Lightning on vLLM, with
-# knobs/machines/stellar_ai_nemotron.yaml. Configured and checked on a laptop (bash -n, a dry run, fake servers);
-# not yet run on the machine. The model servers come one of three ways:
+# knobs/machines/stellar_ai_nemotron.yaml. Checked on a laptop (bash -n, a dry run, fake servers). On the machine
+# (2026-11-25) run with bash as an srun step, in the FUSION_MODEL_FLEET way only: never submitted with sbatch,
+# FUSION_MODEL_NODES not run. The model servers come one of three ways:
 #
 #   FUSION_MODEL_NODES=0 (default)  this job starts AUTONMI's jobs/model.sh in the background on its own 8 GPUs:
 #                                   the servers and the campaigns on one node (for --sim fixture)
@@ -20,7 +21,8 @@
 #       --agents 100 --sim fixture
 #
 # On one node model.sh starts its 8 servers one at a time (about 2 minutes each in an earlier deployment there, so
-# about 16 minutes), and Slurm's warning comes 15 minutes before the limit: 30 minutes is too short for that.
+# about 16 minutes), and Slurm's warning comes 15 minutes before the limit: 30 minutes is too short for that
+# (model.sh not yet timed with this model; a stand-in starting all 8 at once took 136 s and 146 s on 2026-11-25).
 #
 # Its arguments go to `python -m fusion_miniapp.layer_autonmi` after `--preset hundredk` and the two StellarAI
 # knob files (so a --knobs file given here wins), then come --llm openai, the fleet's endpoints and key files,

@@ -1,7 +1,8 @@
 # StellarAI with NVIDIA Nemotron 3.5 Lightning on vLLM: the AUTONMI layer's settings for the model runs.
 # launch/stellar_ai_autonmi.sbatch applies it over the hundredk preset and knobs/machines/stellar_ai.yaml; knob
 # files given to the launch script come after it, and --agents sets a smaller run. Nothing here is calibrated,
-# and all physics output is synthetic. Configured, not yet run on the machine.
+# and all physics output is synthetic. Launched on one StellarAI node on 2026-11-25 with --agents 20 to 2,500 (no
+# launch above 2,000 ran to its end); agents.count 20000 in one launch: not run.
 
 agents:
   count: 20000                # the scale run: 20,000 campaigns x 5 hosted agents = 100,000 agents
@@ -30,5 +31,7 @@ workers:
   gpu_per_worker: true        # --sim real: worker i sees GPU i mod 8; no effect with --sim fixture
 
 campaign:
-  mode: async                 # each result applied as it arrives; each agent makes its own model call
+  mode: async                 # each result applied as it arrives; each agent makes its own model call; no
+                              # generations: outer.population x outer.generations = 32 evaluations is each
+                              # campaign's budget
   slots: 2                    # Monitor agents per campaign: 3 + 2 = 5 hosted agents

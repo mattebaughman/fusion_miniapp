@@ -273,7 +273,8 @@ def test_an_integer_too_large_for_a_float_in_a_reply_is_not_a_number():
 
 def test_the_evaluators_reply_is_the_score_and_the_stub_answers_the_score_from_numbers():
     """The Evaluator's call: its prompt gives each result's q and the Monitor's m (in full), the Monitor's other
-    numbers and note, and neither the score from numbers nor its formula; its reply is one JSON object with a
+    numbers and note, and neither the score from numbers nor its formula; its second-to-last line names the reply's
+    keys (the candidate numbers as JSON strings) and its last line is SCORES_ASK; its reply is one JSON object with a
     keep-probability for every candidate, each clipped to 0..1, and becomes the score (and the digest); a reply
     without every candidate cannot be used. The stub (and the fake vLLM server) answer it with each score from
     numbers exactly, at their monitor.weight (a result without a trace: q), a Monitor's note and the
@@ -284,8 +285,13 @@ def test_the_evaluators_reply_is_the_score_and_the_stub_answers_the_score_from_n
     items = [{**x, "numbers": None if x["m"] is None else {"m": x["m"], "left_at": 3, "back_at": None, "split_at": 5},
               "note": "steady"} for x in scored]
     messages = decide.scores_messages(items)
-    assert messages[-1]["content"].splitlines()[-1] == decide.SCORES_ASK
-    assert "numbers alone" not in json.dumps(messages) and "x m" not in json.dumps(messages)
+    asks = messages[-1]["content"].splitlines()
+    assert asks[-1] == decide.SCORES_ASK   # the stub and the fake vLLM server know the call by its last line
+    # the line before it names the reply's keys as parse_scores wants them (a model otherwise writes "candidate 0")
+    assert asks[-2] == ('Use exactly these JSON keys, the candidate numbers alone as strings: '
+                        '"0", "1", "2", "3", "4", "5".')
+    shown = json.dumps([messages[0]["content"], *asks[:-2], asks[-1]])   # the prompt but for that line's wording
+    assert "numbers alone" not in shown and "x m" not in shown
     assert "candidate 2: q " in messages[-1]["content"] and "no trace" in messages[-1]["content"]
     cands = [x["candidate"] for x in scored]
     from_numbers = {x["candidate"]: x["score"] for x in scored}

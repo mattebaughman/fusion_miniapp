@@ -940,8 +940,9 @@ def parse_text(reply: str) -> str:
 def scores_messages(items: list[dict]) -> list[dict]:
     """The Evaluator's prompt: each result to score (items: candidate, result, q, numbers, note, the note cut to
     NOTE_CHARS), q and m at full precision (so that the stub's numbers-only answer, llm.numbers_only, is exact); the
-    last line asks for each one's keep-probability. Neither the score from numbers nor its formula is shown: the
-    reply is the model's own."""
+    second-to-last line names the reply's keys (the candidate numbers as JSON strings); the last line (SCORES_ASK,
+    by which the stub and tests/fake_vllm.py know the call) asks for each one's keep-probability. Neither the score
+    from numbers nor its formula is shown: the reply is the model's own."""
     system = ("You are the evaluator of one IGNOS fusion design campaign. For each result below you give the "
               "probability, from 0 to 1, that the campaign keeps it as a survivor. q is the probability the "
               "campaign's evolutionary loop gives it by its rank among the campaign's recent results (the best 1, "
@@ -950,8 +951,10 @@ def scores_messages(items: list[dict]) -> list[dict]:
               "numbers.")
     rows = [f"candidate {it['candidate']}: q {it['q']!r}; {_trace(it['numbers'])}; {_shown(it['result'])}; "
             f"profile {json.dumps(_seven(it['result']['params']))}; note: {_cut(it['note']) or 'none'}" for it in items]
+    keys = ", ".join(f'"{it["candidate"]}"' for it in items)   # the keys parse_scores wants, named for the model
     return [{"role": "system", "content": system},
-            {"role": "user", "content": "Results to score:\n" + "\n".join(rows) + "\n\n" + SCORES_ASK}]
+            {"role": "user", "content": "Results to score:\n" + "\n".join(rows) + "\n\n"
+             + f"Use exactly these JSON keys, the candidate numbers alone as strings: {keys}.\n" + SCORES_ASK}]
 
 
 def parse_scores(reply: str, candidates: list[int]) -> dict | None:

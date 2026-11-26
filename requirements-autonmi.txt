@@ -19,6 +19,7 @@ flowgentic[langgraph,agents,asyncflow] @ git+https://github.com/stride-research/
 mcp==2.3.0
 mcp-types==2.3.0
 rhapsody-py[telemetry] @ git+https://github.com/radical-cybertools/rhapsody@857e093b8d31f970fdf3bf915efe23481f951655
+# --runtime dragon needs more than this file (Dragon, RaDEX's client): README, "What --runtime dragon needs"
 radical.asyncflow @ git+https://github.com/radical-cybertools/radical.asyncflow@3f18cc86596aaafa6a7efff20b7fefb8e11e9fc9
 opentelemetry-sdk>=1.30
 cloudpickle>=3
