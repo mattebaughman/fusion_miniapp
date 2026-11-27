@@ -96,6 +96,9 @@ def parent():
 def ranges() -> dict:
     """The seven mutable parameters and their bounds, as the parent campaign clips them."""
     evo = parent()
+    # CROSS-CAMPAIGN [XC-G3] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): the ledger's grid key would read these seven
+    #   parameters and bounds, in this order: each value's cell on a grid of cross_campaign.grid_step of its range,
+    #   8 bits each. The six frozen shape values are left out on purpose, so that campaigns can hit each other.
     r = {k: tuple(evo.get_param_ranges(MODEL, KIND)[k]) for k in evo.MUTABLE_PARAMS[MODEL]}
     r["Delta"] = tuple(evo.DELTA_CLIP)
     return r
@@ -115,9 +118,6 @@ def budget(knobs: dict, seed: int) -> int:
 
 def sim_knobs(knobs: dict, seed: int) -> dict:
     """The `sim` section this campaign's evaluate() gets: its cost scale multiplies graph size and fixed-point cap."""
-    # CROSS-CAMPAIGN [XC-W4] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): the work key's namespace holds this
-    #   section's nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap and model_width after the cost
-    #   scale, with the inner loop, the device kind and the code commits.
     s, c = dict(knobs["sim"]), cost_scale(knobs, seed)
     s["nodes_per_plane"] = max(16, round(s["nodes_per_plane"] * c))
     s["fixed_point_cap"] = max(1, round(s["fixed_point_cap"] * c))
@@ -497,8 +497,9 @@ def on_evaluated(cst: dict, reply: dict, knobs: dict, run_dir) -> tuple[dict, di
     kept = {id(s) for s in survivors}
     touches, devices, checks = dict(cst["touches"]), dict(cst["devices"]), dict(cst["touch_checks"])
     for e in evaluated:
-        # CROSS-CAMPAIGN [XC-R5] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): a reused result would add no touches,
-        #   device or touch verdict here (the verdict below would count it as a failure); it is counted as reused.
+        # CROSS-CAMPAIGN [XC-R5] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned, optional): a reused result would add no
+        #   touches, device or touch verdict here (the verdict below would count it as a failure); it is counted as
+        #   reused.
         for kind, n in (e.get("touches") or {}).items():
             touches[kind] = touches.get(kind, 0) + n
         devices[str(e.get("device"))] = devices.get(str(e.get("device")), 0) + 1
@@ -774,8 +775,8 @@ def async_on_scored(cst: dict, scored: list[dict], knobs: dict, run_dir) -> tupl
         if s.get("filled") is not None:   # it went through the Generator's model call: asked, and filled by it
             refill["asked"] += 1
             refill["filled"] += s["filled"] > 0
-        # CROSS-CAMPAIGN [XC-R6] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned): as XC-R5, in the asynchronous mode: a
-        #   reused result would add no touches, device or touch verdict here; it is counted as reused.
+        # CROSS-CAMPAIGN [XC-R6] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned, optional): as XC-R5, in the asynchronous
+        #   mode: a reused result would add no touches, device or touch verdict here; it is counted as reused.
         for kind, k in (e.get("touches") or {}).items():
             touches[kind] = touches.get(kind, 0) + k
         devices[str(e.get("device"))] = devices.get(str(e.get("device")), 0) + 1

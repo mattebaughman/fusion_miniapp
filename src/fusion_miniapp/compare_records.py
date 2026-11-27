@@ -43,8 +43,8 @@ MACHINE_KNOBS = {("sim", "device"), ("sim", "work_root"), ("sim", "threads_per_w
                  ("monitor", "capture"), ("monitor", "fixture_trace"),   # the trace, which no result reads
                  ("record", "extras")}   # what the record writes
 # CROSS-CAMPAIGN [XC-K3] (see CROSS_CAMPAIGN_PLAN.md): the cross_campaign knobs would join ADDED_KNOBS with their
-#   defaults, and observe, tick_s and work_keys MACHINE_KNOBS above (they change no result). With the plane off
-#   the section would be left out of the record's knobs, so an off record would keep today's schema.
+#   defaults, and observe, tick_s, ledger, grid_step and sync_s MACHINE_KNOBS above (they change no result). With
+#   the plane off the section would be left out of the record's knobs, so an off record would keep today's schema.
 # knobs newer than some records, with the value those records ran with
 ADDED_KNOBS = {("agents", "first"): 0, ("agents", "start_together"): False, ("campaign", "mode"): "generations",
                ("campaign", "warmup"): 4, ("monitor", "weight"): 0.25, ("campaign", "notes"): False,

@@ -404,9 +404,9 @@ main() {
 	x mkdir -p "$run_dir" "$node_tmp"
 	if [[ $dry == 1 ]]; then say "[dry run] write this script's PID to $run_dir/launch.pid"
 	else echo $$ > "$run_dir/launch.pid"; fi   # to stop a launch run with bash: kill -TERM $(cat .../launch.pid)
-	# CROSS-CAMPAIGN [XC-R7] (see CROSS_CAMPAIGN_PLAN.md): P2 only (planned): the ledger's per-writer logs and result
-	#   files would live under this node-local folder, shared by every launch and worker of the job, and removed with it
-	#   at teardown.
+	# CROSS-CAMPAIGN [XC-R7] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): the live ledger's logs, one per process (and,
+	#   with reuse, P2's result files), would live under this node-local folder in xc-<run id>/, shared by every launch
+	#   and population process of the node, and removed with it at teardown.
 	export TMPDIR=$node_tmp   # node-local: the inner loop's work folders (sim.work_root) and every temporary file
 	x ulimit -n "$(ulimit -Hn)" || say "warning: the open-files limit stays at $(ulimit -n)" >&2   # a model call holds a socket
 	set +u   # activation hooks may read unset variables
@@ -503,9 +503,10 @@ main() {
 		mps=1
 	fi
 
-	# CROSS-CAMPAIGN [XC-E1] (see CROSS_CAMPAIGN_PLAN.md): P0b (planned): with FUSION_XC=1, write the run manifest (run
-	#   id, mode, the launches' campaign ranges) into $run_dir/xc and add --xc-dir $run_dir/xc to args here, for one
-	#   launch, k launches and Dragon alike. The user would run the entry point; it would not be started here.
+	# CROSS-CAMPAIGN [XC-E1] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): with FUSION_XC=1, write the run manifest (run
+	#   id, mode, the launches' campaign ranges) into $run_dir/xc, start the entry point service in a process of its
+	#   own (python -m fusion_miniapp.entry_point serve), add --xc-dir $run_dir/xc to args here and to merge_records,
+	#   and stop the service at teardown. One launch, k launches and Dragon alike.
 	if (( launches > 1 )); then several "${args[@]}"; return; fi   # every launch inherits the MPS daemon's pipe
 	if [[ $dry == 1 ]]; then
 		x "${run[@]}" "${args[@]}"

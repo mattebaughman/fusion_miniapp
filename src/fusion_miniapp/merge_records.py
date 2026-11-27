@@ -234,13 +234,11 @@ def merge(folders, out):
                 [p.get("inner_loop_gpus", {}).get("workers_placed") for p in parts])}
     rec["sim_workers_total"] = _total([r.get("sim_workers_total") for r in records])
     rec["peak_rss_mb"] = {"main_process": _total([r["peak_rss_mb"].get("main_process") for r in records])}
-    # CROSS-CAMPAIGN [XC-K5] (see CROSS_CAMPAIGN_PLAN.md): P0b (planned): the cross_campaign sections of the launches
-    #   read would be summed here. A launch that wrote nothing stops merge above, so coverage against the run
-    #   manifest (xc/manifest.json) is the entry point's to report.
+    # CROSS-CAMPAIGN [XC-K5] (see CROSS_CAMPAIGN_PLAN.md): P0 (planned): the cross_campaign sections of the launches
+    #   read (control plane and ledger counters) would be summed here and, with --xc-dir, the entry point's summary
+    #   added. A launch that wrote nothing stops merge above, so coverage against the run manifest
+    #   (xc/manifest.json) is the entry point's to report.
     rec["wall_seconds"] = _range([r.get("wall_seconds") for r in records])
-    # CROSS-CAMPAIGN [XC-W3] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): when every launch kept its work_keys.npz, the
-    #   repeats, the ideal hits (other_launch) and the twin check would be counted across launches here, within equal
-    #   namespaces only; namespaces that differ are reported, never a reason to refuse the merge.
     rec["speed"] = _speed(launches)
     return rec
 

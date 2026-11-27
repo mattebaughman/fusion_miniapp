@@ -246,10 +246,10 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
     picks it up.
     """
     sim, watch = sim_section(knobs), monitor_section(monitor)
-    # CROSS-CAMPAIGN [XC-R1] (see CROSS_CAMPAIGN_PLAN.md): P2, only if P1's gate passes (planned): reuse here, inside
-    #   the worker, preserves the task counts. Check the typed params, evaluator/runtime, stored trace and requested
-    #   artifacts (section 4.7) before rebinding a result from prepare (XC-R3) to this candidate. A refused hit would
-    #   run the inner loop. A reused result would carry no new touches and a reused touch verdict.
+    # CROSS-CAMPAIGN [XC-R1] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned, optional, off by default): with
+    #   cross_campaign.reuse, the result file passed by prepare (XC-R3) would be read here and rebound to this
+    #   candidate (params, candidate_idx, timings) instead of running the inner loop, so the task counts hold. A
+    #   missing or unreadable file, or one without the trace the Monitor needs, runs the inner loop.
     if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):
         return _cold(candidate=candidate, knobs=knobs, agent_id=agent_id, seed=seed, params=params,
                      candidate_idx=candidate_idx, generation=generation, monitor=monitor)
@@ -322,9 +322,9 @@ def evaluate_fixture(candidate: dict | None = None, knobs: dict | None = None, a
     evo, fil = _parent()
     params = _params(candidate, seed, evo, params)
     profile = evo.generate_profile(psi=None, model=PROFILE[0], kind=PROFILE[1], params=dict(params))
-    # CROSS-CAMPAIGN [XC-R2] (see CROSS_CAMPAIGN_PLAN.md): P1 and P2 (planned): the work key hashes params as this
-    #   digest does (sorted JSON, so 3 and 3.0 differ). With P2 reuse the fixture would check and return a stored result
-    #   here, as evaluate does at XC-R1, so fixture tests reach the reuse path.
+    # CROSS-CAMPAIGN [XC-R2] (see CROSS_CAMPAIGN_PLAN.md): P2 (planned, optional): with cross_campaign.reuse, the
+    #   fixture would return a stored result here, rebound as evaluate does at XC-R1, so fixture runs and tests reach
+    #   the reuse path.
     digest = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).digest()
     u = np.random.default_rng(int.from_bytes(digest[:8], "little")).uniform(size=5)
     selected = int(u[4] * sim["puffs"])
