@@ -247,9 +247,9 @@ def evaluate(candidate: dict | None = None, knobs: dict | None = None, agent_id:
     """
     sim, watch = sim_section(knobs), monitor_section(monitor)
     # CROSS-CAMPAIGN [XC-R1] (see CROSS_CAMPAIGN_PLAN.md): P2, only if P1's gate passes (planned): reuse here, inside
-    #   the worker, keeps every count of the layer and of AUTONMI. A stored result from prepare (XC-R3) whose params and
-    #   sim knobs equal these exactly would be returned rebound (this candidate_idx, no touches, touch_check "reused");
-    #   else the inner loop runs.
+    #   the worker, preserves the task counts. Check the typed params, evaluator/runtime, stored trace and requested
+    #   artifacts (section 4.7) before rebinding a result from prepare (XC-R3) to this candidate. A refused hit would
+    #   run the inner loop. A reused result would carry no new touches and a reused touch verdict.
     if not os.environ.get(COLD_CHILD) and is_cold(sim["cold_start_fraction"], agent_id, generation, candidate_idx):
         return _cold(candidate=candidate, knobs=knobs, agent_id=agent_id, seed=seed, params=params,
                      candidate_idx=candidate_idx, generation=generation, monitor=monitor)

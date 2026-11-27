@@ -1187,8 +1187,8 @@ class Script:
         me, g = s["agent_id"], cst["generation"]
         # CROSS-CAMPAIGN [XC-C7] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned), generations mode: no per-generation
         #   Coordinator prompt exists, so a live note would ride on a repopulate message (msg["note"]) to the refill
-        #   prompt (XC-C8), never on initialize. Acked applied only when a request carrying it is sent, else
-        #   not_applicable (outer.generator mutation, no slot to fill, a fallback).
+        #   prompt (XC-C8), never on initialize. A dispatched request counts as applied even if it later falls back.
+        #   Mutation-only generation or no refill slot would give no eligible request.
         self._send(me, "generator", "make", g, msg)
         reply = await self.mail.receive(me, "population", g)
         cst = {**cst, "n_tool_calls": cst["n_tool_calls"] + reply.get("lookups", 0)}
@@ -1241,8 +1241,8 @@ class Script:
             call = s["call"]
             (result,), (tr,) = trace.split([event])
             # CROSS-CAMPAIGN [XC-W1] (see CROSS_CAMPAIGN_PLAN.md): P1 (planned): with cross_campaign.work_keys, one row
-            #   per evaluation here, on the loop (about 11 us on a laptop): the work key of result["params"], an 8-byte
-            #   digest of the result's science fields and trace sections, campaign, candidate, call["t0"], now,
+            #   per evaluation on the loop: the work key of result["params"], an 8-byte digest of the science fields
+            #   and non-timing sections of the separate trace, campaign, candidate, call["t0"], now,
             #   inner-loop seconds and the seven. Written at XC-A2. P2 would publish here too.
             numbers = None
             if tr is not None:
@@ -1382,8 +1382,8 @@ class Script:
             self._hook(me, self.cycles[me] - 1)
             # CROSS-CAMPAIGN [XC-C5] (see CROSS_CAMPAIGN_PLAN.md): P3 (planned): survival is decided above and is never
             #   steered. With cross_campaign.steer, this campaign's newest live note would be read here from the plane's
-            #   in-memory set (no I/O) for the guidance prompt below, and its version and ack recorded (not_applicable
-            #   when llm.mode is off).
+            #   in-memory set for the guidance prompt below. Its version would be acknowledged only on dispatch;
+            #   llm.mode off has no applicable prompt.
             self.mail.deliver(me, "generator", "survivors", decide.async_survivors(cst))
             if self.calls_on:
                 text = await self._ask(me, ask, decide.guidance_messages(cst, rows, self.knobs),
@@ -1713,10 +1713,10 @@ class Script:
         for k, counts in (("model_asks", self.asks), ("model_tries", self.tries), ("model_fallbacks", self.fallbacks)):
             for agent, n in counts.items():
                 out[role_of(agent)][k] += n
-        # CROSS-CAMPAIGN [XC-A3] (see CROSS_CAMPAIGN_PLAN.md): P0 and P1 (planned), SIGTERM, local runtime only: one
-        #   bounded flush (at most 2 s) here: the last progress file, its unfinished campaigns marked interrupted, and
-        #   the work-key rows so far, as the call sums are written. Under Dragon this is not called (the head holds no
-        #   population's Script): the last tick's file stands and the population shows as lost.
+        # CROSS-CAMPAIGN [XC-A3] (see CROSS_CAMPAIGN_PLAN.md): P0/P1 (planned), local SIGTERM: queue the final
+        #   progress and work-key rows. All populations would share the process's 2 s deadline. A missing final write
+        #   leaves open outcomes unknown. Under Dragon the head holds no population Script; the last durable tick
+        #   would remain the evidence for that population.
         self.sums.write(sums_file(Path(self.lines.name), self.pop.index), by_role=out)
 
 

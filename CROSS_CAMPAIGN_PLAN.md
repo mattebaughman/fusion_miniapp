@@ -24,8 +24,9 @@ Each fact is labelled:
 3. **One entry point per run** (`python -m fusion_miniapp.entry_point`) reads those files, answers a user's
    questions about the whole run, and is the only writer of directives. It starts as a reader of files. A
    resident server and a model-backed `ask` are options on top. It is not an agent hosted in a population.
-4. **The Generators' side starts as a measurement (P1), not a ledger.** At the configured scale shape two
-   campaigns cannot evaluate the same profile (section 3.1). P1 keeps one 64-byte row per evaluation in memory,
+4. **The Generators' side starts as a measurement (P1), not a ledger.** For the configured 20,000 seeds, each campaign
+   starts with 16 individual profiles whose six-value shape signatures are disjoint across campaigns. Descendants
+   inherit a local signature, ruling out exact cross-campaign profile repeats in these search paths (section 3.1). P1 keeps one 64-byte row per evaluation in memory,
    counts repeats after the run, and checks on every repeat that equal keys gave equal results.
 5. **Reuse (P2) is built only if P1's gate passes**, and is served inside the worker. A hit served at the
    Generator or the Monitor would break `verify`'s counts, and a new draw would shift the campaign's random
@@ -34,13 +35,13 @@ Each fact is labelled:
    prompt (async) or of the refill prompt (generations). Stop, budget and priority are not in this plan. Whole-run
    stop stays the launch script's SIGTERM.
 7. **One transport for every way of running:** small files, each with one writer, replaced whole in the run's
-   plane folder. No socket, broker, store key or message crosses a process during the run. RaDEX is not used.
+   plane folder. Only files carry plane information between processes. RaDEX is not used.
 8. **Every hook is guarded.** An exception inside the plane turns the plane off in that process, is counted, and
    never reaches an agent. A failed file write is only counted.
 9. **The one plane cost on the resource that sets the pace** is a live note's text in prompts: about 4.6% more
    prompt tokens while a 100-token note is live (inferred from the StellarAI records, section 3.5).
-10. **One decision makes a cross-campaign ledger worth building:** whether the 20,000 campaigns of the scale run
-    should share one plasma shape (section 11).
+10. **The initial distribution determines which cross-campaign hits are possible.** Sharing shapes or initial
+    profiles changes the experiment; P1 would measure the resulting exact hits before P2 (section 11).
 
 ## 2. The shape, and why
 
@@ -52,7 +53,7 @@ Each fact is labelled:
 | The inner-loop workers were busy 47% of the agent phase (`sim_bound_ratio` 0.47 in each of the 8 launches) | StellarAI | Workers were busy 47% on average and saturated at peaks (`sims_executing.max` 8 of 8, `queue_wait_s.p95` 61.4 s in g0). How much time a saved inner loop saves is not measured |
 | 106.6 model calls and 58,400 prompt tokens per campaign (548 per call); 89% of all tokens are prompt tokens | StellarAI (8 x 800 records) | Text added to prompts is the cost that lands on the pace-setting servers |
 | 26.9 Coordinator cycles per campaign (172,134 for 6,400) | StellarAI | About 0.27 digests per model call: the servers bound the control plane |
-| Each campaign's six frozen shape values come from its own seed and never change; the 320,000 initial six-tuples of campaigns a0 to a19999 are all distinct | code, laptop | Exact cross-campaign repeats cannot happen in the async mode at the configured shape |
+| Each seed draws 16 individual initial profiles. Each profile carries a six-value shape signature inherited by its descendants. All 320,000 initial signatures for campaigns a0 to a19999 are distinct | code, laptop | Exact cross-campaign repeats cannot happen in the async mode at the configured shape |
 | An async Coordinator sleeps in `take_all(me, "scored")` until a result is scored (`layer_autonmi.py:1343`) | code | A stuck campaign has no cycle and emits nothing. Liveness must come from the process, not the cycle |
 | Nothing reads mid-campaign progress during the run, and nothing outside one launch can: the store holds each Coordinator's last memory, per launch (`layer_autonmi.py:1596`), and campaign lines are written only at a campaign's end (`:1598-1607`, `:1640-1642`) | code | P0 is new information across launches, not a copy of something that exists |
 
@@ -102,21 +103,22 @@ entry point.
 | A backend per way of running; RaDEX under Dragon | One transport: files in the plane folder | The store has no put-if-absent, no compare-and-set and no key scan, and its calls are synchronous on the population's loop (AUTONMI's `rascal` store). Dragon runs on one node only. The `live-p<idx>.json` files already cross processes under Dragon (`layer_autonmi.py:766-780`) |
 | Directives: guidance, priorities, budgets, stop | Guidance notes only | B bounds three roles (`layer_autonmi.py:1363`, `:1389`, `:1440`) and `verify` (`:958`). No priority lever exists in the client or the servers. A lost stop sentinel would wedge a campaign |
 | A stall is seen at the Coordinator's cycle | Liveness comes from the process's plane; stall from cumulative fields | A stuck Coordinator has no cycle (`:1343`). The parent replaces the best on every result while nothing is feasible (`parent/evolutionary_loop.py:1016-1022`) |
-| Off means unchanged | Unchanged, and an off record keeps today's schema: with every plane knob at its default the section is left out of `rec["knobs"]`, `campaign.json` and the app's parameters | Every knob is echoed in `rec["knobs"]` (`record.py:519`) and AUTONMI's `Campaign` (built at `layer_autonmi.py:2229`) writes `definition.knobs` into `campaign.json` and the app's parameters. So `write_record` and the `Fusion` definition drop the all-default section; the plane reads its knobs before that |
+| Off means unchanged | Unchanged, and an off record keeps today's schema: with every plane knob at its default the section is left out of `rec["knobs"]`, `campaign.json` and the app's parameters | Every knob is echoed in `rec["knobs"]` (`record.py:519`) and AUTONMI's `Campaign` (built at `layer_autonmi.py:2229`) writes `definition.knobs` into `campaign.json` and the app's parameters. So shared `record.write` and the `Fusion` definition drop the all-default section; the plane reads its knobs before that |
 | (not stated) | Every hook is guarded | A raise in `Script.remember`, a Monitor hook or a tick would fail that role and with it the campaign (README, "When one agent fails") |
 
 ## 3. Answers to the design questions
 
 ### 3.1 What makes two evaluations "the same work"
 
-- **The inner loop is deterministic in the full parameter dict and the effective sim knobs** on CPU (laptop).
-  The same record, timings aside, came back across processes, torch threads 1 and 4, another seed, another
-  campaign id, generation and candidate number, a cold start, capture off, `checkpoint_mb` and
-  `keep_artifacts`. In the code: a full `params` dict passes unchanged (`sim.py:160-166`); the seed only fills a
-  partial candidate (`sim.py:167-180`); the stand-ins are seeded with 0 (`standins.py:122,137-138`); a cold start
-  changes where the evaluation runs, not its numbers (`sim.py:64-69`, `:249-251`).
-- **What changes the numbers** (laptop): any of the 15 keys of `params` (the 7 mutable, the 6 frozen shape values,
-  `model`, `kind`); for the fixture, the float spelling (`3` and `3.0` hash differently, `sim.py:321`); the sim
+- **CPU stand-in comparisons (laptop).** Across the tested processes, thread counts, seeds, candidate identities
+  and cold starts, the scalar science fields agreed for a fixed complete profile and effective sim knobs. A
+  candidate index, trace presence, physical touches, stage times and paths belong to the individual execution
+  (`sim.py:249-251`, `:260-289`). A supplied full `params` dict passes through at `sim.py:160-166`. The seed fills a
+  partial candidate at `:167-180`. The stand-ins are seeded with 0 (`standins.py:122,137-138`).
+- **Conservative key inputs.** Keep the 15 typed params (seven mutable, six inherited shape values, `model` and
+  `kind`). The fixture hashes `3` and `3.0` differently (`sim.py:321`). Distinct keys can produce equal outputs:
+  the real worker sets model and kind at `sim.py:267`, and the parent applies them at
+  `parent/steps/step0/profile_generator.py:533-534`. Other key inputs include the sim
   knobs after the cost scale `nodes_per_plane, planes, rollout_steps, puffs, fixed_point_cap, model_width`
   (`decide.py:116-121`); for the trace the Monitor scores, `monitor.capture` and, with the fixture,
   `monitor.fixture_trace` (smooth and hash traces differ with equal scalars); the device (mps against cpu differ at
@@ -125,40 +127,46 @@ entry point.
   unsigned 64-bit integer. The params bytes are the ones the fixture already hashes (`sim.py:321`, XC-R2). `ns =
   blake2b(json.dumps({"v": 1, "inner_loop": "real"|"fixture", "sim": <those six values after the cost scale>,
   "monitor": {"capture", "fixture_trace"}, "device": "cpu"|"cuda"|"mps"|"none", "miniapp": <commit>, "parent": <lock
-  commit>}, sort_keys=True), digest_size=16)`, one per entry of `agents.cost_scale` (XC-W4). The two `monitor` knobs
+  commit>}, sort_keys=True), digest_size=16)`, per effective cost scale and runtime contract (XC-W4). The two `monitor` knobs
   are in it because P2 returns the stored trace and the Monitor scores it (`layer_autonmi.py:1223-1226`; async score
-  q + `monitor.weight` x m, `decide.numbers_score`). Left out because none changes a number: seed, campaign id,
+  q + `monitor.weight` x m, `decide.numbers_score`). The P1 scalar tally omits seed, campaign id,
   generation, candidate number, cold start, `work_root`, `threads_per_worker`, `checkpoint_mb`, `keep_artifacts`,
   `campaign.slots`, and every `agents`, `llm` and `outer` knob. Collision odds among 640,000 keys of 64 bits: about
-  n^2 / 2^65 = 1.1e-8 (inferred). That is fine for counting. P2 uses 128-bit keys and compares params exactly before
-  it reuses anything.
-- **The result digest** (P1): `blake2b(json.dumps(<the result without EXEC_FIELDS>, sort_keys=True, default=str),
-  digest_size=8)`, where `EXEC_FIELDS = (candidate_idx, params, t_start, elapsed_seconds, worker_peak_rss_mb,
-  touches, touch_check, cold_start, device, summary_path, trace)`, followed, when the result holds a trace, by the
-  trace's `xgc` and `fixed_point` sections (equal warm against cold on CPU, laptop). Two rows with one key and
-  different digests are a failed twin check.
-- **Tolerance: none.** The fixture jumps on any bit. The real inner loop is smooth (about 0.4 x a nudge relative
-  to the range, laptop), but a tolerance would be a new scientific rule, not a cache. Near repeats never supply a
-  result. Across campaigns they are a different problem anyway: the six frozen values differ, and the walls
-  differ by about 1% with the real inner loop and up to 22% with the fixture (laptop).
-- **Why exact repeats across campaigns cannot happen at the configured shape.** The six frozen values come from
-  the parent's LHS at the campaign's seed (`parent/evolutionary_loop.py:435-454`; seed i for campaign a<i>,
-  `layer_autonmi.py:729-735`) and nothing changes them: `mutate_params` touches the seven only
-  (`parent/evolutionary_loop.py:1046-1063`), and model proposals are clipped to the seven (`decide.py:263-269`).
-  Seeds are global across slices (`--slice` shifts `agents.first`, `layer_autonmi.py:2038-2044`). The 320,000
-  initial profiles of a0 to a19999 at P 16 have 320,000 distinct six-tuples (laptop: draw
-  `initialize_population(16, ...)` at seeds 0 to 19,999 and count). At the configured shape no path gives an
-  exact cross-campaign repeat. The restart branch of `repopulate` (`parent/evolutionary_loop.py:1088-1089`) needs
+  n^2 / 2^65 = 1.1e-8 (inferred). P2 uses 128-bit keys and validates the consumer's typed input and execution
+  contract at lookup (section 4.7).
+- **The result digest (P1).** Feed the sorted JSON bytes of the scalar result without EXEC_FIELDS to blake2b-8.
+  XC-W1 receives the scalar `result` and the separate `tr` from `trace.split([event])` (`trace.py:238-242`).
+  Append a presence marker. For a trace, also digest its kind, completeness, each non-timing section's name,
+  dimensions and little-endian float32 values in declared order. This covers the Monitor's `xgc` and
+  `fixed_point`, and the `handoff` and `scan` that P2 returns. Timing bytes describe the producer.
+  Equal-key rows with differing digests are failed twins.
+- **Tolerance for reuse is zero.** On the laptop, two observed cross-campaign pairs from the async fixture run were
+  reevaluated through the real CPU stand-in at the hundredk shape. Wall electron temperatures differed by 7.73 eV
+  for the nearest eligible pair on all 13 numbers and 9.63 eV for the nearest on the seven tunables. These observations support using exact typed matches; they establish no wider tolerance.
+- **Why the configured campaigns cannot repeat each other's exact profiles.** Campaign a<i> uses seed i
+  (`layer_autonmi.py:729-735`). The parent asks for P Latin-hypercube points at that seed
+  (`parent/evolutionary_loop.py:435-454`). The sampler creates one profile dictionary per point
+  (`parent/steps/step0/profile_generator.py:429-445`). Each initial profile carries six inherited coordinates:
+  `a3`, `a4`, `bcore_Te`, `bcore_ne`, `core_linear_frac_Te` and `core_linear_frac_ne`.
+  A local run of `initialize_population(16, ...)` at seeds 0 and 1 returned 16 distinct six-tuples per seed,
+  with 32 distinct across their union. Over the configured seeds 0 through 19,999, all 320,000 initial
+  six-tuples were distinct (laptop enumeration). Slice offsets preserve those campaign IDs.
+  A survivor retains its profile. Mutation copies a survivor and alters only seven mutable coordinates
+  (`parent/evolutionary_loop.py:1046-1063`); model proposals can replace only those seven
+  (`decide.py:263-269`, `:323-333`, `:890-905`). Thus every descendant inherits one signature from its
+  campaign's initial set. Full typed inputs from two campaigns cannot match on this configuration in either
+  mode, even when the seven tunables are close. The restart branch of `repopulate` (`:1088-1089` in the parent) needs
   an empty survivor list, which a completed generation never gives: `select_survivors` keeps rank 0 whenever the
   population is not empty (`:959`, `:970`, `:977`), and `decide.collect` requires all P results
   (`decide.py:445-448`).
 - **Where repeats are real:** inside a campaign in the generations mode. Survivors go into the next population
   unchanged (`decide.py:313-320`) and every member is queued again (`layer_autonmi.py:1199-1200`). Laptop: 311 of
-  1,280 queued candidates (24.3%) over 40 fixture campaigns, and 24.7% in a second laptop run of 320 campaigns; 0
-  across campaigns in both. In the async mode, 0 and 0 with the stub (laptop); with a real model, not measured (on
-  StellarAI the model filled all seven values in 22,727 of 25,600 proposals of g7); P1 measures it. Near repeats on
-  the seven alone (within 10% of each range) were 2.0% (generations) and 3.7% (async, stub) of proposals; on all 13
-  numbers, 0 (laptop).
+  1,280 proposals (24.3%) in 40 fixture campaigns. Three further fixture runs each had 320 campaigns and
+  10,240 proposals. Generations/stub had 2,531 prior own-campaign exact matches, async/stub and async/model-off
+  zero. All three had zero exact matches to a different campaign completed before proposal. With equal categories
+  and all seven tunables within 10% of their allowed ranges, the prior-other counts were 204, 379 and 291. With
+  all 13 numeric fields at 10% they were zero; at 20% they were 50, 52 and 57. These are laptop measurements.
+  The StellarAI aggregates record how many values the model filled but cannot reconstruct candidate-level proximity.
 - **A reused record would need rebinding** (P2): `candidate_idx` (checked by `decide.collect`,
   `decide.py:445-448`), and `t_start`, `elapsed_seconds`, `touches`, `touch_check`, `cold_start`,
   `worker_peak_rss_mb`, `summary_path`, which describe the original run. `device` stays the producer's, because
@@ -217,7 +225,7 @@ line must stay the ask. The stub's JSON replies are drawn from a generator keyed
 | Handed files `live-p<idx>.json`, `proc-p<idx>.json` (`:598-611`, `:766-780`, `:807-809`) | the pattern | Replaced whole by one writer (tmp, then `os.replace`), read by a tolerant reader. The progress file is its sibling |
 | Campaign lines `agents-p<idx>.jsonl` (`:1093`, `:1598-1607`, `:1640-1642`) | no change | They stay the record's source. A test checks that the last progress file agrees with them |
 | Call sums `CallSums` (`:535-595`), written at the population's end and on SIGTERM (`:802`, `:1665`) | the pattern and the places | P1 rows are written beside them (XC-A2, XC-A3) |
-| `record.write` and `write_record` (`record.py:350-565`; `layer_autonmi.py:2699-2794`) | `write_record` yes, `record.write` no (until P2) | The `cross_campaign` section is added in `write_record` (XC-K4, XC-W2). `results_sha256` is untouched by construction |
+| `record.write` and `write_record` (`record.py:350-565`; `layer_autonmi.py:2699-2794`) | both: shared raw knob serialization in `record.write`, AUTONMI report sections in `write_record` | The `cross_campaign` section is added in `write_record` (XC-K4, XC-W2). Observe-only adds no scientific field to campaign rows; scheduling can affect free-running async outputs |
 | `merge_records` (`merge_records.py:159-239`) | yes | Sums the sections of the launches it reads (XC-K5) and counts repeats across launches within equal namespaces (XC-W3). Its `_validate` already refuses launches whose non-machine knobs or commits differ (`:92-118`). It stops on a launch folder with no `run_record.json` (`:163`, `_read_launch` `:75`), so coverage against the manifest is the entry point's (`status`, `populations`) |
 | The launch script's folders (`run-<i>/`, `launch/stellar_ai_autonmi.sbatch:289`) and node-local `TMPDIR` (`:407`) | yes | It writes the manifest and passes `--xc-dir` (XC-E1). P2's ledger would live under `TMPDIR` (XC-R7) |
 | Flowgentic's task key (`ToolRuntime.submit`) | no | Its key is agent, scope and call: an idempotence guard for one agent's resume, not a shared memo |
@@ -265,7 +273,7 @@ the generations mode.
 |---|---|---|
 | Messages between processes during the run | | 0 |
 | Rows | E x 64 B | 41 MB per run; 1.3 MB per launch at k = 32 |
-| Loop work per evaluation | key 5.0 + result digest 5.9 + append 0.07 us | about 11 us: 7 s per run in all; 0.22 s per launch at k = 32 (0.005% of 4,500 s); 0.16% of one local launch's loop |
+| Loop work per evaluation | key 5.0 + result digest 5.9 + append 0.07 us | about 11 us, excluding the trace digest: 7 s per run in all; 0.22 s per launch at k = 32 (0.005% of 4,500 s); 0.16% of one local launch's loop |
 | Count after the run | 128 ms per 640,000 rows | under 1 s in `write_record` and `merge_records` |
 
 **Data plane, P2 (only if built; one log per writer on node-local disk, synced every 2 s):**
@@ -284,15 +292,15 @@ the generations mode.
 |---|---|---|
 | A plane hook raises | The guard catches it, counts it under its site, turns the plane off in that process (`disabled_at`), writes one warning to stderr | No exception reaches an agent. The campaigns go on as with the plane off |
 | Lost ledger | P0, P1 and P3 have none. A crashed population's P1 rows are lost; `work_keys.coverage.missing` names it. In P2 a lost or unreadable ledger gives misses only | No campaign reads P1. A P2 miss runs the inner loop, as today |
-| Two writers of one key (P2 only; there are no claims) | P2 acts only on a finished (DONE) result, so a candidate still in flight in another campaign is evaluated again. Results are published with `os.link` on the final name, which refuses an existing name (laptop: `FileExistsError`; `os.rename` and `os.replace` keep the last writer instead). A late writer's result is counted as a twin, equal or differing, and never replaces the first | The first published result stays. A stale read costs one repeated evaluation, never a wrong result |
+| Two writers of one key (P2 only; there are no claims) | P2 acts only on a finished (DONE) result, so a candidate still in flight in another campaign is evaluated again. Results are published with `os.link` on the final name, which refuses an existing name (laptop: `FileExistsError`; `os.rename` and `os.replace` keep the last writer instead). A late writer's result is counted as a twin, equal or differing, and never replaces the first | The first published result stays. A stale read can repeat work. A differing twin disqualifies its key/runtime and flags any earlier consumption for review |
 | Dead entry point | In P0a there is none to die: the reader runs on demand. A dead `serve` stops answers only. Directives already issued apply until `expires_t`, then lapse | Campaigns never read the entry point; they read their process's in-memory copy of the newest `directives-v<N>.json` |
 | A process dies or blocks | Its files stop changing. After 3 x `tick_s` without an `end` mark the reader shows its population `lost` and its open campaigns `unknown`. The entry point shows the gap against the manifest | Each population's file has one writer; no other file depends on it |
 | A stuck campaign | No cycle, so no digest. The reader flags it `quiet` after `quiet_s` and shows its liveness detail: inner loops or Monitor calls in flight, model calls answered (section 4.4) | Read from the process, which still ticks |
-| A directive arrives late | It is prospective: a campaign shows it from its next cycle on. A campaign that has ended acks it `closed` | A note cannot change a result already scored, the survival rule, the budget, or stop a campaign. It can change the candidates the Generator's model proposes from then on (async: `decide.async_on_guidance`, `decide.py:636-638`, then `Script._reconcile`; generations: the refill reply, `decide.py:323-333`), and through them later scores and survival. Late means less steering, never a wrong result |
-| Two launches disagree | Each launch is meant to own a disjoint campaign range; nothing enforces it during the run. Each progress file's name carries its writer's pid and start time, so a slice run again or a hand launch never replaces another writer's file. The reader checks every file's `run_id` and range against the manifest and shows overlapping ranges and duplicate writers instead of summing them (`merge_records` refuses overlaps after the run, `merge_records.py:170-172`). The only shared input is the directive set, one writer, a version that only grows, set semantics. For up to one tick two launches may hold different versions; `dir_v` shows it. `merge_records` counts cross-launch repeats within equal P1 namespaces only and reports the namespaces it could not compare; it never refuses a merge for them (a launch on another device merges today, `merge_records.py:112`) | No shared mutable state is reconciled |
+| A directive arrives late | It is prospective: a campaign shows it from its next cycle on. The reader can derive `closed` from a durable terminal observation before issue; an exited population cannot send a later ack | A note cannot change a result already scored, the survival rule, the budget, or stop a campaign. It can change the candidates the Generator's model proposes from then on (async: `decide.async_on_guidance`, `decide.py:636-638`, then `Script._reconcile`; generations: the refill reply, `decide.py:323-333`), and through them later scores and survival. Late means less steering, never a wrong result |
+| Two launches disagree | Each launch is meant to own a disjoint campaign range; nothing enforces it during the run. Each progress file's name carries its writer's pid and start time, so one node can identify distinct process attempts; P4 also requires a host-unique writer ID. The reader checks every file's `run_id` and range against the manifest and shows overlapping ranges and duplicate writers instead of summing them (`merge_records` refuses overlaps after the run, `merge_records.py:170-172`). The only shared input is the directive set, one writer, a version that only grows, set semantics. A delayed reader may skip multiple versions. Show each population's `version_read`, snapshot time and pending target count. `merge_records` counts cross-launch repeats within equal P1 namespaces only and reports the namespaces it could not compare; it never refuses a merge for them (a launch on another device merges today, `merge_records.py:112`) | No shared mutable state is reconciled |
 | Half-written or corrupt file | Writers use tmp, then `os.replace`. Readers skip a file they cannot parse and keep the last good one, as the head does with `live-p<idx>.json` | As the handed files today |
 | Shared file system slow or full | The thread's write takes long or fails. A tick whose previous write has not finished is skipped and counted. An `OSError` from a write is caught in the thread and counted in `write_errors`; the plane stays on. The table keeps the latest state, so the next write catches up. A write that hangs holds only the plane's daemon thread, which is never joined at exit | The loop never waits on I/O, and the process exits as today |
-| SIGTERM | Local runtime only: `Script.cut_short` (XC-A3) flushes once, at most 2 s: the last progress file with the unfinished campaigns marked interrupted, and the rows so far. The record is `interrupted`, exit 143, as today. Under Dragon no flush runs (the head calls `cut_short` only for the Scripts in its own process, `layer_autonmi.py:2254-2274`): the last progress file is the last tick's, the reader shows the population `lost` and its open campaigns `unknown`, and that population's P1 rows are lost | Same path as the call sums (StellarAI ran it locally: interrupted, exit 143) |
+| SIGTERM | Local runtime only: `Script.cut_short` (XC-A3) queues the final partial snapshots; the process gives all such writes one shared 2 s monotonic deadline. Without a successful final write, preserve last-observed facts and show unresolved outcomes as unknown. The record is `interrupted`, exit 143, as today. Under Dragon no flush runs (the head calls `cut_short` only for the Scripts in its own process, `layer_autonmi.py:2254-2274`): the last progress file is the last tick's, the reader shows the population `lost` and its open campaigns `unknown`, and that population's P1 rows are lost | Same path as the call sums (StellarAI ran it locally: interrupted, exit 143) |
 | Clocks on several nodes (P4) | Ages are taken against each file's own `t`, written by its process, and the reader's clock. Skew between nodes shifts ages | Not measured; P4's exit check measures it |
 
 ### 3.7 What the record and the README would say, and the tests that pin "off means unchanged"
@@ -374,11 +382,11 @@ version the campaign applied.
 | `quiet` | state `r` and `now - (t0 + t_last) >= Q`, with `t0` the file's wall-clock epoch | a Coordinator emits only after a scored result (`layer_autonmi.py:1343`) |
 | population `lost` | its file is older than 3 x `tick_s` and has no `end` mark | its process is gone or blocked; its open campaigns become `unknown` |
 | population `late` | `tick_late_ms` above 1,000 ms | the event-loop bind the README's "Open items" describes |
-| run `no_progress` | results in unchanged over 300 s while campaigns run | the servers or the workers are not delivering |
+| run `no_progress` | results in unchanged over 300 s while campaigns run | no score advance observed over the stated coverage and interval |
 
-**At the StellarAI shape no campaign can be `stalled`.** `counts.feasible_agents` is 0 in all 8 launches of the
+**None of the 6,400 measured campaigns triggered this feasible-only stall rule.** `counts.feasible_agents` is 0 in all 8 launches of the
 8 x 800 real run (StellarAI), so `feas` is false everywhere and `infeasible` flags every campaign after `S_R`
-results. The entry point therefore cannot tell a stalled campaign at that shape. In the async mode the
+results in that run. The entry point cannot detect an improvement plateau during this infeasible phase. In the async mode the
 survivors are kept oldest first, not ranked (`decide.async_on_scored`), so no column of the digest shows an
 infeasible campaign improving. A rule for that phase (for example, results since the window's best wall-blend
 rank last improved, a new column computed at the cycle) is open decision 7.
@@ -387,18 +395,18 @@ Liveness detail for a quiet campaign, read on the loop at the next tick (at most
 the sum over its Monitors of `Script.sims[m] - Script.reports[m]` (both modes: `sims` counts at the take,
 `layer_autonmi.py:1248`, `reports` after the report, `:1242`; it includes the Monitor's own note call); in the
 async mode also `Script.running[campaign]` (`:1228`, `:1256`), the inner loops alone; and
-`Script.answered[campaign]` (`:1618`), its model calls answered. So the user can tell "waiting on an inner loop
-or a Monitor call" (in flight > 0) from "waiting on the model" (answered rising between files) from "stuck"
-(neither).
+`Script.answered[campaign]` (`:1618`), its model calls answered. These are observations at the sample time.
+A flat answer count cannot distinguish an outstanding first model call from a blocked role. Report that cause
+as unknown. An unchanged result count over a fresh observed interval supports `no_progress`. A one-shot
+reader lacking comparable history reports insufficient history.
 
 ### 4.5 Directives (P3)
 
-- **Shape and writer.** Each `directives-v<N>.json` in the plane folder holds the whole set at version N (set
-  semantics). Its only writer is the entry point (`guide`, `revoke`), with no lock: it writes
-  `directives-v<N>.json.tmp` (N one above the highest that parses), then `os.link`s it to `directives-v<N>.json`,
-  which refuses an existing name, and removes the temporary name. On `FileExistsError` it rereads the newest set
-  and retries with N + 1. Readers take the highest N that parses. So the version only grows, by construction,
-  and a `guide` killed half way blocks nothing.
+- **Shape and writer.** Version N contains the full directive set. Each `guide` or `revoke` computes its
+  update against the latest validated version for this run, writes it into a fresh private inode (exclusive
+  creation), closes it and links it to the N+1 final name. Unlink only that private name. On collision,
+  reread the winner and recompute the update. Committed versions stay immutable. Report an unreadable final
+  version; set a bounded retry deadline. Readers can miss intermediate versions while their I/O is delayed.
 - **Kinds.** `note` only: text of at most `note_chars` characters. Every note has `expires_t` (default
   `--ttl-s 1800`); the user renews a note by issuing it again. A dead entry point therefore lapses to today's
   behaviour.
@@ -410,16 +418,18 @@ or a Monitor call" (in flight > 0) from "waiting on the model" (answered rising 
 - **Applying, async** (XC-C5, XC-C6): at the cycle, after `async_on_scored` and before the survivors go out, the
   Coordinator takes `note_for`. With a note it calls `decide.guidance_messages(cst, rows, knobs, note=text)`,
   which adds the line `"Run-wide guidance from the operator: " + text` before `GUIDANCE_ASK`. The first time a
-  campaign applies a version, the plane records an ack: `applied`, or `not_applicable` when `llm.mode` is off
+  campaign actually dispatches a request carrying the version, record one `applied` ack, or `not_applicable` when `llm.mode` is off
   (no prompt exists). `async_memory` and `async_finish` pick named keys (`decide.py:788-791`, `:794-803`), so
   nothing else sees the note.
 - **Applying, generations** (XC-C7, XC-C8): `:1173` sends both `initialize` (g = 0) and `repopulate`. A live
   note rides only on a repopulate message, as `msg["note"]`; `refill_messages` shows it as one line before the
   ask. The ack is `applied` only when a request carrying the note was sent. Otherwise it is `not_applicable`:
   with `outer.generator: mutation`, with no non-survivor slot to fill (`decide.py:325-326`), or when the call
-  fell back or was refused as too long (`layer_autonmi.py:1536-1571`).
-- **Acks for ended campaigns.** When a plane reads a new version, each of its campaigns already in state `d`,
-  `f` or `i` is acked `closed`.
+  was refused before dispatch. A sent request that later fails still counts as dispatched; record its fallback.
+- **Closed and missing targets.** Derive `closed` only from terminal evidence predating this issue. Targets
+  that expired, were revoked before their next poll, or lack a fresh writer stay unconfirmed unless their
+  disposition was observed. Keep the last-seen version and sample time. A later version never proves that an
+  earlier version was applied.
 - **Provenance.** With `steer` on, a campaign line gains `directives: [{"id", "v", "at_n", "cycle"}]` only when
   the campaign applied one (added at XC-C3). That key changes `results_sha256` on purpose: a steered campaign is a
   different experiment.
@@ -432,26 +442,30 @@ or a Monitor call" (in flight > 0) from "waiting on the model" (answered rising 
 
 ### 4.6 The work-key tally (P1)
 
-- **At XC-W1** (the Monitor's resume, both modes, on the loop): `WorkKeys.add(ns, campaign, call, result, now)`
-  computes the key and the result digest (section 3.1) and appends one row. About 11 us (laptop parts).
+- **At XC-W1** (the Monitor's resume, both modes): `WorkKeys.add(ns, campaign, call, result, tr, now)` receives
+  both outputs of `trace.split`. It computes the key and section 3.1's scalar and trace digest and appends one row.
+  The section 3.5 estimate of 11 us uses the measured scalar-only parts. Measure the additional trace work with
+  capture on at the intended shape before accepting the loop-time budget.
 - **Row (64 B)**: `key` u8, `digest` u8, `campaign` u4 (i of a<i>), `candidate` u2 (`candidate_idx`), `generation`
   u2, `t_queued` f4 (`call["t0"]` minus the table's `t0`), `t_back` f4 (now minus `t0`), `sim_s` f4
-  (`result["elapsed_seconds"]`), `seven` f4 x 7. Columns are `array` objects in memory.
+  (`result["elapsed_seconds"]`), `seven` f4 x 7. Columns are `array` objects in memory, grouped by namespace. The file header maps each group to its namespace.
 - **Saved** at the population's end (XC-A2) or on SIGTERM in the local runtime (XC-A3; under Dragon the interrupted
   populations' rows are lost) as `keys-p<index>.npz` beside the call sums, with a header: `{"v": 1, "t0", "first",
-  "count", "namespaces": [{"ns": "<32 hex>", "inner_loop", "sim", "device", "miniapp", "parent"}]}`.
-- **Counted** in `write_record` (XC-W2): rows are sorted by key, then by `t_back`. Each row after the first of its
+  "count", "namespaces": [{"ns": "<32 hex>", "inner_loop", "sim", "monitor", "device", "miniapp", "parent"}]}`.
+- **Counted** in `write_record` (XC-W2): within each namespace, rebase each population's elapsed timestamps to a common epoch before sorting by key and completion time. Each row after the first of its
   key is a **repeat** and gets two flags: an earlier row of the key from its own campaign (`same_campaign`), and an
   earlier row of the key from another campaign (`other_campaign`). A row can carry both, and each scope counts the
   rows with its flag. An **ideal hit** is the same with "earlier" meaning back before this row was queued (`t_back`
   of that row < `t_queued` of this one): what a ledger with no delay, consulted at the queue, could have served.
+  A worker-dispatch lookup can see a completion between queue and dispatch, or miss a DONE still waiting for
+  synchronization. Measure actual P2 visibility separately.
   `would_save_sim_s` sums the ideal hits' own inner-loop seconds. The **twin check** compares each repeat's digest
   with the first row's: `twins.equal` or `twins.differ`. The rows are kept as one `work_keys.npz` and the
   per-population files are removed with the call sums.
 - **Across launches** (XC-W3): `merge_records` concatenates the launches' `work_keys.npz` (times made absolute by
   each header's `t0`) and counts repeats within equal namespaces only; it reports the namespaces it could not
   compare and never refuses the merge for them. It reports `other_launch`, a subset of `other_campaign`: rows
-  whose earlier row of another campaign came from another launch.
+  that have at least one qualifying predecessor from another launch. At finite timestamp precision, a tie does not establish strict-before order. Cross-node clock uncertainty can leave additional hits unresolved.
 - **The gate to P2.** Build P2 only if, in a run of the shape someone intends to run, the merged
   `ideal_hits.other_campaign` (which includes `other_launch`) is at least 1% of the evaluations **and** the lowest
   launch's `speed.sim_bound_ratio` is at least 0.8 (the merged record gives that figure as a spread,
@@ -467,26 +481,29 @@ or a Monitor call" (in flight > 0) from "waiting on the model" (answered rising 
 - **Ledger.** One `plane.Ledger` per process: an index `dict[bytes, int]` from a 128-bit key to a row of a numpy
   table (state, device, writer, campaign, candidate, time, inner-loop seconds, result digest), touched only on
   the loop. One append-only log per writer (`ledger-<writer>.log`, 64-byte DONE records only) and
-  one folder of result files, under `$TMPDIR/xc-<run name>/` on node-local disk (XC-R7). The plane's thread
+  one folder of result files, under `$TMPDIR/xc-<manifest run id>/` on node-local disk (XC-R7). The plane's thread
   appends its own records and reads the others' every `sync_s` (2 s), and hands them to the loop with
   `loop.call_soon_threadsafe`.
 - **Publish** at XC-W1: each result and its trace go to a fresh `<key>.<writer>.<n>.tmp` (opened with
   `O_EXCL`), which is closed, then linked to `<key>.json` with `os.link`, which refuses an existing name. The
   temporary name is removed whether the link succeeded or not, so no later write can truncate a published
-  result through a shared inode. The DONE record is appended after. The first result stays; a later one is a
-  twin. Each record carries its writer's epoch (start time and pid).
+  result through a shared inode. Compare a losing attempt with the winner. A conflicting scientific twin
+  disqualifies the key/runtime from further reuse when observed. Append DONE only after a verified winner
+  exists. Record its producing attempt and run id; a crash before DONE leaves a cache miss.
 - **No claims.** The lookup acts only on a DONE record, so a claim would change nothing. A candidate in flight in
   another campaign is evaluated again and counted as a twin (section 3.6). No compare-and-set is needed, so plain
   files work.
 - **Lookup at take time** in the task tool's `prepare` (XC-R3, `layer_autonmi.py:1098-1103`): a fresh index read
-  when the runner submits the Monitor's `Simulate`. On a DONE of another campaign (`reuse: other`, the default
-  once built) on the same device kind, it adds `reuse={"key", "path"}` to the worker's kwargs, as it adds `knobs`
-  and `monitor` today. On CUDA only once P1's twin check on the GPUs passed.
-- **In the worker** (XC-R1 `sim.evaluate`, XC-R2 `sim.evaluate_fixture`; `evaluate_placed` calls `evaluate`): read
-  the stored result, check that its params, sim knobs and the two `monitor` knobs of the namespace equal these
-  exactly, and return it rebound (section 3.1)
-  with `touch_check: "reused"`, `touches` zero and `reused: {"key", "campaign", "candidate", "sim_s"}`. On any
-  mismatch or read error, run the inner loop and say `reuse_refused`. The fixture needs its own site: with
+  when the runner submits the Monitor's `Simulate`. With opt-in `reuse: other`, a DONE from a different campaign
+  adds `reuse={"key", "path"}` beside `knobs` and `monitor`. The configured default remains `off`.
+- **In the worker** (XC-R1 `sim.evaluate`, XC-R2 `sim.evaluate_fixture`; `evaluate_placed` calls `evaluate`):
+  compare the sorted JSON bytes of the full typed params, effective sim and trace configuration, and versioned
+  evaluator, input assets, numerical runtime and observed device class. Validate the stored payload checksum
+  and required trace sections/completeness. Recompute on missing or mismatched fields or if `keep_artifacts`
+  requests files that cannot be supplied under this candidate's identity. Otherwise return the rebound result
+  with `touch_check: "reused"`, zero touches and `reused: {"key", "campaign", "candidate", "sim_s"}`. The consuming
+  Monitor scores its trace locally. Only the producer reports physical stage times, touches and cold starts.
+  On a refused hit evaluate normally and record `reuse_refused`. The fixture needs its own site: with
   `--sim fixture` the tool runs `sim.evaluate_fixture` (`run.py:289-292`, used at `layer_autonmi.py:1095`).
 - **Counts.** Each candidate stays one engine task, so `simulations_match`, the Monitor invariant and
   `each_candidate_evaluated_once` hold. `decide.on_evaluated` (XC-R5) and `decide.async_on_scored` (XC-R6) leave
@@ -494,8 +511,8 @@ or a Monitor call" (in flight > 0) from "waiting on the model" (answered rising 
   reuse is never a touch-check failure (`record.py:537-538`, `:558-559`). The record gives `logical` (the
   evaluations the campaigns consumed, `counts.sims` as today), `physical` (inner loops run) and `reused` apart.
   The campaign line gains `n_reused`.
-- **The async mode** changes order with reuse (a reused result returns sooner), so it is compared through the
-  replay (`tests/async_replay.py`), never by `results_sha256`.
+- **The async mode** can change order when a reused result returns sooner. Check budgets and each run's own
+  replay. For exact paired scientific comparisons, replay identical arrivals, model replies and fallbacks.
 
 ## 5. Interface (planned)
 
@@ -512,9 +529,9 @@ class Plane:                                        # one per process (Fusion.pl
     def attach(self, script) -> "Table"             # XC-A1: one table (and WorkKeys) per population
     def start(self, loop) -> None                   # once per process: the tick task and the xc thread
     def note_for(self, campaign: str, now: float) -> "Note | None"   # XC-C5, XC-C7: from memory, no I/O
-    def ack(self, campaign: str, version: int, outcome: str) -> None # applied | not_applicable | closed
+    def ack(self, campaign: str, version: int, outcome: str) -> None # actual dispatch | known inapplicability; reader derives closed
     def population_ended(self, table: "Table") -> None   # XC-A2: last file; the last one stops the plane
-    def flush(self, timeout_s: float = 2.0) -> None      # XC-A3 (SIGTERM), XC-A4's finally
+    def flush(self, timeout_s: float = 2.0) -> None      # XC-A3 queues local rows; the 2 s deadline is shared at XC-A4
     def section(self) -> dict                            # XC-K4: the record's cross_campaign section
 
 class Table:                                        # one population's campaigns; index int(c[1:]) - first
@@ -525,12 +542,12 @@ class Table:                                        # one population's campaigns
     def snapshot(self, script, quiet: list[str]) -> dict                     # on the loop, at the tick
 
 class WorkKeys:                                     # P1: one population's rows
-    def add(self, ns: bytes, campaign: int, call: dict, result: dict, now: float) -> None   # XC-W1
+    def add(self, ns: bytes, campaign: int, call: dict, result: dict, tr: dict | None, now: float) -> None   # XC-W1
     def write(self, path: Path) -> None                                      # XC-A2, XC-A3
 
 def namespace(sim: str, sim_knobs: dict, monitor: dict, device_kind: str, code: dict) -> bytes   # 16 B, each scale
 def work_key(ns: bytes, params: dict) -> int        # blake2b-8 of ns + json.dumps(params, sort_keys=True)
-def result_digest(result: dict) -> int              # blake2b-8: result without EXEC_FIELDS; trace xgc, fixed_point
+def result_digest(result: dict, tr: dict | None) -> int  # blake2b-8 of scalar projection and non-timing trace
 def repeats(files: list[Path], launches: list[dict] | None = None) -> dict   # XC-W2, XC-W3
 
 # src/fusion_miniapp/entry_point.py
@@ -552,22 +569,24 @@ Changed signatures (planned): `decide.guidance_messages(cst, rows, knobs, note="
 
 ## 6. Data shapes (planned)
 
-**`xc/manifest.json`**, written once by the launch script (XC-E1), or by the head when none exists (XC-A4): the
-writer writes `manifest.json.tmp`, then `os.link`s it to `manifest.json` (which refuses an existing name), so no
-reader ever sees an empty or partial manifest. On `FileExistsError` the head reads it (retrying while it does
-not parse), adopts its run id, and refuses `--xc-dir` when its mode, budget or ranges disagree with this
-launch's:
+**`xc/manifest.json`.** Before launch, the supervisor seeds a fresh run ID and the complete set of expected
+slice and population ranges. A single hand launch can seed a new folder. Hand launches sharing a folder
+must receive the same expected run ID and layout (an existing folder with the same shape can be stale).
+A creator closes a fresh private temporary inode before linking to the final name, then unlinks its private
+name. A losing creator validates the winner's ID and complete layout. A corrupt winner produces an explicit
+coverage error after a bounded read; no creator can overwrite it. Multi-slice hand launches supply this run ID in
+`--xc-run-id`; a single new run creates one and the supervisor passes it to each ordinary slice.
 
 ```json
 {"v": 1, "run_id": "<16 hex>", "mode": "async", "budget": 32, "population": 16, "generations": 2,
- "campaigns": {"first": 0, "count": 20000}, "launches": [{"slice": [0, 8], "first": 0, "count": 2500}, "..."],
+ "campaigns": {"first": 0, "count": 20000}, "launches": [{"slice": [0, 8], "first": 0, "count": 2500, "population_ranges": [[0, 1250], [1250, 2500]]}, "..."],
  "runtime": "local", "written_t": "<float>", "by": "launch_script"}
 ```
 
 **`xc/progress-a<first>-<count>-<pid>-<start>.json`**, one per population, replaced whole every `tick_s`. The name
 carries the campaign range and its writer's pid and start time, so a slice run again or a hand launch with the
 same range writes its own file. The reader checks each file's `run_id` and range against the manifest and shows
-overlapping ranges and duplicate writers instead of summing them:
+overlapping ranges and duplicate writers instead of summing them. A conflicting range stays unknown until an operator designates an owner or starts a fresh run. P4 requires host-unique writer IDs across nodes:
 
 ```json
 {"v": 1, "run_id": "<16 hex>", "seq": "<int>", "t": "<float>", "t0": "<float>", "first": 0, "count": 625,
@@ -579,12 +598,12 @@ overlapping ranges and duplicate writers instead of summing them:
            "cycles": [], "t_last": [], "dir_v": []},
  "failed": {"a42": {"role": "monitor", "error": "<at most 200 characters>"}},
  "quiet": [["a7", "<age_s>", "<in_flight>", "<running or null>", "<answered>"]],
- "directives": {"version_read": 0, "acks": {"3": {"applied": 0, "not_applicable": 0, "closed": 0}}}}
+ "directives": {"version_read": 0, "read_t": "<epoch seconds>", "acks": {"3": {"applied": 0, "not_applicable": 0}}}}
 ```
 
 `dir_v` and `directives` exist only with `steer`. The values above are placeholders, not measurements.
 
-**`xc/directives-v<N>.json`** (P3; written only by the entry point, one file per version, never rewritten):
+**`xc/directives-v<N>.json`** (P3; written only by the entry point, one immutable file per version; readers verify `run_id` and version before using it):
 
 ```json
 {"v": 1, "run_id": "<16 hex>", "version": 7, "written_t": "<float>",
@@ -608,7 +627,7 @@ overlapping ranges and duplicate writers instead of summing them:
                 "other_campaign": 0.0}, "twins": {"equal": 0, "differ": 0},
                 "coverage": {"populations": "<int>", "missing": []}, "file": "work_keys.npz"},
   "directives": [{"id": "d3", "version": 3, "text": "...", "issued_t": "<float>", "expires_t": "<float>",
-                  "targets": {"all": true}, "applied": 0, "not_applicable": 0, "closed": 0}]}
+                  "targets": {"all": true}, "applied": 0, "not_applicable": 0, "closed": 0, "unconfirmed": 0}]}
 ```
 
 The folder is named relative to the run, never as a path. Each scope of `repeats`, `ideal_hits` and
@@ -651,7 +670,8 @@ copy confirmed it: a key added to `record` broke that test, a new section did no
 - `merge_records._validate` then requires launches to agree on `steer`, `note_chars` and `reuse`
   (`merge_records.py:111-118`).
 - **Layer flag**, not a knob (it is a path, so it is not in the record): `--xc-dir DIR` (XC-A5), default
-  `<out>/xc`, refused without `cross_campaign.observe`.
+  `<out>/xc`, refused without `cross_campaign.observe`. `--xc-run-id ID` pins the expected run identity for
+  a hand launch joining a group. The regular supervisor supplies it with `--xc-dir`.
 - **Launch script**: `FUSION_XC=1` (XC-E1), default unset. Unset, the script behaves as today, and its dry-run
   lines are unchanged.
 - **Entry point options** (they change no campaign): `--dir`, `--json`, `--stall-results` (default P),
@@ -660,14 +680,15 @@ copy confirmed it: a key added to `record` broke that test, a new section did no
 ## 9. Record, README and tests
 
 **Off.** With every plane knob at its default, the `cross_campaign` section is left out of `rec["knobs"]`
-(`record.py:519`, dropped in `write_record`), of `campaign.json` and of the app's parameters (both written by
+at the shared `record.write` serializer (`record.py:519`; LangGraph/Academy call it directly at `run.py:438`), of `campaign.json` and of the app's parameters (both written by
 AUTONMI's `Campaign` from `definition.knobs`, so the `Fusion` definition drops it there). An off record is
 today's schema. Nothing else changes: no folder, no thread, no file, no request, no campaign line, no
 `results_sha256`. `ADDED_KNOBS` still lets `compare_records` and `merge_records` read a missing section as the
 defaults when an on record meets an off or older one (`merge_records.py:118`).
 
-**On.** Section 6's `cross_campaign` section. With `observe` and `work_keys` only, `agents.jsonl` and
-`results_sha256` are unchanged in the generations mode. In the async mode `results_sha256` differs between identical
+**On.** Section 6 reports enabled features. With observe and work_keys only, the scientific path and campaign schema
+stay unchanged. With the same profile inputs, model replies and fallbacks, the generations reference cases match.
+For exact async equality also fix the order of arrivals. For independent async runs `results_sha256` can differ between identical
 runs even with no plane (laptop: two identical fixture runs gave `c4be6240...` and `0d94b6b1...`; the docstring of
 `tests/test_layer_autonmi.py:1849`, `compare_records.ASYNC_VARY`), so an async run with the plane on is compared as
 any two async runs are: through `compare_records` and the replay. With `steer`, campaign lines carry `directives`
@@ -690,26 +711,26 @@ knobs, or `:15` fails.
 
 | Phase | Test | Asserts |
 |---|---|---|
-| P0a | `test_off_makes_no_plane` | knobs at defaults: no `xc/` folder, no thread named `xc`; no `cross_campaign` key at the record's top level, in `rec["knobs"]`, in `campaign.json` or in a line; `compare_records` finds the record equal to one written before the section existed |
+| P0a | `test_off_makes_no_plane` | knobs at defaults: no `xc/` folder, no thread named `xc`; no `cross_campaign` key at the record's top level, in raw `rec["knobs"]` for all three layers, or in AUTONMI campaign lines, `campaign.json`, the launcher manifest/report parameters and the Parameters checkpoint event; `compare_records` finds the record equal to one written before the section existed |
 | P0a | `test_observe_changes_no_result` | the generations-mode reference cases with `observe`: the same `results_sha256`, counts, parent files and request bodies as off |
 | P0a | `test_observe_replays_the_async_order` | an async run with `observe`: every campaign replays (`tests/async_replay.py`) |
 | P0a | `test_progress_ends_as_the_lines` | the last file per population: done equals the lines without error, failed the error lines; `n` and `best` equal each line's `n_sims` and `best.te_core_metric` |
-| P0a | `test_plane_errors_never_reach_an_agent` | a raise injected at each guard site in turn: the run passes with the results of an off run; `errors` counts the site; `disabled_at` is set |
+| P0a | `test_plane_errors_never_reach_an_agent` | a raise injected at each guard site in turn: the matched-arrival, matched-reply control retains the same scientific results; `errors` counts the site; `disabled_at` is set |
 | P0a | `test_unwritable_plane_folder` | the run passes; `write_errors` > 0; the plane stays on (`off` false) |
 | P0a | `test_sigterm_writes_the_last_files` | local runtime only: exit 143; the unfinished campaigns are `i` in the last files |
 | P0a | `test_unflushable_write_never_holds_exit` | a write that hangs: the process still exits within the flush timeout, and the abandoned write is counted |
 | P0a | `test_entry_point_flags` | on written files: the rules of section 4.4, coverage against the manifest, overlapping ranges and duplicate writers shown and not summed, age on every answer |
 | P0a | `test_run_py_layers_refuse_the_plane` | LangGraph and Academy refuse each plane knob with `KnobError` |
-| P0b | `test_two_slices_one_plane_folder` | two `--slice` launches with one `--xc-dir`: `status` totals equal the merged record's; in `status`, a slice that never started shows as missing; two heads racing for the manifest agree on one run id |
+| P0b | `test_two_slices_one_plane_folder` | two `--slice` launches with one `--xc-dir`: `status` totals equal the merged record's; in `status`, a slice that never started shows as missing; two heads racing on private inodes preserve the winning run ID and bytes; a stale same-shape folder is rejected |
 | P0b | the launch script's dry run (as `tests/test_launch.py`) | with `FUSION_XC=1` the manifest is written and `--xc-dir` passed; without it the dry-run lines are unchanged |
 | P1 | `test_work_keys_count_the_survivors` | generations fixture, P 4, G 2: `repeats.same_campaign` and `ideal_hits.same_campaign` equal the survivors queued again; `other_campaign` 0; `twins.differ` 0; `results_sha256` equal to off. Async: 0 and 0 |
-| P1 | `test_work_key_tracks_the_numbers` | the key's params bytes equal what `evaluate_fixture` hashes; the key differs exactly when the record's numbers differ (the cases of section 3.1) |
+| P1 | `test_work_key_tracks_the_numbers` | The key preserves the fixture's typed params bytes. With fixed scalars, changing only trace content changes the digest through the real XC-W1 path; changing only trace timings preserves it. |
 | P1 | `test_work_keys_merge` | two slices merged: `other_launch` 0; rows equal the evaluations; two slices with different namespaces still merge, and their namespaces are reported as not compared |
 | P3 | `test_note_reaches_the_prompts` | with `tests/fake_vllm.py`: the note's line just before `GUIDANCE_ASK` (async) and before the refill ask (generations), cut to `note_chars`; with `steer` on and no file, request bodies byte-equal to off; the prompt bound holds at `note_chars`; the stub's replies are unchanged |
-| P3 | `test_note_expires_and_is_revoked` | expiry and revoke clear it at the next cycle; one ack per campaign and version; `not_applicable` with `llm.mode: off` and with `outer.generator: mutation`; `closed` for ended campaigns |
+| P3 | `test_note_expires_and_is_revoked` | concurrent guide/revoke updates preserve both operations and the immutable prior version; include a killed writer, a skipped version and an exited target; one dispatch ack per campaign/version; `not_applicable` with `llm.mode: off` and with `outer.generator: mutation`; `closed` for ended campaigns |
 | P3 | `test_steer_off_ignores_directives` | a directives file with `steer` off changes nothing |
-| P2 | `test_reuse_keeps_every_count` | generations fixture, `reuse: campaign`: `reused` equals the ideal same-campaign hits; `verify` and AUTONMI's checks pass; `best` and the per-generation metrics equal off; `logical = physical + reused` |
-| P2 | `test_reuse_refuses_a_bad_result`, `test_publication_never_replaces` | a stored result whose params differ is refused and evaluated; of two writers of one key the first result stays and the second is a counted twin |
+| P2 | `test_reuse_keeps_every_count` | Generations fixture, `reuse: campaign`: dispatch sees only published completions visible then. Test a completion between queue and dispatch and a DONE delayed past dispatch. `verify`, AUTONMI checks, per-generation science and `logical = physical + reused` hold. |
+| P2 | `test_reuse_refuses_a_bad_result`, `test_publication_never_replaces` | Wrong typed params, runtime, payload, trace or missing requested artifacts cause local evaluation. Same-writer retry and competing-writer publication preserve the first payload. A differing twin disqualifies the key when observed. |
 | P2 | async reuse | compared through `tests/async_replay.py` |
 
 ## 10. Phases, each with its exit check
@@ -719,21 +740,27 @@ knobs, or `:15` fails.
 | **P0a** observe, one process (laptop) | `plane.Plane`, `Table`, the guard, the tick and thread, the progress file, `entry_point` as a reader; knobs; record section (XC-C1 to C4, A1 to A4, K1 to K4) | The suite at 357 passed and 1 skipped plus the P0a tests (`results_sha256` equal to off in the generations-mode reference cases). On a 2,000-campaign async fixture run with the stub, 3 runs each with and without `observe`: `compare_records` finds no result difference (counts and invariants), every campaign replays (`tests/async_replay.py`), and the head's event-loop lag p95 and the agent phase are within run-to-run noise. Async `results_sha256` is not compared: it differs between identical runs with no plane (section 9) |
 | **P0b** observe, several launches (laptop, then StellarAI) | the manifest and `--xc-dir` (XC-E1, XC-A5), the sections summed in `merge_records` (XC-K5), coverage against the manifest in the entry point; `serve` and `ask` as options | Laptop: the P0b tests. StellarAI: `FUSION_LAUNCHES=8`, 8 x 800 campaigns, real inner loop, `observe` on: passes as on 2026-11-25; agent phase within noise of those records; event-loop lag p95 within 1 ms of the 6-7 ms measured then; `status` answered throughout; its final totals equal the merged record's campaigns and `counts.sims` |
 | **P1** measure (laptop, then StellarAI) | `WorkKeys`, `repeats` (XC-W1 to W4, XC-R2's encoding, XC-A2, XC-A3) | Laptop: the P1 tests. StellarAI: the P0b run with `work_keys` on: rows equal the evaluations, full coverage, every counter recorded; one generations-mode real run on the GPUs (400 campaigns) for the CUDA twin check (`twins.differ`). The gate of section 4.6 is evaluated and its result written here and in the README. Expected (inferred): `other_campaign` and `other_launch` 0 in the async mode |
-| **P3** steer with notes (after P0b; beside P1; it does not wait for P2) | `guide`, `revoke`, the directive set, acks (XC-C5 to C8) | Laptop: the P3 tests. StellarAI: a note to every campaign at t = 300 s is shown by at least 95% of the campaigns still running within 2 Coordinator cycles (from `dir_v`); event-loop lag as in P0b; the record's prompt tokens per call rise by about the note's share and no more |
+| **P3** steer with notes (after P0b; beside P1; it does not wait for P2) | `guide`, `revoke`, the directive set, acks (XC-C5 to C8) | Laptop: the P3 tests. StellarAI: a note to every campaign at t = 300 s is shown by at least 95% of targets with two eligible prompt opportunities after their first observed version, within those opportunities; separately report all targeted, dead, ineligible and unconfirmed counts and issue-to-dispatch latency; event-loop lag as in P0b; measure added prompt tokens, changed reply lengths and elapsed time at matched load |
 | **P2** reuse, gated | `Ledger`, `prepare`'s lookup, the worker's check and rebinding, the counts (XC-R1 to R7, XC-W1's publish) | Only if P1's gate passes. Laptop: the P2 tests. StellarAI: the CUDA twin check passes first (or P2 stays on CPU and fixture); then a run whose saved inner-loop seconds exceed the plane's added work |
 | P3b stop, budget, priority | not in this plan | A separate design with a handshake over the B-tied bounds (XC-C9 to C12) and revised checks |
 | **P4** several campaign nodes | nothing new until the campaign side spans nodes | The same reader on the shared run folder, `tick_s` 30 if the file system needs it; coverage complete; `lost` and `quiet` behave when one node's launch is killed; clock skew measured |
 
+The P1/P2 CUDA exit requires at least one controlled same-input, complete-trace twin for each eligible actual
+GPU/runtime class. Require equal scalar and required non-timing trace outputs and zero differing twins. Missing
+coverage leaves that class ineligible for reuse.
+
 ## 11. Open decisions
 
-1. **Should the 20,000 campaigns share one plasma shape?** Today each campaign draws its own six shape values
-   from its seed, so the run searches 20,000 different problems and campaigns can never repeat each other's
-   evaluations. If the intent is 20,000 searchers on one design problem, the six should be one draw for the run.
-   Then cross-campaign repeats become possible and a ledger has work to do. This changes the science.
-2. **May reuse skip re-evaluating survivors in the generations mode?** IGNOS's loop re-evaluates them
-   (`parent/evolutionary_loop.py:1403`). Skipping saves about a quarter of the inner loops there, but the
-   mini-app's inner-loop count would no longer match IGNOS's. This plan's default, once P2 exists, is
-   `reuse: other` (only another campaign's results), so survivors are re-evaluated as IGNOS does.
+1. **Should independent campaigns share initial conditions?** Today each starts with its own 16 full profiles
+   and 16 shape signatures. Fixing one six-value signature everywhere, sharing a pool of signatures while
+   drawing each campaign's seven tunables independently, and sharing 16 complete initial profiles are three
+   different designs. Only the last guarantees repeated full initial inputs. Each changes the sampling
+   distribution and requires an explicit experiment version and fresh measurements of exact matches.
+2. **May reuse skip re-evaluating survivors in the generations mode?** IGNOS re-evaluates survivors
+   (`parent/evolutionary_loop.py:1403`). The corresponding repeated inputs represented about a quarter of the
+   local generations fixture evaluations. The knob defaults to `reuse: off` in every phase. If the P2 gate
+   passes, `reuse: other` is the first opt-in policy. It excludes a campaign's own prior results;
+   `reuse: campaign` or `run` would permit them. Each reused result still counts as one logical evaluation.
 3. **On GPUs, is a reused result acceptable if two evaluations of one profile differ at float noise?**
    `GraphNet.forward` uses `index_add_` (`standins.py:68`) with no deterministic setting, so CUDA results may
    differ between runs (not measured). P1's twin check measures it. If the answer is no, P2 runs on CPU and the
@@ -746,8 +773,8 @@ knobs, or `:15` fails.
    tokens)?
 6. **Stop, budget and priority directives.** A later design (P3b, sites XC-C9 to C12), or never, with whole-run
    stop left to SIGTERM?
-7. **A stall rule while nothing is feasible.** At the StellarAI shape every campaign is infeasible, so `stalled`
-   never fires (section 4.4). Should the digest gain a column for that phase (for example, results since the
+7. **A stall rule while nothing is feasible.** All 6,400 campaigns in the measured eight-launch run were
+   infeasible, so the feasible-only `stalled` rule did not fire (section 4.4). Should the digest gain a column for that phase (for example, results since the
    window's best wall-blend rank last improved, computed at the cycle), or is "infeasible after `S_R` results"
    enough for the entry point?
 
@@ -804,7 +831,7 @@ are those of `000300c`, before the comments went in.
 
 | File | Place | Why it matters |
 |---|---|---|
-| `parent/evolutionary_loop.py` | `initialize_population` (`:435-454`), `mutate_params` (`:1046-1063`), `repopulate` and its restart seed (`:1072-1104`, `:1089`) | where candidates are born: why the six frozen values differ per campaign and never change. The restart branch is unreachable after a completed generation (section 3.1). A "move" or a diversity draw would belong here, in IGNOS itself |
+| `parent/evolutionary_loop.py` | `initialize_population` (`:435-454`), `mutate_params` (`:1046-1063`), `repopulate` and its restart seed (`:1072-1104`, `:1089`) | where each initial profile receives its six frozen values and each descendant inherits one local profile's values. The restart branch is unreachable after a completed generation (section 3.1). A "move" or a diversity draw would belong here, in IGNOS itself |
 | `parent/evolutionary_loop.py` | `run_evolutionary_loop`'s evaluation of the whole population each generation (`:1403`) | why the generations mode repeats about 24% (decision 2) |
 | `parent/evolutionary_loop.py` | `_evaluate_single_candidate` (`:546`), `_evaluate_validated_candidate` (`:459`) | where a memo would sit in IGNOS; the mini-app's equivalent is XC-R1 |
 | `parent/evolutionary_loop.py` | `update_best_result` (`:1000-1041`), `select_survivors` (`:929`) | the feasible-gain rule that `gain_n` reads; survival, which nothing in this plan steers |
